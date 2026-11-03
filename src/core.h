@@ -82,4 +82,22 @@ static inline unsigned ctz64(uint64_t x)
     return x ? (unsigned)__builtin_ctzll(x) : 64u;
 }
 
+static inline unsigned clz64(uint64_t x)
+{
+    return x ? (unsigned)__builtin_clzll(x) : 64u;
+}
+
+static inline uint64_t rotl64(uint64_t x, unsigned k)
+{
+    return (x << (k & 63u)) | (x >> ((64u - k) & 63u));
+}
+
+static inline uint64_t wyhash64(uint64_t a, uint64_t b)
+{
+    a ^= 0x2d358dccaa6c78a5ULL;
+    b ^= 0x8bb84b93962eacc9ULL;
+    __uint128_t r = (__uint128_t)a * (__uint128_t)b;
+    return mix64((uint64_t)r ^ (uint64_t)(r >> 64));
+}
+
 #endif

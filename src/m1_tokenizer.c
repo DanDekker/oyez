@@ -280,6 +280,31 @@ static const M1FixedPiece k_landmark_pieces[M1_LANDMARK_COUNT] = {
     PIECE("group relative policy", M1_BOUNDARY_NONE),
     PIECE("inference cluster", M1_BOUNDARY_NONE),
     PIECE("frontier model", M1_BOUNDARY_NONE),
+    /* 24 Google DeepMind, Global Finance, Politics, Constitutional Law & Sports Landmarks */
+    PIECE("Google DeepMind", M1_BOUNDARY_NONE),
+    PIECE("AlphaFold 3", M1_BOUNDARY_NONE),
+    PIECE("AlphaProof", M1_BOUNDARY_IDENT),
+    PIECE("AlphaGeometry", M1_BOUNDARY_IDENT),
+    PIECE("AlphaZero", M1_BOUNDARY_IDENT),
+    PIECE("FunSearch", M1_BOUNDARY_IDENT),
+    PIECE("Isomorphic Labs", M1_BOUNDARY_NONE),
+    PIECE("Hugging Face", M1_BOUNDARY_NONE),
+    PIECE("Supreme Court", M1_BOUNDARY_NONE),
+    PIECE("appropriations bill", M1_BOUNDARY_NONE),
+    PIECE("general election", M1_BOUNDARY_NONE),
+    PIECE("coalition government", M1_BOUNDARY_NONE),
+    PIECE("no-confidence vote", M1_BOUNDARY_NONE),
+    PIECE("export controls", M1_BOUNDARY_NONE),
+    PIECE("credit default swap", M1_BOUNDARY_NONE),
+    PIECE("leveraged buyout", M1_BOUNDARY_NONE),
+    PIECE("Champions League", M1_BOUNDARY_NONE),
+    PIECE("Premier League", M1_BOUNDARY_NONE),
+    PIECE("Formula 1", M1_BOUNDARY_NONE),
+    PIECE("Grand Prix", M1_BOUNDARY_NONE),
+    PIECE("World Cup", M1_BOUNDARY_NONE),
+    PIECE("Super Bowl", M1_BOUNDARY_NONE),
+    PIECE("Olympic Games", M1_BOUNDARY_NONE),
+    PIECE("Grand Slam", M1_BOUNDARY_NONE),
     PIECE("", M1_BOUNDARY_NONE),
 };
 
@@ -309,6 +334,7 @@ static int is_ident_byte(uint8_t byte) {
 static int boundary_allows(const uint8_t *data, size_t len, size_t pos, const M1FixedPiece *piece) {
   size_t end = pos + piece->len;
   if(piece->len == 0 || end > len) return 0;
+  if(piece->len >= 2u && (uint8_t)piece->text[1] != data[pos + 1u]) return 0;
   if(memcmp(data + pos, piece->text, piece->len) != 0) return 0;
   if(piece->boundary == M1_BOUNDARY_IDENT) {
     if(pos > 0 && is_ident_byte(data[pos - 1])) return 0;
@@ -322,15 +348,70 @@ static int boundary_allows(const uint8_t *data, size_t len, size_t pos, const M1
   return 1;
 }
 
+typedef struct {
+  const M1FixedPiece *piece;
+  uint32_t token_id;
+} M1DispatchItem;
+
+typedef struct {
+  M1DispatchItem items[64];
+  uint32_t count;
+} M1DispatchBucket;
+
+static M1DispatchBucket g_m1_dispatch[256];
+static int g_m1_dispatch_ready = 0;
+
+static void m1_dispatch_init(void) {
+  if(g_m1_dispatch_ready) return;
+  memset(g_m1_dispatch, 0, sizeof(g_m1_dispatch));
+
+  for(uint32_t i = 0; i < M1_LANDMARK_COUNT - 1u; ++i) {
+    const M1FixedPiece *p = &k_landmark_pieces[i];
+    if(p->len == 0) continue;
+    uint8_t b0 = (uint8_t)p->text[0];
+    M1DispatchBucket *bk = &g_m1_dispatch[b0];
+    if(bk->count < 64u) {
+      bk->items[bk->count].piece = p;
+      bk->items[bk->count].token_id = M1_LANDMARK_BASE + i;
+      bk->count++;
+    }
+  }
+  for(uint32_t i = 0; i < M1_PRIMITIVE_COUNT; ++i) {
+    const M1FixedPiece *p = &k_primitive_pieces[i];
+    if(p->len == 0) continue;
+    uint8_t b0 = (uint8_t)p->text[0];
+    M1DispatchBucket *bk = &g_m1_dispatch[b0];
+    if(bk->count < 64u) {
+      bk->items[bk->count].piece = p;
+      bk->items[bk->count].token_id = M1_PRIMITIVE_BASE + i;
+      bk->count++;
+    }
+  }
+  /* Stable insertion sort descending by piece->len so first match is strictly longest */
+  for(uint32_t b = 0; b < 256u; ++b) {
+    M1DispatchBucket *bk = &g_m1_dispatch[b];
+    for(uint32_t i = 1u; i < bk->count; ++i) {
+      M1DispatchItem key = bk->items[i];
+      uint32_t j = i;
+      while(j > 0 && bk->items[j - 1u].piece->len < key.piece->len) {
+        bk->items[j] = bk->items[j - 1u];
+        j--;
+      }
+      bk->items[j] = key;
+    }
+  }
+  g_m1_dispatch_ready = 1;
+}
+
 static int match_fixed_piece(const uint8_t *data,
                              size_t len,
                              size_t pos,
                              uint32_t *out_token,
                              size_t *out_len) {
-  uint32_t best_token = 0;
-  size_t best_len = 0;
-
-  if(data[pos] == '\n' || data[pos] == '\r') {
+  uint8_t b0 = data[pos];
+  if(b0 == '\n' || b0 == '\r') {
+    uint32_t best_token = 0;
+    size_t best_len = 0;
     for(uint32_t i = 0; i < M1_INDENT_COUNT; ++i) {
       const M1FixedPiece *piece = &k_indent_pieces[i];
       if(piece->len > best_len && boundary_allows(data, len, pos, piece)) {
@@ -343,28 +424,17 @@ static int match_fixed_piece(const uint8_t *data,
       *out_len = best_len;
       return 1;
     }
+    return 0;
   }
 
-  for(uint32_t i = 0; i < M1_LANDMARK_COUNT - 1u; ++i) {
-    const M1FixedPiece *piece = &k_landmark_pieces[i];
-    if(piece->len > best_len && boundary_allows(data, len, pos, piece)) {
-      best_token = M1_LANDMARK_BASE + i;
-      best_len = piece->len;
+  const M1DispatchBucket *bk = &g_m1_dispatch[b0];
+  for(uint32_t i = 0; i < bk->count; ++i) {
+    const M1FixedPiece *piece = bk->items[i].piece;
+    if(boundary_allows(data, len, pos, piece)) {
+      *out_token = bk->items[i].token_id;
+      *out_len = piece->len;
+      return 1;
     }
-  }
-
-  for(uint32_t i = 0; i < M1_PRIMITIVE_COUNT; ++i) {
-    const M1FixedPiece *piece = &k_primitive_pieces[i];
-    if(piece->len > best_len && boundary_allows(data, len, pos, piece)) {
-      best_token = M1_PRIMITIVE_BASE + i;
-      best_len = piece->len;
-    }
-  }
-
-  if(best_len > 0) {
-    *out_token = best_token;
-    *out_len = best_len;
-    return 1;
   }
   return 0;
 }
@@ -425,6 +495,7 @@ static int append_bpe_span(const M1Tokenizer *tokenizer,
 }
 
 static int build_bpe_training_buffer(const uint8_t *data, size_t len, Buffer *out) {
+  m1_dispatch_init();
   buffer_init(out);
   if(len == 0) return 0;
 
@@ -453,6 +524,7 @@ static int build_bpe_training_buffer(const uint8_t *data, size_t len, Buffer *ou
 }
 
 void m1_tokenizer_init(M1Tokenizer *tokenizer) {
+  m1_dispatch_init();
   memset(tokenizer, 0, sizeof(*tokenizer));
   tokenizer->target_vocab_size = M1_FIXED_VOCAB_SIZE;
   sha256_hex("oyez.m1.tokenizer.empty", 23u, tokenizer->sha256);
