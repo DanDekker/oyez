@@ -168,7 +168,7 @@ static int append_normalized_ws(Buffer *out, const char *s, size_t len) {
   return 0;
 }
 
-int markup_strip_html(const char *html, size_t len, Buffer *out) {
+static int markup_strip_html_depth(const char *html, size_t len, Buffer *out, int depth) {
   if(!out) return -1;
   if(!html || len == 0) return 0;
 
@@ -178,18 +178,28 @@ int markup_strip_html(const char *html, size_t len, Buffer *out) {
   while(i < len) {
     if(i + 9u <= len && memcmp(html + i, "<![CDATA[", 9u) == 0) {
       const char *end = ci_find(html + i + 9u, len - (i + 9u), "]]>");
-      size_t cdata_len = end ? (size_t)(end - (html + i + 9u)) : (len - (i + 9u));
-      Buffer sub;
-      buffer_init(&sub);
-      markup_strip_html(html + i + 9u, cdata_len, &sub);
-      if(sub.len > 0) {
-        buffer_append(&raw, " ", 1u);
-        buffer_append(&raw, sub.data, sub.len);
-        buffer_append(&raw, " ", 1u);
-      }
-      buffer_free(&sub);
       if(!end) break;
-      i = (size_t)((end + 3u) - html);
+      if(depth < 1) {
+        size_t cdata_len = (size_t)(end - (html + i + 9u));
+        Buffer sub;
+        buffer_init(&sub);
+        markup_strip_html_depth(html + i + 9u, cdata_len, &sub, depth + 1);
+        if(sub.len > 0) {
+          buffer_append(&raw, " ", 1u);
+          buffer_append(&raw, sub.data, sub.len);
+          buffer_append(&raw, " ", 1u);
+        }
+        buffer_free(&sub);
+        i = (size_t)((end + 3u) - html);
+        continue;
+      } else {
+        i += 9u;
+        continue;
+      }
+    }
+    if(depth > 0 && i + 3u <= len && memcmp(html + i, "]]>", 3u) == 0) {
+      buffer_append(&raw, " ", 1u);
+      i += 3u;
       continue;
     }
     if(i + 4u <= len && memcmp(html + i, "<!--", 4u) == 0) {
@@ -248,6 +258,10 @@ int markup_strip_html(const char *html, size_t len, Buffer *out) {
   int rc = append_normalized_ws(out, decoded.data ? decoded.data : "", decoded.len);
   buffer_free(&decoded);
   return rc;
+}
+
+int markup_strip_html(const char *html, size_t len, Buffer *out) {
+  return markup_strip_html_depth(html, len, out, 0);
 }
 
 char *markup_clean_cstr(const char *html) {
@@ -338,6 +352,18 @@ static int find_xml_tag(const char *xml,
                         const char **out_after_close) {
   size_t pos = 0;
   while(pos < len) {
+    if(pos + 9u <= len && memcmp(xml + pos, "<![CDATA[", 9u) == 0) {
+      const char *end = ci_find(xml + pos + 9u, len - (pos + 9u), "]]>");
+      if(!end) return 0;
+      pos = (size_t)((end + 3u) - xml);
+      continue;
+    }
+    if(pos + 4u <= len && memcmp(xml + pos, "<!--", 4u) == 0) {
+      const char *end = ci_find(xml + pos + 4u, len - (pos + 4u), "-->");
+      if(!end) return 0;
+      pos = (size_t)((end + 3u) - xml);
+      continue;
+    }
     if(xml[pos] == '<' && pos + 1u < len && xml[pos + 1u] != '/' && xml[pos + 1u] != '!' &&
        xml[pos + 1u] != '?') {
       if(tag_name_matches(xml + pos + 1u, len - (pos + 1u), tag_name)) {
@@ -369,6 +395,18 @@ static int find_xml_tag(const char *xml,
         size_t search = gt + 1u;
         int depth = 1;
         while(search < len) {
+          if(search + 9u <= len && memcmp(xml + search, "<![CDATA[", 9u) == 0) {
+            const char *end = ci_find(xml + search + 9u, len - (search + 9u), "]]>");
+            if(!end) break;
+            search = (size_t)((end + 3u) - xml);
+            continue;
+          }
+          if(search + 4u <= len && memcmp(xml + search, "<!--", 4u) == 0) {
+            const char *end = ci_find(xml + search + 4u, len - (search + 4u), "-->");
+            if(!end) break;
+            search = (size_t)((end + 3u) - xml);
+            continue;
+          }
           if(xml[search] == '<' && search + 1u < len) {
             if(xml[search + 1u] == '/' && search + 2u < len) {
               if(tag_name_matches(xml + search + 2u, len - (search + 2u), tag_name)) {
@@ -603,6 +641,7 @@ uint64_t parse_timestamp_ms(const char *str) {
                 tzm = (p[0] - '0') * 10 + (p[1] - '0');
               }
             }
+            if(tzh > 23 || tzm > 59) return 0u;
             tz_offset_sec = sign * (tzh * 3600 + tzm * 60);
           }
         }
@@ -650,6 +689,7 @@ uint64_t parse_timestamp_ms(const char *str) {
         int sign = (*p == '-') ? -1 : 1;
         int tzh = (p[1] - '0') * 10 + (p[2] - '0');
         int tzm = (p[3] - '0') * 10 + (p[4] - '0');
+        if(tzh > 23 || tzm > 59) return 0u;
         tz_offset_sec = sign * (tzh * 3600 + tzm * 60);
       } else if(ci_starts_with(p, strlen(p), "EDT")) {
         tz_offset_sec = -4 * 3600;
@@ -663,8 +703,16 @@ uint64_t parse_timestamp_ms(const char *str) {
     }
   }
 
-  if(year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 ||
+  if(year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1 ||
      hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60) {
+    return 0u;
+  }
+  static const int k_days_in_month[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int max_day = k_days_in_month[month - 1];
+  if(month == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
+    max_day = 29;
+  }
+  if(day > max_day) {
     return 0u;
   }
   int64_t days = days_from_civil(year, (unsigned)month, (unsigned)day);
