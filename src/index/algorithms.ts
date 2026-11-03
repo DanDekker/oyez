@@ -1,57 +1,89 @@
 import type { Article, ScoredArticle } from "../types.ts";
+import { popcnt32 } from "./bitset.ts";
 
-const MASK64 = 0xffffffffffffffffn;
+/**
+ * Fast 64-bit SplitMix hash represented as two 32-bit unsigned integers [hi, lo]
+ * Uses Math.imul for zero-allocation 32-bit mixing.
+ */
+export function hashToken64Words(token: string): [number, number] {
+  const bHash = Bun.hash(token);
+  let lo: number;
+  let hi: number;
+  if (typeof bHash === "bigint") {
+    lo = Number(bHash & 0xffffffffn) >>> 0;
+    hi = Number((bHash >> 32n) & 0xffffffffn) >>> 0;
+  } else {
+    lo = bHash >>> 0;
+    hi = Math.imul(lo ^ (lo >>> 16), 0x85ebca6b) >>> 0;
+  }
 
-function splitMix64(seed: bigint): bigint {
-  let z = (seed + 0x9e3779b97f4a7c15n) & MASK64;
-  z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & MASK64;
-  z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & MASK64;
-  return (z ^ (z >> 31n)) & MASK64;
+  // Extra avalanche pass across hi/lo
+  lo = Math.imul(lo ^ (hi >>> 13), 0xc2b2ae35) >>> 0;
+  hi = Math.imul(hi ^ (lo >>> 15), 0x27d4eb2f) >>> 0;
+  lo = (lo ^ (hi >>> 16)) >>> 0;
+  return [hi, lo];
 }
 
-function hashToken64(token: string): bigint {
-  let h = BigInt(Bun.hash(token)) & MASK64;
-  return splitMix64(h);
+export function computeSimHash64Words(
+  termWeights: Map<string, number>
+): [number, number] {
+  const accum = new Float64Array(64);
+
+  for (const [term, weight] of termWeights.entries()) {
+    const [hi, lo] = hashToken64Words(term);
+    for (let bit = 0; bit < 32; bit++) {
+      accum[bit] += (lo >>> bit) & 1 ? weight : -weight;
+      accum[bit + 32] += (hi >>> bit) & 1 ? weight : -weight;
+    }
+  }
+
+  let loOut = 0;
+  let hiOut = 0;
+  for (let bit = 0; bit < 32; bit++) {
+    if (accum[bit] > 0) loOut |= 1 << bit;
+    if (accum[bit + 32] > 0) hiOut |= 1 << bit;
+  }
+
+  return [hiOut >>> 0, loOut >>> 0];
+}
+
+export function formatSimHash64Hex(hi: number, lo: number): string {
+  return (
+    (hi >>> 0).toString(16).padStart(8, "0") +
+    (lo >>> 0).toString(16).padStart(8, "0")
+  );
+}
+
+export function parseSimHash64Words(hex: string): [number, number] {
+  if (!hex) return [0, 0];
+  const padded = hex.padStart(16, "0");
+  const hi = parseInt(padded.slice(0, 8), 16) >>> 0;
+  const lo = parseInt(padded.slice(8, 16), 16) >>> 0;
+  return [hi, lo];
+}
+
+export function simHashHammingDistanceWords(
+  hiA: number,
+  loA: number,
+  hiB: number,
+  loB: number
+): number {
+  return popcnt32(hiA ^ hiB) + popcnt32(loA ^ loB);
 }
 
 /**
  * 64-bit Charikar Locality-Sensitive SimHash Fingerprint
- * Maps a weighted document feature vector into a 64-bit signature where
- * cosine similarity is preserved under bitwise Hamming distance.
  */
 export function computeSimHash64(termWeights: Map<string, number>): string {
-  const accum = new Float64Array(64);
-
-  for (const [term, weight] of termWeights.entries()) {
-    const h = hashToken64(term);
-    for (let bit = 0; bit < 64; bit++) {
-      const isSet = Number((h >> BigInt(bit)) & 1n);
-      accum[bit] += isSet === 1 ? weight : -weight;
-    }
-  }
-
-  let fingerprint = 0n;
-  for (let bit = 0; bit < 64; bit++) {
-    if (accum[bit] > 0) {
-      fingerprint |= 1n << BigInt(bit);
-    }
-  }
-
-  return fingerprint.toString(16).padStart(16, "0");
+  const [hi, lo] = computeSimHash64Words(termWeights);
+  return formatSimHash64Hex(hi, lo);
 }
 
 export function simHashHammingDistance(hexA: string, hexB: string): number {
   if (!hexA || !hexB) return 64;
-  let xor =
-    (BigInt("0x" + hexA.padStart(16, "0")) ^
-      BigInt("0x" + hexB.padStart(16, "0"))) &
-    MASK64;
-  let count = 0;
-  while (xor > 0n) {
-    xor &= xor - 1n;
-    count++;
-  }
-  return count;
+  const [hiA, loA] = parseSimHash64Words(hexA);
+  const [hiB, loB] = parseSimHash64Words(hexB);
+  return popcnt32(hiA ^ hiB) + popcnt32(loA ^ loB);
 }
 
 export function simHashSimilarity(hexA: string, hexB: string): number {
@@ -61,8 +93,6 @@ export function simHashSimilarity(hexA: string, hexB: string): number {
 
 /**
  * Submodular Maximum Marginal Relevance (MMR) Diversification
- * Maximizes f(S) = sum_i Rel(d_i) - penalty(redundancy) via greedy selection:
- *   argmax_{d in R \ S} [ lambda * Rel_norm(d) - (1 - lambda) * max_{s in S} Sim(d, s) ]
  */
 export function diversifyWithMMR(
   candidates: ScoredArticle[],
@@ -76,28 +106,46 @@ export function diversifyWithMMR(
   const clampedLambda = Math.min(Math.max(lambda, 0), 1);
   const maxScore = Math.max(...candidates.map((c) => c.score), 1e-6);
 
-  const selected: ScoredArticle[] = [candidates[0]];
-  const remaining = candidates.slice(1);
+  // Pre-parse SimHash words once for all candidates
+  const n = candidates.length;
+  const hiArr = new Uint32Array(n);
+  const loArr = new Uint32Array(n);
+  for (let i = 0; i < n; i++) {
+    const [hi, lo] = parseSimHash64Words(candidates[i].article.simhash64);
+    hiArr[i] = hi;
+    loArr[i] = lo;
+  }
 
-  const pairSimilarity = (a: Article, b: Article): number => {
-    const lshSim = simHashSimilarity(a.simhash64, b.simhash64);
-    const sameFeed = a.feedId === b.feedId ? 0.25 : 0;
-    const sameCountry = a.country === b.country ? 0.1 : 0;
-    const sameRegion = a.region === b.region ? 0.08 : 0;
-    return Math.min(1, lshSim * 0.65 + sameFeed + sameCountry + sameRegion);
-  };
+  const selectedIndices: number[] = [0];
+  const used = new Uint8Array(n);
+  used[0] = 1;
 
-  while (selected.length < limit && remaining.length > 0) {
-    let bestIdx = 0;
+  while (selectedIndices.length < limit && selectedIndices.length < n) {
+    let bestIdx = -1;
     let bestMmr = -Infinity;
 
-    for (let i = 0; i < remaining.length; i++) {
-      const cand = remaining[i];
+    for (let i = 1; i < n; i++) {
+      if (used[i]) continue;
+      const cand = candidates[i];
       const normRel = cand.score / maxScore;
+      const candArt = cand.article;
+      const cHi = hiArr[i];
+      const cLo = loArr[i];
 
       let maxRedundancy = 0;
-      for (const sel of selected) {
-        const sim = pairSimilarity(cand.article, sel.article);
+      for (let s = 0; s < selectedIndices.length; s++) {
+        const sIdx = selectedIndices[s];
+        const selArt = candidates[sIdx].article;
+        const dist =
+          popcnt32(cHi ^ hiArr[sIdx]) + popcnt32(cLo ^ loArr[sIdx]);
+        const lshSim = (64 - dist) / 64;
+        const sameFeed = candArt.feedId === selArt.feedId ? 0.25 : 0;
+        const sameCountry = candArt.country === selArt.country ? 0.1 : 0;
+        const sameRegion = candArt.region === selArt.region ? 0.08 : 0;
+        const sim = Math.min(
+          1,
+          lshSim * 0.65 + sameFeed + sameCountry + sameRegion
+        );
         if (sim > maxRedundancy) maxRedundancy = sim;
       }
 
@@ -109,11 +157,12 @@ export function diversifyWithMMR(
       }
     }
 
-    const chosen = remaining.splice(bestIdx, 1)[0];
-    selected.push(chosen);
+    if (bestIdx === -1) break;
+    used[bestIdx] = 1;
+    selectedIndices.push(bestIdx);
   }
 
-  return selected;
+  return selectedIndices.map((idx) => candidates[idx]);
 }
 
 export interface PageRankEntry {
@@ -138,7 +187,8 @@ export interface BipartitePageRankResult {
 }
 
 /**
- * Power-Iteration Eigenvector Centrality / PageRank on the Entity-Article Graph
+ * CSR / TypedArray Power-Iteration Eigenvector Centrality (PageRank)
+ * Uses flat integer node IDs and Float64Array vectors for cache-local convergence.
  */
 export function computeEntityPageRank(
   articles: Article[],
@@ -155,42 +205,43 @@ export function computeEntityPageRank(
     };
   }
 
-  // Nodes: article nodes ("doc:<id>"), entity nodes ("ent:<name>"), topic nodes ("top:<name>"), country nodes ("geo:<code>")
-  const adj = new Map<string, string[]>();
-  const addEdge = (u: string, v: string) => {
-    let listU = adj.get(u);
-    if (!listU) {
-      listU = [];
-      adj.set(u, listU);
-    }
-    listU.push(v);
+  const nodeToId = new Map<string, number>();
+  const idToNode: string[] = [];
+  const adj: number[][] = [];
+  const docMap = new Map<number, Article>();
 
-    let listV = adj.get(v);
-    if (!listV) {
-      listV = [];
-      adj.set(v, listV);
+  const getNodeId = (key: string): number => {
+    let id = nodeToId.get(key);
+    if (id === undefined) {
+      id = idToNode.length;
+      nodeToId.set(key, id);
+      idToNode.push(key);
+      adj.push([]);
     }
-    listV.push(u);
+    return id;
   };
 
-  const docMap = new Map<string, Article>();
+  const addEdge = (u: number, v: number) => {
+    adj[u].push(v);
+    adj[v].push(u);
+  };
+
   for (const art of articles) {
-    const docNode = `doc:${art.id}`;
-    docMap.set(docNode, art);
+    const docId = getNodeId(`doc:${art.id}`);
+    docMap.set(docId, art);
 
     for (const ent of art.entities.organizationsAndPeople) {
-      addEdge(docNode, `ent:${ent}`);
+      addEdge(docId, getNodeId(`ent:${ent}`));
     }
     for (const top of art.entities.topics) {
-      addEdge(docNode, `top:${top}`);
+      addEdge(docId, getNodeId(`top:${top}`));
     }
     for (const geo of art.entities.mentionedCountries) {
-      addEdge(docNode, `geo:${geo}`);
+      addEdge(docId, getNodeId(`geo:${geo}`));
     }
   }
 
-  const nodes = Array.from(adj.keys());
-  const N = nodes.length;
+  const N = idToNode.length;
   if (N === 0) {
     return {
       topEntities: [],
@@ -200,26 +251,26 @@ export function computeEntityPageRank(
     };
   }
 
-  let ranks = new Map<string, number>();
+  let ranks = new Float64Array(N);
+  let nextRanks = new Float64Array(N);
   const initVal = 1 / N;
-  for (const u of nodes) ranks.set(u, initVal);
-
+  ranks.fill(initVal);
   const teleport = (1 - damping) / N;
 
   for (let iter = 0; iter < iterations; iter++) {
-    const nextRanks = new Map<string, number>();
-    for (const u of nodes) nextRanks.set(u, teleport);
-
-    for (const u of nodes) {
-      const neighbors = adj.get(u)!;
+    nextRanks.fill(teleport);
+    for (let u = 0; u < N; u++) {
+      const neighbors = adj[u];
       const deg = neighbors.length;
       if (deg === 0) continue;
-      const share = (damping * (ranks.get(u) ?? 0)) / deg;
-      for (const v of neighbors) {
-        nextRanks.set(v, (nextRanks.get(v) ?? teleport) + share);
+      const share = (damping * ranks[u]) / deg;
+      for (let k = 0; k < deg; k++) {
+        nextRanks[neighbors[k]] += share;
       }
     }
+    const tmp = ranks;
     ranks = nextRanks;
+    nextRanks = tmp;
   }
 
   const entitiesList: PageRankEntry[] = [];
@@ -235,9 +286,10 @@ export function computeEntityPageRank(
     centralityScore: number;
   }> = [];
 
-  for (const [node, score] of ranks.entries()) {
-    const degree = adj.get(node)?.length ?? 0;
-    const scaled = Number((score * 1000).toFixed(4));
+  for (let u = 0; u < N; u++) {
+    const node = idToNode[u];
+    const degree = adj[u].length;
+    const scaled = Number((ranks[u] * 1000).toFixed(4));
     if (node.startsWith("ent:")) {
       entitiesList.push({ key: node.slice(4), score: scaled, degree });
     } else if (node.startsWith("top:")) {
@@ -245,7 +297,7 @@ export function computeEntityPageRank(
     } else if (node.startsWith("geo:")) {
       countriesList.push({ key: node.slice(4), score: scaled, degree });
     } else if (node.startsWith("doc:")) {
-      const art = docMap.get(node);
+      const art = docMap.get(u);
       if (art) {
         articlesList.push({
           id: art.id,
