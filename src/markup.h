@@ -53,6 +53,7 @@ typedef struct {
 int markup_decode_entities(const char *input, size_t len, Buffer *out);
 int markup_strip_html(const char *html, size_t len, Buffer *out);
 char *markup_clean_cstr(const char *html);
+uint64_t parse_timestamp_ms(const char *str);
 
 int feed_parse(const char *raw, size_t len, const char *base_url, ParsedFeed *out);
 void feed_free(ParsedFeed *feed);

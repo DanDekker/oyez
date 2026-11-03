@@ -87,6 +87,8 @@ int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_insert
   for(size_t i = 0; i < parsed.item_count; ++i) {
     ParsedFeedItem *it = &parsed.items[i];
     int ins = 0;
+    uint64_t pub_ms = parse_timestamp_ms(it->published_at);
+    if(pub_ms == 0u) pub_ms = (uint64_t)wall_time_ms();
     if(engine_ingest_article(engine,
                              feed->id,
                              it->guid,
@@ -96,7 +98,7 @@ int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_insert
                              it->summary,
                              it->content_html,
                              it->published_at,
-                             wall_time_ms(),
+                             pub_ms,
                              it->image_url,
                              (const char *const *)it->categories,
                              it->category_count,
@@ -168,6 +170,8 @@ static void *poll_worker_main(void *arg) {
     for(size_t i = 0; i < parsed.item_count; ++i) {
       ParsedFeedItem *it = &parsed.items[i];
       int ins = 0;
+      uint64_t pub_ms = parse_timestamp_ms(it->published_at);
+      if(pub_ms == 0u) pub_ms = (uint64_t)wall_time_ms();
       if(engine_ingest_article(pool->engine,
                                feed_id,
                                it->guid,
@@ -177,7 +181,7 @@ static void *poll_worker_main(void *arg) {
                                it->summary,
                                it->content_html,
                                it->published_at,
-                               wall_time_ms(),
+                               pub_ms,
                                it->image_url,
                                (const char *const *)it->categories,
                                it->category_count,
@@ -876,16 +880,48 @@ int http_handle_request(ServerContext *ctx,
     buffer_text(out_json, "{\"extracted\":{\"title\":"); json_cstr(out_json, ex.title);
     buffer_text(out_json, ",\"byline\":"); json_cstr(out_json, ex.byline);
     buffer_text(out_json, ",\"excerpt\":"); json_cstr(out_json, ex.excerpt);
+    buffer_text(out_json, ",\"site_name\":"); json_cstr(out_json, ex.site_name);
+    buffer_text(out_json, ",\"published_time\":"); json_cstr(out_json, ex.published_time);
+    buffer_text(out_json, ",\"lead_image_url\":"); json_cstr(out_json, ex.lead_image_url);
     buffer_text(out_json, ",\"text_content\":"); json_cstr(out_json, ex.text_content);
     buffer_text(out_json, ",\"markdown\":"); json_cstr(out_json, ex.markdown);
     buffer_format(out_json, ",\"word_count\":%u,\"reading_time_minutes\":%u},\"entities\":{\"news_type\":",
                   ex.word_count, ex.reading_time_minutes);
     json_cstr(out_json, news_type_slug(ent.news_type));
-    buffer_text(out_json, ",\"topics\":");
+    buffer_text(out_json, ",\"clearance\":");
+    json_cstr(out_json, clearance_level_slug(ent.clearance));
+    buffer_format(out_json, ",\"opsec_score\":%.2f,\"fiscal_stance\":", ent.opsec_score);
+    json_cstr(out_json, fiscal_stance_slug(ent.fiscal_stance));
+    buffer_format(out_json, ",\"macro_score\":%.2f,\"topics\":", ent.macro_score);
     serialize_ontology_mask_array(out_json, ent.direct_ontology_mask);
     buffer_text(out_json, ",\"category_closure\":");
     serialize_ontology_mask_array(out_json, ent.closure_ontology_mask);
-    buffer_text(out_json, "}}");
+    buffer_text(out_json, ",\"countries\":[");
+    for(size_t i = 0; i < ent.country_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.countries[i]);
+    }
+    buffer_text(out_json, "],\"organizations\":[");
+    for(size_t i = 0; i < ent.org_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.organizations[i]);
+    }
+    buffer_text(out_json, "],\"cves\":[");
+    for(size_t i = 0; i < ent.cve_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.cves[i]);
+    }
+    buffer_text(out_json, "],\"assets\":[");
+    for(size_t i = 0; i < ent.asset_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.assets[i]);
+    }
+    buffer_text(out_json, "],\"fiscal_events\":[");
+    for(size_t i = 0; i < ent.fiscal_event_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.fiscal_events[i]);
+    }
+    buffer_text(out_json, "]}}");
 
     readability_free(&ex);
     buffer_free(&fetched);

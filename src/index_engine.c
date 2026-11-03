@@ -1039,6 +1039,51 @@ size_t engine_story_clusters(const OyezEngine *engine,
   return ccount;
 }
 
+static void maybe_add_formal_concept(const OyezEngine *engine,
+                                     const BitSet *ext,
+                                     size_t min_support,
+                                     FormalConcept *out_concepts,
+                                     size_t *count,
+                                     size_t max_concepts) {
+  if(*count >= max_concepts) return;
+  uint32_t supp = bitset_popcount(ext);
+  if(supp < min_support) return;
+
+  uint32_t intent_onto = 0xFFFFFFFFu;
+  uint32_t intent_reg = 0xFFFFFFFFu;
+  uint32_t intent_nt = 0xFFFFFFFFu;
+  FormalConcept fc;
+  memset(&fc, 0, sizeof(fc));
+
+  for(size_t w = 0; w < ext->word_cap; ++w) {
+    uint64_t word = ext->words[w];
+    while(word) {
+      uint32_t bit = ctz64(word);
+      uint32_t slot = (uint32_t)(w * 64u + bit);
+      word &= (word - 1ULL);
+      if(slot >= engine->article_count) continue;
+      const ArticleRecord *art = &engine->articles[slot];
+      intent_onto &= art->closure_ontology_mask;
+      intent_reg &= (1u << (uint32_t)art->feed_region);
+      intent_nt &= (1u << (uint32_t)art->news_type);
+      if(fc.extent_count < 64u) fc.extent_slots[fc.extent_count++] = art->id;
+    }
+  }
+
+  for(size_t k = 0; k < *count; ++k) {
+    if(out_concepts[k].intent_ontology_mask == intent_onto &&
+       out_concepts[k].extent_count == fc.extent_count) {
+      return;
+    }
+  }
+
+  fc.intent_ontology_mask = intent_onto;
+  fc.intent_region_mask = intent_reg;
+  fc.intent_news_type_mask = intent_nt;
+  fc.stability_score = (double)supp * (double)popcnt64((uint64_t)intent_onto);
+  out_concepts[(*count)++] = fc;
+}
+
 size_t engine_formal_concepts(const OyezEngine *engine,
                               size_t min_support,
                               FormalConcept *out_concepts,
@@ -1047,50 +1092,27 @@ size_t engine_formal_concepts(const OyezEngine *engine,
   if(min_support < 1u) min_support = 1u;
 
   size_t count = 0;
-  /* Compute Galois closures for single & pair ontology attributes */
+  /* 1. Single-attribute Galois closures */
   for(uint32_t a = 1u; a < ONTOLOGY_NODE_COUNT && count < max_concepts; ++a) {
-    const BitSet *ext_a = &engine->by_closure_ontology[a];
-    uint32_t supp = bitset_popcount(ext_a);
-    if(supp < min_support) continue;
-
-    /* Galois prime operator A' -> A'': intersect masks of all objects in extent */
-    uint32_t intent_onto = 0xFFFFFFFFu;
-    uint32_t intent_reg = 0xFFFFFFFFu;
-    uint32_t intent_nt = 0xFFFFFFFFu;
-    FormalConcept fc;
-    memset(&fc, 0, sizeof(fc));
-
-    for(size_t w = 0; w < ext_a->word_cap; ++w) {
-      uint64_t word = ext_a->words[w];
-      while(word) {
-        uint32_t bit = ctz64(word);
-        uint32_t slot = (uint32_t)(w * 64u + bit);
-        word &= (word - 1ULL);
-        if(slot >= engine->article_count) continue;
-        const ArticleRecord *art = &engine->articles[slot];
-        intent_onto &= art->closure_ontology_mask;
-        intent_reg &= (1u << (uint32_t)art->feed_region);
-        intent_nt &= (1u << (uint32_t)art->news_type);
-        if(fc.extent_count < 64u) fc.extent_slots[fc.extent_count++] = art->id;
-      }
-    }
-
-    int dup = 0;
-    for(size_t k = 0; k < count; ++k) {
-      if(out_concepts[k].intent_ontology_mask == intent_onto &&
-         out_concepts[k].extent_count == fc.extent_count) {
-        dup = 1;
-        break;
-      }
-    }
-    if(dup) continue;
-
-    fc.intent_ontology_mask = intent_onto;
-    fc.intent_region_mask = intent_reg;
-    fc.intent_news_type_mask = intent_nt;
-    fc.stability_score = (double)supp * (double)popcnt64((uint64_t)intent_onto);
-    out_concepts[count++] = fc;
+    maybe_add_formal_concept(engine, &engine->by_closure_ontology[a], min_support, out_concepts, &count, max_concepts);
   }
+  /* 2. Pairwise-attribute intersection Galois closures (A ^ B)' -> (A ^ B)'' */
+  BitSet inter;
+  bitset_init(&inter);
+  for(uint32_t a = 5u; a < ONTOLOGY_NODE_COUNT && count < max_concepts; ++a) {
+    if(bitset_popcount(&engine->by_closure_ontology[a]) < min_support) continue;
+    for(uint32_t b = a + 1u; b < ONTOLOGY_NODE_COUNT && count < max_concepts; ++b) {
+      if(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)b) ||
+         ontology_has_morphism((OntologyNodeId)b, (OntologyNodeId)a)) {
+        continue;
+      }
+      if(bitset_popcount(&engine->by_closure_ontology[b]) < min_support) continue;
+      if(bitset_clone(&engine->by_closure_ontology[a], &inter) != 0) continue;
+      bitset_and_inplace(&inter, &engine->by_closure_ontology[b]);
+      maybe_add_formal_concept(engine, &inter, min_support, out_concepts, &count, max_concepts);
+    }
+  }
+  bitset_free(&inter);
   return count;
 }
 
@@ -1110,6 +1132,10 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
   size_t found = 0;
   int by_country = (pivot_dimension && strcmp(pivot_dimension, "mentioned_country") == 0);
   int by_type = (pivot_dimension && strcmp(pivot_dimension, "news_type") == 0);
+  int by_asset = (pivot_dimension && strcmp(pivot_dimension, "asset") == 0);
+  int by_org = (pivot_dimension && strcmp(pivot_dimension, "organization") == 0);
+  int by_cve = (pivot_dimension && strcmp(pivot_dimension, "cve") == 0);
+  int by_event = (pivot_dimension && strcmp(pivot_dimension, "fiscal_event") == 0);
 
   for(size_t i = 0; i < engine->article_count && found < max_pairs; ++i) {
     const ArticleRecord *a = &engine->articles[i];
@@ -1124,6 +1150,42 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
           for(size_t cb = 0; cb < b->mentioned_country_count; ++cb) {
             if(strcmp(a->mentioned_countries[ca], b->mentioned_countries[cb]) == 0) {
               witness = a->mentioned_countries[ca];
+              break;
+            }
+          }
+        }
+      } else if(by_asset) {
+        for(size_t aa = 0; aa < a->mentioned_asset_count && !witness; ++aa) {
+          for(size_t ab = 0; ab < b->mentioned_asset_count; ++ab) {
+            if(strcmp(a->mentioned_assets[aa], b->mentioned_assets[ab]) == 0) {
+              witness = a->mentioned_assets[aa];
+              break;
+            }
+          }
+        }
+      } else if(by_org) {
+        for(size_t oa = 0; oa < a->mentioned_org_count && !witness; ++oa) {
+          for(size_t ob = 0; ob < b->mentioned_org_count; ++ob) {
+            if(strcmp(a->mentioned_orgs[oa], b->mentioned_orgs[ob]) == 0) {
+              witness = a->mentioned_orgs[oa];
+              break;
+            }
+          }
+        }
+      } else if(by_cve) {
+        for(size_t ca = 0; ca < a->mentioned_cve_count && !witness; ++ca) {
+          for(size_t cb = 0; cb < b->mentioned_cve_count; ++cb) {
+            if(strcmp(a->mentioned_cves[ca], b->mentioned_cves[cb]) == 0) {
+              witness = a->mentioned_cves[ca];
+              break;
+            }
+          }
+        }
+      } else if(by_event) {
+        for(size_t ea = 0; ea < a->mentioned_fiscal_event_count && !witness; ++ea) {
+          for(size_t eb = 0; eb < b->mentioned_fiscal_event_count; ++eb) {
+            if(strcmp(a->mentioned_fiscal_events[ea], b->mentioned_fiscal_events[eb]) == 0) {
+              witness = a->mentioned_fiscal_events[ea];
               break;
             }
           }
@@ -1164,13 +1226,14 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
                                  size_t max_articles) {
   if(!engine || engine->article_count == 0) return 0;
 
-  /* Entities: 24 ontology nodes + up to 64 countries/orgs */
-  RankedEntity ents[96];
+  RankedEntity ents[128];
+  const BitSet *ent_fibers[128];
   size_t ent_count = 0;
 
-  for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
+  for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT && ent_count < 128u; ++c) {
     uint32_t deg = bitset_popcount(&engine->by_closure_ontology[c]);
     if(deg == 0) continue;
+    ent_fibers[ent_count] = &engine->by_closure_ontology[c];
     RankedEntity *e = &ents[ent_count++];
     snprintf(e->id, sizeof(e->id), "cat:%s", ontology_node((OntologyNodeId)c)->slug);
     snprintf(e->label, sizeof(e->label), "%s", ontology_node((OntologyNodeId)c)->slug);
@@ -1179,10 +1242,11 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     e->score = 1.0;
   }
 
-  for(size_t i = 0; i < 256u && ent_count < 96u; ++i) {
+  for(size_t i = 0; i < 256u && ent_count < 128u; ++i) {
     if(engine->by_mentioned_country[i].occupied) {
       uint32_t deg = bitset_popcount(&engine->by_mentioned_country[i].bits);
       if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_mentioned_country[i].bits;
       RankedEntity *e = &ents[ent_count++];
       snprintf(e->id, sizeof(e->id), "geo:%s", engine->by_mentioned_country[i].key);
       snprintf(e->label, sizeof(e->label), "%s", engine->by_mentioned_country[i].key);
@@ -1192,67 +1256,117 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     }
   }
 
+  for(size_t i = 0; i < 128u && ent_count < 128u; ++i) {
+    if(engine->by_asset[i].occupied) {
+      uint32_t deg = bitset_popcount(&engine->by_asset[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_asset[i].bits;
+      RankedEntity *e = &ents[ent_count++];
+      snprintf(e->id, sizeof(e->id), "asset:%s", engine->by_asset[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", engine->by_asset[i].key);
+      e->kind = "asset";
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+
+  for(size_t i = 0; i < 128u && ent_count < 128u; ++i) {
+    if(engine->by_org[i].occupied) {
+      uint32_t deg = bitset_popcount(&engine->by_org[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_org[i].bits;
+      RankedEntity *e = &ents[ent_count++];
+      snprintf(e->id, sizeof(e->id), "org:%s", engine->by_org[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", engine->by_org[i].key);
+      e->kind = "organization";
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+
   if(ent_count == 0) return 0;
   size_t N_art = engine->article_count;
   double *art_scores = malloc(N_art * sizeof(double));
-  if(!art_scores) return 0;
-  for(size_t i = 0; i < N_art; ++i) art_scores[i] = 1.0 / (double)N_art;
+  uint32_t *art_out_deg = calloc(N_art, sizeof(uint32_t));
+  if(!art_scores || !art_out_deg) {
+    free(art_scores);
+    free(art_out_deg);
+    return 0;
+  }
+
+  /* Precompute article out-degrees across all active entity BitSet fibers in O(1) per 64-bit word */
+  for(size_t e = 0; e < ent_count; ++e) {
+    const BitSet *bs = ent_fibers[e];
+    for(size_t w = 0; w < bs->word_cap; ++w) {
+      uint64_t word = bs->words[w];
+      while(word) {
+        uint32_t bit = ctz64(word);
+        uint32_t slot = (uint32_t)(w * 64u + bit);
+        word &= (word - 1ULL);
+        if(slot < N_art) art_out_deg[slot]++;
+      }
+    }
+  }
+
+  double *inv_art_deg = malloc(N_art * sizeof(double));
+  if(!inv_art_deg) {
+    free(art_scores);
+    free(art_out_deg);
+    return 0;
+  }
+  for(size_t i = 0; i < N_art; ++i) {
+    art_scores[i] = 1.0 / (double)N_art;
+    inv_art_deg[i] = art_out_deg[i] > 0 ? (damping / (double)art_out_deg[i]) : 0.0;
+  }
   for(size_t e = 0; e < ent_count; ++e) ents[e].score = 1.0 / (double)ent_count;
 
   if(iterations == 0) iterations = 12u;
   if(damping <= 0.0 || damping >= 1.0) damping = 0.85;
 
-  for(uint32_t iter = 0; iter < iterations; ++iter) {
-    for(size_t e = 0; e < ent_count; ++e) ents[e].score = (1.0 - damping) / (double)ent_count;
+  double base_ent = (1.0 - damping) / (double)ent_count;
+  double base_art = (1.0 - damping) / (double)N_art;
 
-    for(size_t i = 0; i < N_art; ++i) {
-      const ArticleRecord *a = &engine->articles[i];
-      uint32_t out_deg = popcnt64((uint64_t)(a->closure_ontology_mask & ~1u)) + (uint32_t)a->mentioned_country_count;
-      if(out_deg == 0) continue;
-      double share = damping * (art_scores[i] / (double)out_deg);
-      for(size_t e = 0; e < ent_count; ++e) {
-        if(strcmp(ents[e].kind, "category") == 0) {
-          OntologyNodeId nid;
-          if(ontology_from_slug(ents[e].label, &nid) == 0 && (a->closure_ontology_mask & (1u << nid))) {
-            ents[e].score += share;
-          }
-        } else {
-          for(size_t c = 0; c < a->mentioned_country_count; ++c) {
-            if(strcmp(a->mentioned_countries[c], ents[e].label) == 0) {
-              ents[e].score += share;
-              break;
-            }
+  for(uint32_t iter = 0; iter < iterations; ++iter) {
+    /* Step 1: Articles -> Entities via hardware ctz64 over each entity's BitSet fiber */
+    for(size_t e = 0; e < ent_count; ++e) {
+      double acc = base_ent;
+      const BitSet *bs = ent_fibers[e];
+      for(size_t w = 0; w < bs->word_cap; ++w) {
+        uint64_t word = bs->words[w];
+        while(word) {
+          uint32_t bit = ctz64(word);
+          uint32_t slot = (uint32_t)(w * 64u + bit);
+          word &= (word - 1ULL);
+          if(slot < N_art) {
+            acc += art_scores[slot] * inv_art_deg[slot];
           }
         }
       }
+      ents[e].score = acc;
     }
 
-    for(size_t i = 0; i < N_art; ++i) {
-      const ArticleRecord *a = &engine->articles[i];
-      double sum = (1.0 - damping) / (double)N_art;
-      for(size_t e = 0; e < ent_count; ++e) {
-        if(ents[e].degree == 0) continue;
-        int linked = 0;
-        if(strcmp(ents[e].kind, "category") == 0) {
-          OntologyNodeId nid;
-          if(ontology_from_slug(ents[e].label, &nid) == 0 && (a->closure_ontology_mask & (1u << nid))) {
-            linked = 1;
+    /* Step 2: Entities -> Articles via hardware ctz64 over each entity's BitSet fiber */
+    for(size_t i = 0; i < N_art; ++i) art_scores[i] = base_art;
+    for(size_t e = 0; e < ent_count; ++e) {
+      if(ents[e].degree == 0) continue;
+      double ent_share = damping * (ents[e].score / (double)ents[e].degree);
+      const BitSet *bs = ent_fibers[e];
+      for(size_t w = 0; w < bs->word_cap; ++w) {
+        uint64_t word = bs->words[w];
+        while(word) {
+          uint32_t bit = ctz64(word);
+          uint32_t slot = (uint32_t)(w * 64u + bit);
+          word &= (word - 1ULL);
+          if(slot < N_art) {
+            art_scores[slot] += ent_share;
           }
-        } else {
-          for(size_t c = 0; c < a->mentioned_country_count; ++c) {
-            if(strcmp(a->mentioned_countries[c], ents[e].label) == 0) {
-              linked = 1;
-              break;
-            }
-          }
-        }
-        if(linked) {
-          sum += damping * (ents[e].score / (double)ents[e].degree);
         }
       }
-      art_scores[i] = sum;
     }
   }
+
+  free(art_out_deg);
+  free(inv_art_deg);
 
   /* Sort entities descending */
   for(size_t i = 0; i < ent_count; ++i) {

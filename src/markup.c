@@ -474,6 +474,166 @@ static char *extract_feed_link(const char *xml, size_t len, const char *fallback
   return dup_cstr(fallback);
 }
 
+static char *extract_item_image_url(const char *xml, size_t len) {
+  const char *img_tags[] = {"media:content", "media:thumbnail", "enclosure"};
+  for(size_t t = 0; t < 3u; ++t) {
+    const char *open = NULL;
+    const char *is = NULL;
+    const char *after = NULL;
+    if(find_xml_tag(xml, len, img_tags[t], &open, &is, NULL, &after)) {
+      size_t open_len = (size_t)((is > open ? is : after) - open);
+      char *url = extract_attr_value(open, open_len, "url");
+      if(url && url[0] != '\0') return url;
+      free(url);
+    }
+  }
+  const char *open = NULL;
+  const char *is = NULL;
+  const char *after = NULL;
+  if(find_xml_tag(xml, len, "img", &open, &is, NULL, &after)) {
+    size_t open_len = (size_t)((is > open ? is : after) - open);
+    char *src = extract_attr_value(open, open_len, "src");
+    if(src && src[0] != '\0') return src;
+    free(src);
+  }
+  return dup_cstr("");
+}
+
+static int64_t days_from_civil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+  const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  return (int64_t)era * 146097LL + (int64_t)doe - 719468LL;
+}
+
+static int parse_month_abbrev(const char *s) {
+  static const char *const k_months[12] = {
+      "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+  for(int m = 0; m < 12; ++m) {
+    if(ci_starts_with(s, 3u, k_months[m])) return m + 1;
+  }
+  return 0;
+}
+
+uint64_t parse_timestamp_ms(const char *str) {
+  if(!str) return 0u;
+  while(*str && isspace((unsigned char)*str)) str++;
+  if(!*str) return 0u;
+
+  int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+  int tz_offset_sec = 0;
+
+  /* Case 1: ISO-8601 / RFC 3339: YYYY-MM-DD[T ]HH:MM[:SS][Z|+HH:MM] */
+  if(isdigit((unsigned char)str[0]) && isdigit((unsigned char)str[1]) &&
+     isdigit((unsigned char)str[2]) && isdigit((unsigned char)str[3]) &&
+     (str[4] == '-' || str[4] == '/')) {
+    year = (str[0] - '0') * 1000 + (str[1] - '0') * 100 + (str[2] - '0') * 10 + (str[3] - '0');
+    const char *p = str + 5;
+    if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+      month = (p[0] - '0') * 10 + (p[1] - '0');
+      p += 2;
+      if(*p == '-' || *p == '/') p++;
+      if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+        day = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+      }
+    }
+    if(*p == 'T' || *p == 't' || *p == ' ') {
+      p++;
+      if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1]) && p[2] == ':') {
+        hour = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 3;
+        if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+          min = (p[0] - '0') * 10 + (p[1] - '0');
+          p += 2;
+          if(*p == ':' && isdigit((unsigned char)p[1]) && isdigit((unsigned char)p[2])) {
+            sec = (p[1] - '0') * 10 + (p[2] - '0');
+            p += 3;
+          }
+          if(*p == '.') {
+            p++;
+            while(isdigit((unsigned char)*p)) p++;
+          }
+          if(*p == '+' || *p == '-') {
+            int sign = (*p == '-') ? -1 : 1;
+            p++;
+            int tzh = 0, tzm = 0;
+            if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+              tzh = (p[0] - '0') * 10 + (p[1] - '0');
+              p += 2;
+              if(*p == ':') p++;
+              if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+                tzm = (p[0] - '0') * 10 + (p[1] - '0');
+              }
+            }
+            tz_offset_sec = sign * (tzh * 3600 + tzm * 60);
+          }
+        }
+      }
+    }
+  } else {
+    /* Case 2: RFC 2822: [Day, ]DD Mon YYYY HH:MM[:SS] [GMT|+HHMM] */
+    const char *p = str;
+    const char *comma = strchr(p, ',');
+    if(comma && (comma - p) <= 10) p = comma + 1;
+    while(*p && isspace((unsigned char)*p)) p++;
+    if(!isdigit((unsigned char)*p)) return 0u;
+    while(isdigit((unsigned char)*p)) {
+      day = day * 10 + (*p - '0');
+      p++;
+    }
+    while(*p && (isspace((unsigned char)*p) || *p == '-')) p++;
+    if(strlen(p) < 3u) return 0u;
+    month = parse_month_abbrev(p);
+    if(month == 0) return 0u;
+    while(*p && isalpha((unsigned char)*p)) p++;
+    while(*p && (isspace((unsigned char)*p) || *p == '-')) p++;
+    while(isdigit((unsigned char)*p)) {
+      year = year * 10 + (*p - '0');
+      p++;
+    }
+    if(year > 0 && year < 100) year += (year >= 70 ? 1900 : 2000);
+    while(*p && isspace((unsigned char)*p)) p++;
+    if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1]) && p[2] == ':') {
+      hour = (p[0] - '0') * 10 + (p[1] - '0');
+      p += 3;
+      if(isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])) {
+        min = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+        if(*p == ':' && isdigit((unsigned char)p[1]) && isdigit((unsigned char)p[2])) {
+          sec = (p[1] - '0') * 10 + (p[2] - '0');
+          p += 3;
+        }
+      }
+      while(*p && isspace((unsigned char)*p)) p++;
+      if((*p == '+' || *p == '-') && isdigit((unsigned char)p[1]) && isdigit((unsigned char)p[2]) &&
+         isdigit((unsigned char)p[3]) && isdigit((unsigned char)p[4])) {
+        int sign = (*p == '-') ? -1 : 1;
+        int tzh = (p[1] - '0') * 10 + (p[2] - '0');
+        int tzm = (p[3] - '0') * 10 + (p[4] - '0');
+        tz_offset_sec = sign * (tzh * 3600 + tzm * 60);
+      } else if(ci_starts_with(p, strlen(p), "EDT")) {
+        tz_offset_sec = -4 * 3600;
+      } else if(ci_starts_with(p, strlen(p), "EST")) {
+        tz_offset_sec = -5 * 3600;
+      } else if(ci_starts_with(p, strlen(p), "PDT")) {
+        tz_offset_sec = -7 * 3600;
+      } else if(ci_starts_with(p, strlen(p), "PST")) {
+        tz_offset_sec = -8 * 3600;
+      }
+    }
+  }
+
+  if(year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) return 0u;
+  int64_t days = days_from_civil(year, (unsigned)month, (unsigned)day);
+  int64_t total_sec = days * 86400LL + (int64_t)hour * 3600LL + (int64_t)min * 60LL +
+                      (int64_t)sec - (int64_t)tz_offset_sec;
+  if(total_sec <= 0) return 0u;
+  return (uint64_t)total_sec * 1000ULL;
+}
+
 static void extract_item_categories(const char *xml, size_t len, ParsedFeedItem *item) {
   const char *cursor = xml;
   size_t rem = len;
@@ -692,7 +852,7 @@ int feed_parse(const char *raw, size_t len, const char *base_url, ParsedFeed *ou
     }
     const char *date_tags[] = {"pubDate", "published", "updated", "dc:date"};
     item.published_at = extract_xml_tag_clean(is, ilen, date_tags, 4u);
-    item.image_url = dup_cstr("");
+    item.image_url = extract_item_image_url(is, ilen);
     extract_item_categories(is, ilen, &item);
 
     ParsedFeedItem *grown = realloc(out->items, (out->item_count + 1u) * sizeof(ParsedFeedItem));

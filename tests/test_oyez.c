@@ -135,6 +135,8 @@ static void test_markup_and_readability(void) {
       "<title>BREAKING: TSMC expands wafer fab in Tokyo &amp; Kumamoto</title>\n"
       "<link>https://wire.example.org/101</link>\n"
       "<description><![CDATA[<p>Semiconductor supply chain in <b>Japan</b> accelerates.</p>]]></description>\n"
+      "<pubDate>Tue, 03 Nov 2026 04:00:00 GMT</pubDate>\n"
+      "<media:content url=\"https://wire.example.org/img/tsmc.jpg\" medium=\"image\"/>\n"
       "<category>technology</category>\n"
       "</item>\n"
       "</channel></rss>";
@@ -146,6 +148,10 @@ static void test_markup_and_readability(void) {
   assert(feed.item_count == 1u);
   assert(strcmp(feed.items[0].guid, "item-101") == 0);
   assert(strstr(feed.items[0].summary, "Semiconductor supply chain in Japan") != NULL);
+  assert(strcmp(feed.items[0].image_url, "https://wire.example.org/img/tsmc.jpg") == 0);
+  uint64_t ts_rfc = parse_timestamp_ms(feed.items[0].published_at);
+  uint64_t ts_iso = parse_timestamp_ms("2026-11-03T04:00:00Z");
+  assert(ts_rfc > 1700000000000ULL && ts_rfc == ts_iso);
   feed_free(&feed);
 
   const char *html =

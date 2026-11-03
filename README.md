@@ -29,17 +29,17 @@ Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only 
   Oyez Pure C23 Proprietary Engine Benchmark Suite
 ================================================================
 1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 524 feeds):
-   Total Time:  558.51 ms (3581 articles/sec)
+   Total Time:  550.20 ms (3635 articles/sec)
 2. BM25 + Poset Presheaf Fiber + BitSet + Cache Search (1000 queries):
-   Avg Latency: 0.43 us/query (2336449 queries/sec, hits=546)
+   Avg Latency: 0.43 us/query (2298851 queries/sec, hits=546)
 3. Bipartite Entity-Article PageRank (15 iterations over 2000 articles):
-   Total Time:  109.88 ms (top entity: geo:US score=0.0535)
+   Total Time:  1.11 ms (top entity: geo:US score=0.0661)
 4. 4-Band Multi-Probe SimHash64 LSH Story Clustering (2000 articles):
-   Total Time:  0.03 ms (clusters formed=32)
+   Total Time:  0.02 ms (clusters formed=32)
 5. 32-Node Poset Left/Right Kan Extensions & Sheaf Cohomology (10,000 runs):
-   Avg Latency: 0.359 us/pass (L2 cohomology norm=757777.00)
+   Avg Latency: 0.381 us/pass (L2 cohomology norm=757777.00)
 6. M1 Structured BPE Tokenizer Training + SHA-256 Seal:
-   Vocab Size:  2048 (trained in 223.14 ms)
+   Vocab Size:  2048 (trained in 215.05 ms)
 ```
 
 ---
