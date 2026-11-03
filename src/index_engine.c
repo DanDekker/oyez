@@ -866,9 +866,11 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   uint64_t mmr_bits = (q->mmr_lambda > 0.0 && q->mmr_lambda <= 1.0)
                           ? (uint64_t)(q->mmr_lambda * 10000.0 + 0.5)
                           : 6500ULL;
+  size_t norm_limit = q->limit > 0 ? q->limit : 50u;
+  if(norm_limit > 500u) norm_limit = 500u;
   h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)q->use_category_morphism << 16u) |
              ((uint64_t)q->diversify_mmr << 15u) | (mmr_bits & 0x7FFFULL));
-  h ^= mix64(((uint64_t)q->limit << 32u) | (uint64_t)q->offset);
+  h ^= mix64(((uint64_t)norm_limit << 32u) | (uint64_t)q->offset);
   return h;
 }
 
@@ -1193,6 +1195,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
       size_t rcount = 1u;
       while(rcount < window) {
         size_t best_idx = 0;
+        int found_best = 0;
         double best_mmr = -1e18;
         for(size_t i = 0; i < window; ++i) {
           if(used[i]) continue;
@@ -1203,11 +1206,13 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
             if(sim > max_sim) max_sim = sim;
           }
           double mmr = lambda * norm_rel - (1.0 - lambda) * max_sim;
-          if(mmr > best_mmr) {
+          if(!found_best || mmr > best_mmr) {
             best_mmr = mmr;
             best_idx = i;
+            found_best = 1;
           }
         }
+        if(!found_best) break;
         used[best_idx] = 1u;
         reranked[rcount++] = pool[best_idx];
       }
@@ -2196,6 +2201,9 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     }
   }
 
+  if(iterations == 0 || iterations > 200u) iterations = 12u;
+  if(!(damping > 0.0 && damping < 1.0)) damping = 0.85;
+
   double *inv_art_deg = malloc(N_art * sizeof(double));
   if(!inv_art_deg) {
     free(art_scores);
@@ -2207,9 +2215,6 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     inv_art_deg[i] = art_out_deg[i] > 0 ? (damping / (double)art_out_deg[i]) : 0.0;
   }
   for(size_t e = 0; e < ent_count; ++e) ents[e].score = 1.0 / (double)ent_count;
-
-  if(iterations == 0) iterations = 12u;
-  if(damping <= 0.0 || damping >= 1.0) damping = 0.85;
 
   double base_ent = (1.0 - damping) / (double)ent_count;
   double base_art = (1.0 - damping) / (double)N_art;
@@ -2445,7 +2450,8 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     char *lang = wire_read_cstr(bytes, payload_len, &off);
     char *tier = wire_read_cstr(bytes, payload_len, &off);
     char *focus = wire_read_cstr(bytes, payload_len, &off);
-    if(!title || !furl || !surl || !cat || !country || !subreg || !lang || !tier || !focus) {
+    if(!title || !furl || !surl || !cat || !country || !subreg || !lang || !tier || !focus ||
+       fid == 0u || fid == UINT32_MAX) {
       free(title); free(furl); free(surl); free(cat);
       free(country); free(subreg); free(lang); free(tier); free(focus);
       goto fail;
@@ -2453,13 +2459,14 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     if(reg >= WORLD_REGION_COUNT) reg = (uint32_t)REGION_GLOBAL;
     CatalogEntry ce = {title, furl, surl, cat, (WorldRegion)reg, country, subreg, lang, tier, focus};
     uint32_t actual_id = 0;
-    engine_upsert_feed(engine, &ce, &actual_id);
+    int up_rc = engine_upsert_feed(engine, &ce, &actual_id);
+    free(title); free(furl); free(surl); free(cat);
+    free(country); free(subreg); free(lang); free(tier); free(focus);
+    if(up_rc != 0) goto fail;
     if(engine->feed_count > 0) {
       engine->feeds[engine->feed_count - 1u].id = fid;
       if(fid >= engine->next_feed_id) engine->next_feed_id = fid + 1u;
     }
-    free(title); free(furl); free(surl); free(cat);
-    free(country); free(subreg); free(lang); free(tier); free(focus);
   }
 
   for(uint32_t i = 0; i < acount; ++i) {
