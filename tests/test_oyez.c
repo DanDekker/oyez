@@ -496,6 +496,31 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(res.total == 3u);
   search_response_free(&res);
 
+  /* A large offset must not alias the cached first page. */
+#if SIZE_MAX > UINT32_MAX
+  aq.limit = 1u;
+  aq.offset = 0u;
+  assert(engine_search(&eng, &aq, &res) == 0);
+  assert(res.count == 1u);
+  search_response_free(&res);
+  aq.offset = (size_t)1u << 32u;
+  assert(engine_search(&eng, &aq, &res) == 0);
+  assert(res.total == 3u && res.count == 0u);
+  search_response_free(&res);
+#endif
+
+  ArticleQuery language_q;
+  memset(&language_q, 0, sizeof(language_q));
+  language_q.language = "en";
+  language_q.limit = 1u;
+  assert(engine_search(&eng, &language_q, &res) == 0);
+  assert(res.count == 1u);
+  search_response_free(&res);
+  language_q.language = "EN";
+  assert(engine_search(&eng, &language_q, &res) == 0);
+  assert(res.count == 0u);
+  search_response_free(&res);
+
   /* Domain alias expansion: 'AI' in article matches 'artificial-intelligence' or 'ai' query,
    * and organization BitSet fiber filters by 'EU' */
   ArticleQuery org_q;

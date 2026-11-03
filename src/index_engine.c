@@ -840,37 +840,43 @@ static double article_similarity(const ArticleRecord *a, const ArticleRecord *b)
   return 0.35 * sim_hash + 0.15 * sim_m1 + 0.30 * sim_onto + 0.20 * same_feed;
 }
 
+static uint64_t hash_exact_cstr(const char *s) {
+  return fnv1a64(s ? s : "", s ? strlen(s) : 0u);
+}
+
 static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   uint64_t h = mix64(gen ^ 0x9E3779B97F4A7C15ULL);
-  h ^= mix64(fnv1a64_cstr(q->query ? q->query : "") + 1u);
-  h ^= mix64(fnv1a64_cstr(q->category ? q->category : "") + 2u);
-  h ^= mix64(fnv1a64_cstr(q->exclude_category ? q->exclude_category : "") + 21u);
-  h ^= mix64(fnv1a64_cstr(q->news_type ? q->news_type : "") + 3u);
-  h ^= mix64(fnv1a64_cstr(q->clearance ? q->clearance : "") + 4u);
-  h ^= mix64(fnv1a64_cstr(q->fiscal_stance ? q->fiscal_stance : "") + 5u);
-  h ^= mix64(fnv1a64_cstr(q->asset ? q->asset : "") + 6u);
-  h ^= mix64(fnv1a64_cstr(q->fiscal_event ? q->fiscal_event : "") + 7u);
-  h ^= mix64(fnv1a64_cstr(q->cve ? q->cve : "") + 13u);
-  h ^= mix64(fnv1a64_cstr(q->organization ? q->organization : "") + 14u);
-  h ^= mix64(fnv1a64_cstr(q->ai_tier ? q->ai_tier : "") + 15u);
-  h ^= mix64(fnv1a64_cstr(q->ai_model ? q->ai_model : "") + 16u);
-  h ^= mix64(fnv1a64_cstr(q->ai_infra ? q->ai_infra : "") + 17u);
-  h ^= mix64(fnv1a64_cstr(q->ai_license ? q->ai_license : "") + 18u);
-  h ^= mix64(fnv1a64_cstr(q->hf_repo ? q->hf_repo : "") + 19u);
-  h ^= mix64(fnv1a64_cstr(q->sport ? q->sport : "") + 20u);
-  h ^= mix64(fnv1a64_cstr(q->region ? q->region : "") + 8u);
-  h ^= mix64(fnv1a64_cstr(q->country ? q->country : "") + 9u);
-  h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
-  h ^= mix64(fnv1a64_cstr(q->language ? q->language : "") + 11u);
-  h ^= mix64(fnv1a64_cstr(q->source_tier ? q->source_tier : "") + 12u);
-  uint64_t mmr_bits = (q->mmr_lambda > 0.0 && q->mmr_lambda <= 1.0)
-                          ? (uint64_t)(q->mmr_lambda * 10000.0 + 0.5)
-                          : 6500ULL;
+  h ^= mix64(hash_exact_cstr(q->query ? q->query : "") + 1u);
+  h ^= mix64(hash_exact_cstr(q->category ? q->category : "") + 2u);
+  h ^= mix64(hash_exact_cstr(q->exclude_category ? q->exclude_category : "") + 21u);
+  h ^= mix64(hash_exact_cstr(q->news_type ? q->news_type : "") + 3u);
+  h ^= mix64(hash_exact_cstr(q->clearance ? q->clearance : "") + 4u);
+  h ^= mix64(hash_exact_cstr(q->fiscal_stance ? q->fiscal_stance : "") + 5u);
+  h ^= mix64(hash_exact_cstr(q->asset ? q->asset : "") + 6u);
+  h ^= mix64(hash_exact_cstr(q->fiscal_event ? q->fiscal_event : "") + 7u);
+  h ^= mix64(hash_exact_cstr(q->cve ? q->cve : "") + 13u);
+  h ^= mix64(hash_exact_cstr(q->organization ? q->organization : "") + 14u);
+  h ^= mix64(hash_exact_cstr(q->ai_tier ? q->ai_tier : "") + 15u);
+  h ^= mix64(hash_exact_cstr(q->ai_model ? q->ai_model : "") + 16u);
+  h ^= mix64(hash_exact_cstr(q->ai_infra ? q->ai_infra : "") + 17u);
+  h ^= mix64(hash_exact_cstr(q->ai_license ? q->ai_license : "") + 18u);
+  h ^= mix64(hash_exact_cstr(q->hf_repo ? q->hf_repo : "") + 19u);
+  h ^= mix64(hash_exact_cstr(q->sport ? q->sport : "") + 20u);
+  h ^= mix64(hash_exact_cstr(q->region ? q->region : "") + 8u);
+  h ^= mix64(hash_exact_cstr(q->country ? q->country : "") + 9u);
+  h ^= mix64(hash_exact_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
+  h ^= mix64(hash_exact_cstr(q->language ? q->language : "") + 11u);
+  h ^= mix64(hash_exact_cstr(q->source_tier ? q->source_tier : "") + 12u);
+  double lambda = (q->mmr_lambda > 0.0 && q->mmr_lambda <= 1.0) ? q->mmr_lambda : 0.65;
+  uint64_t lambda_bits = 0;
+  memcpy(&lambda_bits, &lambda, sizeof(lambda_bits));
   size_t norm_limit = q->limit > 0 ? q->limit : 50u;
   if(norm_limit > 500u) norm_limit = 500u;
-  h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)q->use_category_morphism << 16u) |
-             ((uint64_t)q->diversify_mmr << 15u) | (mmr_bits & 0x7FFFULL));
-  h ^= mix64(((uint64_t)norm_limit << 32u) | (uint64_t)q->offset);
+  h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)(q->use_category_morphism != 0) << 16u) |
+             ((uint64_t)(q->diversify_mmr != 0) << 15u));
+  h ^= mix64(lambda_bits ^ 0xB5AD4ECEDA1CE2A9ULL);
+  h ^= mix64((uint64_t)norm_limit ^ 0xA57B57D5A57B57D5ULL);
+  h ^= mix64((uint64_t)q->offset ^ 0xC6A4A7935BD1E995ULL);
   return h;
 }
 
