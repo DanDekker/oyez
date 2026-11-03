@@ -1,4 +1,4 @@
-import { DEFAULT_FEED_SEEDS } from "../defaults.ts";
+import { WORLD_FEED_CATALOG } from "../catalog/world_feeds.ts";
 import {
   extractReadableContent,
   fetchAndExtractArticle,
@@ -6,7 +6,7 @@ import {
 import { OyezIndexEngine } from "../index/engine.ts";
 import { M1Tokenizer, tokenize } from "../index/tokenizer.ts";
 import { FeedScheduler } from "../poller/scheduler.ts";
-import type { Article, FeedConfig } from "../types.ts";
+import type { Article, FeedConfig, WorldRegion } from "../types.ts";
 import {
   errorResponse,
   jsonResponse,
@@ -26,18 +26,21 @@ export function createOyezApp(
   engine: OyezIndexEngine,
   scheduler?: FeedScheduler
 ): OyezApp {
-  const activeScheduler = scheduler ?? new FeedScheduler(engine);
+  const activeScheduler = scheduler ?? new FeedScheduler(engine, 8);
   const m1Tokenizer = new M1Tokenizer();
   const router = new OyezRouter();
 
   router.get("/", () => {
     return jsonResponse({
       name: "Oyez",
-      tagline: "Oyez! Oyez! Oyez! A news API and RSS aggregator for the people.",
-      version: "0.1.0",
+      tagline: "Oyez! Oyez! Oyez! A global news API, RSS aggregator, and deep search engine for the people.",
+      version: "0.2.0",
       endpoints: [
         "GET    /health",
         "GET    /api/v1/stats",
+        "GET    /api/v1/facets",
+        "GET    /api/v1/trending",
+        "GET    /api/v1/catalog",
         "GET    /api/v1/feeds",
         "POST   /api/v1/feeds",
         "POST   /api/v1/feeds/seed",
@@ -48,6 +51,7 @@ export function createOyezApp(
         "POST   /api/v1/feeds/:id/refresh",
         "GET    /api/v1/articles",
         "GET    /api/v1/articles/:id",
+        "GET    /api/v1/articles/:id/related",
         "DELETE /api/v1/articles/:id",
         "POST   /api/v1/articles/:id/extract",
         "POST   /api/v1/extract",
@@ -64,6 +68,7 @@ export function createOyezApp(
       uptimeSeconds: stats.uptimeSeconds,
       totalFeeds: stats.totalFeeds,
       totalArticles: stats.totalArticles,
+      vocabularySize: stats.vocabularySize,
     });
   });
 
@@ -71,11 +76,69 @@ export function createOyezApp(
     return jsonResponse(engine.getStats());
   });
 
-  router.get("/api/v1/feeds", () => {
-    const feeds = engine.listFeeds().map((f) => ({
-      ...f,
-      articleCount: engine.getFeedArticleCount(f.id),
-    }));
+  router.get("/api/v1/facets", () => {
+    return jsonResponse(engine.getFacets());
+  });
+
+  router.get("/api/v1/trending", ({ query }) => {
+    const limit = Math.min(Math.max(Number(query.get("limit") ?? 15), 1), 50);
+    const facets = engine.getFacets();
+    const storyClusters = engine.discoverStoryClusters(limit);
+    return jsonResponse({
+      storyClusters,
+      topTopics: facets.topics,
+      topEntities: facets.topEntities,
+      topMentionedCountries: facets.mentionedCountries,
+      coverageByRegion: facets.regions,
+    });
+  });
+
+  router.get("/api/v1/catalog", ({ query }) => {
+    const region = query.get("region")?.toLowerCase();
+    const country = query.get("country")?.toUpperCase();
+    const category = query.get("category")?.toLowerCase();
+    const language = query.get("language")?.toLowerCase();
+
+    const filtered = WORLD_FEED_CATALOG.filter((s) => {
+      if (region && s.region !== region) return false;
+      if (country && s.country !== country) return false;
+      if (category && s.category !== category) return false;
+      if (language && s.language !== language) return false;
+      return true;
+    });
+
+    const regionsSummary: Record<string, number> = {};
+    const countriesSummary: Record<string, number> = {};
+    for (const s of filtered) {
+      regionsSummary[s.region] = (regionsSummary[s.region] ?? 0) + 1;
+      countriesSummary[s.country] = (countriesSummary[s.country] ?? 0) + 1;
+    }
+
+    return jsonResponse({
+      total: filtered.length,
+      regions: regionsSummary,
+      countries: countriesSummary,
+      feeds: filtered,
+    });
+  });
+
+  router.get("/api/v1/feeds", ({ query }) => {
+    const regionFilter = query.get("region")?.toLowerCase();
+    const countryFilter = query.get("country")?.toUpperCase();
+    const categoryFilter = query.get("category")?.toLowerCase();
+
+    const feeds = engine
+      .listFeeds()
+      .filter((f) => {
+        if (regionFilter && f.region !== regionFilter) return false;
+        if (countryFilter && f.country !== countryFilter) return false;
+        if (categoryFilter && f.category !== categoryFilter) return false;
+        return true;
+      })
+      .map((f) => ({
+        ...f,
+        articleCount: engine.getFeedArticleCount(f.id),
+      }));
     return jsonResponse({ total: feeds.length, feeds });
   });
 
@@ -83,6 +146,9 @@ export function createOyezApp(
     const body = await readJsonBody<{
       url?: string;
       title?: string;
+      region?: WorldRegion;
+      country?: string;
+      language?: string;
       category?: string;
       tags?: string[];
       pollIntervalSeconds?: number;
@@ -92,25 +158,36 @@ export function createOyezApp(
     }>(req);
 
     const rawUrl = (body.url ?? "").trim();
-    if (!rawUrl || (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://"))) {
+    if (
+      !rawUrl ||
+      (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://"))
+    ) {
       return errorResponse("A valid http(s) feed 'url' is required", 400);
     }
 
     const existing = engine.getFeedByUrl(rawUrl);
     if (existing) {
-      return errorResponse(`Feed with URL already exists (${existing.id})`, 409, {
-        feed: existing,
-      });
+      return errorResponse(
+        `Feed with URL already exists (${existing.id})`,
+        409,
+        { feed: existing }
+      );
     }
 
     const now = Date.now();
     const id = `feed_${Bun.hash(rawUrl).toString(36)}`;
-    const pollIntervalSeconds = Math.max(60, Number(body.pollIntervalSeconds ?? 900));
+    const pollIntervalSeconds = Math.max(
+      60,
+      Number(body.pollIntervalSeconds ?? 900)
+    );
 
     const feed: FeedConfig = {
       id,
       url: rawUrl,
       title: (body.title ?? "").trim() || rawUrl,
+      region: body.region ?? "global",
+      country: (body.country ?? "INT").trim().toUpperCase(),
+      language: (body.language ?? "en").trim().toLowerCase().slice(0, 2),
       category: (body.category ?? "general").trim().toLowerCase(),
       tags: Array.isArray(body.tags)
         ? body.tags.map((t) => String(t).trim()).filter(Boolean)
@@ -146,10 +223,20 @@ export function createOyezApp(
 
   router.post("/api/v1/feeds/seed", async ({ req }) => {
     let pollNow = false;
+    let regionFilter: string | undefined;
+    let countryFilter: string | undefined;
+    let categoryFilter: string | undefined;
+
     try {
-      const body = await req.json();
-      if (body && typeof body === "object" && "pollNow" in body) {
-        pollNow = Boolean((body as Record<string, unknown>).pollNow);
+      const body = (await req.json()) as Record<string, unknown>;
+      if (body && typeof body === "object") {
+        if ("pollNow" in body) pollNow = Boolean(body.pollNow);
+        if (typeof body.region === "string")
+          regionFilter = body.region.toLowerCase();
+        if (typeof body.country === "string")
+          countryFilter = body.country.toUpperCase();
+        if (typeof body.category === "string")
+          categoryFilter = body.category.toLowerCase();
       }
     } catch {
       // Optional JSON body
@@ -158,13 +245,20 @@ export function createOyezApp(
     const now = Date.now();
     const added: FeedConfig[] = [];
 
-    for (const seed of DEFAULT_FEED_SEEDS) {
+    for (const seed of WORLD_FEED_CATALOG) {
+      if (regionFilter && seed.region !== regionFilter) continue;
+      if (countryFilter && seed.country !== countryFilter) continue;
+      if (categoryFilter && seed.category !== categoryFilter) continue;
       if (engine.getFeedByUrl(seed.url)) continue;
+
       const id = `feed_${Bun.hash(seed.url).toString(36)}`;
       const feed: FeedConfig = {
         id,
         url: seed.url,
         title: seed.title,
+        region: seed.region,
+        country: seed.country,
+        language: seed.language,
         category: seed.category,
         tags: seed.tags,
         enabled: true,
@@ -179,10 +273,13 @@ export function createOyezApp(
       added.push(feed);
     }
 
-    const pollResults = pollNow ? await activeScheduler.pollAll(true) : undefined;
+    const pollResults = pollNow
+      ? await activeScheduler.pollAll(true)
+      : undefined;
     return jsonResponse(
       {
         addedCount: added.length,
+        totalRegisteredFeeds: engine.listFeeds().length,
         feeds: added,
         pollResults,
       },
@@ -226,6 +323,9 @@ export function createOyezApp(
 
     const body = await readJsonBody<{
       title?: string;
+      region?: WorldRegion;
+      country?: string;
+      language?: string;
       category?: string;
       tags?: string[];
       enabled?: boolean;
@@ -236,6 +336,15 @@ export function createOyezApp(
     const updated: FeedConfig = {
       ...feed,
       title: body.title !== undefined ? body.title.trim() : feed.title,
+      region: body.region !== undefined ? body.region : feed.region,
+      country:
+        body.country !== undefined
+          ? body.country.trim().toUpperCase()
+          : feed.country,
+      language:
+        body.language !== undefined
+          ? body.language.trim().toLowerCase().slice(0, 2)
+          : feed.language,
       category:
         body.category !== undefined
           ? body.category.trim().toLowerCase()
@@ -243,7 +352,8 @@ export function createOyezApp(
       tags: Array.isArray(body.tags)
         ? body.tags.map((t) => String(t).trim()).filter(Boolean)
         : feed.tags,
-      enabled: body.enabled !== undefined ? Boolean(body.enabled) : feed.enabled,
+      enabled:
+        body.enabled !== undefined ? Boolean(body.enabled) : feed.enabled,
       pollIntervalSeconds:
         body.pollIntervalSeconds !== undefined
           ? Math.max(60, Number(body.pollIntervalSeconds))
@@ -288,7 +398,14 @@ export function createOyezApp(
     const q = query.get("q") ?? undefined;
     const feedId = query.get("feedId") ?? undefined;
     const category = query.get("category") ?? undefined;
+    const region = query.get("region") ?? undefined;
+    const country = query.get("country") ?? undefined;
+    const mentionedCountry = query.get("mentionedCountry") ?? undefined;
+    const language = query.get("language") ?? undefined;
+    const topic = query.get("topic") ?? undefined;
+    const entity = query.get("entity") ?? undefined;
     const domain = query.get("domain") ?? undefined;
+    const includeFacets = query.get("facets") === "true";
     const fromRaw = query.get("from");
     const toRaw = query.get("to");
     const sortRaw = query.get("sort");
@@ -315,6 +432,12 @@ export function createOyezApp(
       q,
       feedId,
       category,
+      region,
+      country,
+      mentionedCountry,
+      language,
+      topic,
+      entity,
       domain,
       from: from && !Number.isNaN(from) ? from : undefined,
       to: to && !Number.isNaN(to) ? to : undefined,
@@ -322,6 +445,10 @@ export function createOyezApp(
       limit,
       offset,
     });
+
+    if (includeFacets) {
+      searchResult.facets = engine.getFacets();
+    }
 
     return jsonResponse(searchResult);
   });
@@ -332,6 +459,21 @@ export function createOyezApp(
       return errorResponse(`Article not found: ${params.id}`, 404);
     }
     return jsonResponse({ article });
+  });
+
+  router.get("/api/v1/articles/:id/related", ({ params, query }) => {
+    const article = engine.getArticle(params.id);
+    if (!article) {
+      return errorResponse(`Article not found: ${params.id}`, 404);
+    }
+    const limit = Number(query.get("limit") ?? 8);
+    const related = engine.findRelatedArticles(article.id, limit);
+    return jsonResponse({
+      articleId: article.id,
+      title: article.title,
+      relatedCount: related.length,
+      related,
+    });
   });
 
   router.delete("/api/v1/articles/:id", async ({ params }) => {
@@ -348,7 +490,10 @@ export function createOyezApp(
       return errorResponse(`Article not found: ${params.id}`, 404);
     }
     if (!article.url || !article.url.startsWith("http")) {
-      return errorResponse("Article does not have a valid HTTP(S) URL to extract", 400);
+      return errorResponse(
+        "Article does not have a valid HTTP(S) URL to extract",
+        400
+      );
     }
 
     const extracted = await fetchAndExtractArticle(article.url);
@@ -364,9 +509,9 @@ export function createOyezApp(
       fullContentExtracted: true,
     };
 
-    await engine.upsertArticle(updated);
+    const reindexed = await engine.upsertArticle(updated);
     return jsonResponse({
-      article: updated,
+      article: reindexed,
       extracted,
     });
   });

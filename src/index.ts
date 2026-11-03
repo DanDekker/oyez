@@ -21,6 +21,9 @@ export async function startServer() {
         id: `feed_${Bun.hash(seed.url).toString(36)}`,
         url: seed.url,
         title: seed.title,
+        region: seed.region,
+        country: seed.country,
+        language: seed.language,
         category: seed.category,
         tags: seed.tags,
         enabled: true,
@@ -33,10 +36,12 @@ export async function startServer() {
       };
       await engine.upsertFeed(feed);
     }
-    console.log(`[Oyez] Seeded ${DEFAULT_FEED_SEEDS.length} default feeds.`);
+    console.log(
+      `[Oyez] Seeded ${DEFAULT_FEED_SEEDS.length} global feeds across all regions.`
+    );
   }
 
-  const scheduler = new FeedScheduler(engine);
+  const scheduler = new FeedScheduler(engine, 8);
   const app = createOyezApp(engine, scheduler);
 
   scheduler.start(15_000);
