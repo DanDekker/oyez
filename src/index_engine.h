@@ -67,10 +67,16 @@ typedef struct {
   size_t mentioned_asset_count;
   char mentioned_fiscal_events[MAX_EXTRACTED_EVENTS][24];
   size_t mentioned_fiscal_event_count;
+  char mentioned_ai_models[MAX_EXTRACTED_AI_MODELS][24];
+  size_t mentioned_ai_model_count;
+  char mentioned_ai_infra[MAX_EXTRACTED_AI_INFRA][24];
+  size_t mentioned_ai_infra_count;
   ClearanceLevel clearance;
   double opsec_score;
   FiscalStance fiscal_stance;
   double macro_score;
+  AiComputeTier ai_tier;
+  double ai_compute_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -127,6 +133,7 @@ typedef struct {
   BitSet by_news_type[NEWS_TYPE_COUNT];
   BitSet by_clearance[CLEARANCE_LEVEL_COUNT];
   BitSet by_fiscal_stance[FISCAL_STANCE_COUNT];
+  BitSet by_ai_tier[AI_TIER_COUNT];
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
@@ -136,6 +143,8 @@ typedef struct {
   CountryFiber by_fiscal_event[64];
   CountryFiber by_cve[128];
   CountryFiber by_org[128];
+  CountryFiber by_ai_model[128];
+  CountryFiber by_ai_infra[128];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -167,6 +176,9 @@ typedef struct {
   const char *fiscal_event;
   const char *cve;
   const char *organization;
+  const char *ai_tier;
+  const char *ai_model;
+  const char *ai_infra;
   const char *region;
   const char *country;
   const char *mentioned_country;

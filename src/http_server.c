@@ -324,7 +324,19 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_format(buf, "\"opsec_score\":%.2f,", a->opsec_score);
   buffer_text(buf, "\"fiscal_stance\":"); json_cstr(buf, fiscal_stance_slug(a->fiscal_stance)); buffer_text(buf, ",");
   buffer_format(buf, "\"macro_score\":%.2f,", a->macro_score);
-  buffer_text(buf, "\"mentioned_cves\":[");
+  buffer_text(buf, "\"ai_tier\":"); json_cstr(buf, ai_compute_tier_slug(a->ai_tier)); buffer_text(buf, ",");
+  buffer_format(buf, "\"ai_compute_score\":%.2f,", a->ai_compute_score);
+  buffer_text(buf, "\"mentioned_ai_models\":[");
+  for(size_t i = 0; i < a->mentioned_ai_model_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_ai_models[i]);
+  }
+  buffer_text(buf, "],\"mentioned_ai_infra\":[");
+  for(size_t i = 0; i < a->mentioned_ai_infra_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_ai_infra[i]);
+  }
+  buffer_text(buf, "],\"mentioned_cves\":[");
   for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
     json_cstr(buf, a->mentioned_cves[i]);
@@ -759,9 +771,71 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/ai") == 0) {
+    buffer_text(out_json, "{\"ai_compute_tiers\":{");
+    for(uint32_t at = 0; at < AI_TIER_COUNT; ++at) {
+      if(at > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ai_compute_tier_slug((AiComputeTier)at));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_tier[at]));
+    }
+    buffer_text(out_json, "},\"ai_models\":{");
+    int first_m = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_ai_model[i].occupied) {
+        if(!first_m) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_ai_model[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_model[i].bits));
+        first_m = 0;
+      }
+    }
+    buffer_text(out_json, "},\"ai_infrastructure\":{");
+    int first_i = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_ai_infra[i].occupied) {
+        if(!first_i) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_ai_infra[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_infra[i].bits));
+        first_i = 0;
+      }
+    }
+    buffer_text(out_json, "},\"top_ai_articles\":[");
+    const ArticleRecord *top_ai[12];
+    size_t top_count = 0;
+    for(size_t i = 0; i < eng->article_count; ++i) {
+      const ArticleRecord *a = &eng->articles[i];
+      if(a->ai_compute_score <= 0.0) continue;
+      if(top_count < 12u) {
+        top_ai[top_count++] = a;
+      } else {
+        size_t min_idx = 0;
+        for(size_t k = 1u; k < 12u; ++k) {
+          if(top_ai[k]->ai_compute_score < top_ai[min_idx]->ai_compute_score) min_idx = k;
+        }
+        if(a->ai_compute_score > top_ai[min_idx]->ai_compute_score) {
+          top_ai[min_idx] = a;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      for(size_t j = i + 1u; j < top_count; ++j) {
+        if(top_ai[j]->ai_compute_score > top_ai[i]->ai_compute_score) {
+          const ArticleRecord *tmp = top_ai[i];
+          top_ai[i] = top_ai[j];
+          top_ai[j] = tmp;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      serialize_article(out_json, top_ai[i], top_ai[i]->ai_compute_score, 0);
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
     char q_str[256], cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
-    char cve_str[32], org_str[32];
+    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32];
     char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
@@ -774,6 +848,9 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "fiscal_event", fev, sizeof(fev));
     query_param(qs, "cve", cve_str, sizeof(cve_str));
     query_param(qs, "organization", org_str, sizeof(org_str));
+    query_param(qs, "ai_tier", ait_str, sizeof(ait_str));
+    query_param(qs, "ai_model", aim_str, sizeof(aim_str));
+    query_param(qs, "ai_infra", aii_str, sizeof(aii_str));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -797,6 +874,9 @@ int http_handle_request(ServerContext *ctx,
     aq.fiscal_event = fev[0] ? fev : NULL;
     aq.cve = cve_str[0] ? cve_str : NULL;
     aq.organization = org_str[0] ? org_str : NULL;
+    aq.ai_tier = ait_str[0] ? ait_str : NULL;
+    aq.ai_model = aim_str[0] ? aim_str : NULL;
+    aq.ai_infra = aii_str[0] ? aii_str : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;
@@ -920,6 +1000,18 @@ int http_handle_request(ServerContext *ctx,
     for(size_t i = 0; i < ent.fiscal_event_count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       json_cstr(out_json, ent.fiscal_events[i]);
+    }
+    buffer_text(out_json, "],\"ai_tier\":");
+    json_cstr(out_json, ai_compute_tier_slug(ent.ai_tier));
+    buffer_format(out_json, ",\"ai_compute_score\":%.2f,\"ai_models\":[", ent.ai_compute_score);
+    for(size_t i = 0; i < ent.ai_model_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.ai_models[i]);
+    }
+    buffer_text(out_json, "],\"ai_infra\":[");
+    for(size_t i = 0; i < ent.ai_infra_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.ai_infra[i]);
     }
     buffer_text(out_json, "]}}");
 

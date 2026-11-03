@@ -10,13 +10,24 @@ enum {
   ONTOLOGY_NODE_COUNT = 32,
   CLEARANCE_LEVEL_COUNT = 5,
   FISCAL_STANCE_COUNT = 5,
+  AI_TIER_COUNT = 5,
   MAX_EXTRACTED_COUNTRIES = 12,
   MAX_EXTRACTED_ORGS = 12,
   MAX_EXTRACTED_CVES = 8,
   MAX_EXTRACTED_ASSETS = 10,
   MAX_EXTRACTED_EVENTS = 8,
+  MAX_EXTRACTED_AI_MODELS = 10,
+  MAX_EXTRACTED_AI_INFRA = 10,
   MAX_LEXICAL_TOKENS = 256
 };
+
+typedef enum {
+  AI_TIER_NONE = 0,                 /* Non-AI general baseline */
+  AI_TIER_APPLIED_RAG = 1,          /* Embeddings, vector databases, RAG, copilots & enterprise apps */
+  AI_TIER_INFERENCE_STACK = 2,      /* vLLM, SGLang, TensorRT-LLM, KV-cache, quantization & speculative decode */
+  AI_TIER_NEOCLOUD_CLUSTER = 3,     /* Neoclouds (CoreWeave/Lambda/Together), Blackwell/Hopper/MI300X/TPU/Groq clusters */
+  AI_TIER_FRONTIER_PRETRAINING = 4  /* Frontier pretraining, test-time compute RL (GRPO/RLHF), MoE & scaling laws */
+} AiComputeTier;
 
 typedef enum {
   CLEARANCE_PUBLIC = 0,       /* Open general reporting */
@@ -129,6 +140,10 @@ typedef struct {
   size_t asset_count;
   char fiscal_events[MAX_EXTRACTED_EVENTS][24];
   size_t fiscal_event_count;
+  char ai_models[MAX_EXTRACTED_AI_MODELS][24];
+  size_t ai_model_count;
+  char ai_infra[MAX_EXTRACTED_AI_INFRA][24];
+  size_t ai_infra_count;
   uint32_t direct_ontology_mask;
   uint32_t closure_ontology_mask;
   NewsType news_type;
@@ -136,6 +151,8 @@ typedef struct {
   double opsec_score;
   FiscalStance fiscal_stance;
   double macro_score;
+  AiComputeTier ai_tier;
+  double ai_compute_score;
 } ExtractedEntities;
 
 typedef struct {
@@ -160,6 +177,9 @@ int clearance_level_from_slug(const char *slug, ClearanceLevel *out);
 
 const char *fiscal_stance_slug(FiscalStance stance);
 int fiscal_stance_from_slug(const char *slug, FiscalStance *out);
+
+const char *ai_compute_tier_slug(AiComputeTier tier);
+int ai_compute_tier_from_slug(const char *slug, AiComputeTier *out);
 
 void ontology_init(void);
 const OntologyNode *ontology_node(OntologyNodeId id);

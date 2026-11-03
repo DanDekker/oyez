@@ -48,6 +48,14 @@ static const char *const k_fiscal_stance_slugs[FISCAL_STANCE_COUNT] = {
     "bearish-contraction",
 };
 
+static const char *const k_ai_tier_slugs[AI_TIER_COUNT] = {
+    "non-ai-baseline",
+    "applied-and-rag",
+    "inference-and-serving",
+    "neocloud-and-cluster",
+    "frontier-model-and-rl",
+};
+
 #define BIT(x) (1u << (uint32_t)(x))
 
 static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
@@ -297,6 +305,22 @@ int fiscal_stance_from_slug(const char *slug, FiscalStance *out) {
   for(uint32_t i = 0; i < FISCAL_STANCE_COUNT; ++i) {
     if(strcmp(slug, k_fiscal_stance_slugs[i]) == 0) {
       *out = (FiscalStance)i;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+const char *ai_compute_tier_slug(AiComputeTier tier) {
+  if((unsigned)tier >= AI_TIER_COUNT) return "non-ai-baseline";
+  return k_ai_tier_slugs[tier];
+}
+
+int ai_compute_tier_from_slug(const char *slug, AiComputeTier *out) {
+  if(!slug || !out) return -1;
+  for(uint32_t i = 0; i < AI_TIER_COUNT; ++i) {
+    if(strcmp(slug, k_ai_tier_slugs[i]) == 0) {
+      *out = (AiComputeTier)i;
       return 0;
     }
   }
@@ -1044,6 +1068,18 @@ static const OrgRule k_org_rules[] = {
     {"WHATWG", {"whatwg", "html living standard", NULL, NULL}},
     {"IETF", {"ietf", "internet engineering task force", "quic", "privacy pass"}},
     {"Tor Project", {"tor project", "onion service", "pluggable transport", NULL}},
+    {"OpenAI", {"openai", "chatgpt", "sam altman", NULL}},
+    {"Anthropic", {"anthropic", "dario amodei", "constitutional ai", NULL}},
+    {"Google DeepMind", {"deepmind", "google deepmind", "demis hassabis", NULL}},
+    {"Meta AI", {"meta ai", "fair lab", "llama-3", "llama 3"}},
+    {"Mistral AI", {"mistral ai", "le chat", "mixtral", NULL}},
+    {"xAI", {"xai", "colossus cluster", "grok-3", "grok 3"}},
+    {"DeepSeek", {"deepseek", "deepseek-r1", "deepseek-v3", "high-flyer"}},
+    {"Cohere", {"cohere", "command r+", "command-r", NULL}},
+    {"Hugging Face", {"hugging face", "huggingface", "safetensors", NULL}},
+    {"CoreWeave", {"coreweave", NULL, NULL, NULL}},
+    {"Scale AI", {"scale ai", "seal leaderboard", NULL, NULL}},
+    {"SSI", {"safe superintelligence", "ilya sutskever", NULL, NULL}},
 };
 
 typedef struct {
@@ -1100,13 +1136,90 @@ static const AssetRule k_asset_rules[] = {
     {"COPPER", {"copper price", "lme copper", "comex copper", NULL, NULL}},
     {"LITHIUM", {"lithium carbonate", "lithium spodumene", "battery metal", NULL, NULL}},
     {"URANIUM", {"uranium", "yellowcake", "u3o8", NULL, NULL}},
-    {"NVDA", {"nvidia", "blackwell", "h100", "cuda", NULL}},
+    {"NVDA", {"nvidia", "blackwell", "h100", "cuda", "gb200"}},
     {"TSMC", {"tsmc", "taiwan semiconductor", "cowos", NULL, NULL}},
     {"ASML", {"asml", "extreme ultraviolet", "high-na euv", NULL, NULL}},
-    {"AMD", {"amd", "instinct mi300", "epyc", NULL, NULL}},
+    {"AMD", {"amd", "instinct mi300", "mi300x", "mi325x", "epyc"}},
     {"ARM", {"arm holdings", "armv9", NULL, NULL, NULL}},
+    {"AVGO", {"broadcom", "custom xpu", "tomahawk 5", NULL, NULL}},
+    {"ANET", {"arista networks", "ultra ethernet", NULL, NULL, NULL}},
+    {"SMCI", {"supermicro", "super micro computer", NULL, NULL, NULL}},
+    {"MU", {"micron technology", "hbm3e", NULL, NULL, NULL}},
+    {"SKHYNIX", {"sk hynix", "hbm4", NULL, NULL, NULL}},
     {"BTC", {"bitcoin", "btc", "spot etf", NULL, NULL}},
     {"ETH", {"ethereum", "ether", NULL, NULL, NULL}},
+};
+
+typedef struct {
+  const char *model_family;
+  const char *const terms[6];
+} AiModelRule;
+
+static const AiModelRule k_ai_model_rules[] = {
+    {"GPT-4o/o1/o3", {"gpt-4", "gpt-4o", "openai o1", "openai o3", "gpt-5", "o3-mini"}},
+    {"Claude-3.5/3.7", {"claude 3", "claude 3.5", "claude 3.7", "claude sonnet", "claude opus", "claude haiku"}},
+    {"Gemini-2.0/1.5", {"gemini 1.5", "gemini 2.0", "gemini pro", "gemini flash", "gemini ultra", "deep think"}},
+    {"Llama-3/4", {"llama 3", "llama-3", "llama 3.1", "llama 3.3", "llama 4", "codellama"}},
+    {"DeepSeek-R1/V3", {"deepseek-r1", "deepseek r1", "deepseek-v3", "deepseek v3", "deepseek coder", "deepseek-v2"}},
+    {"Qwen-2.5/QwQ", {"qwen", "qwen-2.5", "qwen2.5", "qwq", "qwen-vl", "qwen-coder"}},
+    {"Mistral/Mixtral", {"mistral large", "mixtral", "codestral", "pixtral", "ministral", "mathstral"}},
+    {"Gemma-2", {"gemma 2", "gemma-2", "codegemma", "paligemma", "recurrentgemma", NULL}},
+    {"Grok-2/3", {"grok-2", "grok 2", "grok-3", "grok 3", "xai grok", NULL}},
+    {"Command-R+", {"command r+", "command-r+", "command r", "cohere aya", NULL, NULL}},
+    {"Falcon-2/Mamba", {"falcon 2", "falcon-180b", "falcon mamba", NULL, NULL, NULL}},
+    {"Phi-3/4", {"phi-3", "phi-4", "orca-2", "smollm", NULL, NULL}},
+    {"Nemotron/Cosmos", {"nemotron", "nvidia cosmos", "llama-nemotron", NULL, NULL, NULL}},
+    {"OLMo-2/StarCoder", {"olmo", "olmo 2", "starcoder2", "starcoder", "tupo", NULL}},
+    {"Yi/GLM-4/Kimi", {"glm-4", "chatglm", "yi-lightning", "kimi k1.5", "minimax", "baichuan"}},
+    {"Flux/SD3", {"flux.1", "stable diffusion 3", "sdxl", "midjourney v6", "ideogram", NULL}},
+    {"Sora/Veo-2", {"openai sora", "veo 2", "runway gen-3", "kling", "luma dream", NULL}},
+    {"AlphaFold-3/ESM3", {"alphafold", "alphafold 3", "esm3", "evo 2", "boltz-1", "rosettafold"}},
+    {"Whisper/AudioLM", {"whisper-large", "elevenlabs", "moshi", "voicebox", NULL, NULL}},
+    {"OpenVLA/Pi-0", {"openvla", "pi-0", "rt-2", "octo model", "figure helix", NULL}},
+};
+
+typedef struct {
+  const char *infra_name;
+  const char *const terms[6];
+} AiInfraRule;
+
+static const AiInfraRule k_ai_infra_rules[] = {
+    /* Neoclouds & GPU Cluster Clouds */
+    {"CoreWeave", {"coreweave", NULL, NULL, NULL, NULL, NULL}},
+    {"Lambda-Cloud", {"lambda labs", "lambda cloud", "lambda gpu", NULL, NULL, NULL}},
+    {"Together-AI", {"together ai", "together.ai", "together compute", NULL, NULL, NULL}},
+    {"Fireworks-AI", {"fireworks ai", "fireworks.ai", "fireattention", NULL, NULL, NULL}},
+    {"Crusoe-Cloud", {"crusoe energy", "crusoe cloud", "clean compute", NULL, NULL, NULL}},
+    {"Nebius-AI", {"nebius", "nebius ai", NULL, NULL, NULL, NULL}},
+    {"Baseten", {"baseten", "truss serving", NULL, NULL, NULL, NULL}},
+    {"Modal-Labs", {"modal labs", "modal serverless", NULL, NULL, NULL, NULL}},
+    {"Replicate", {"replicate.com", "cog container", NULL, NULL, NULL, NULL}},
+    {"Anyscale-Ray", {"anyscale", "ray cluster", "ray serve", "ray train", NULL, NULL}},
+    {"Hyperbolic/Voltage", {"hyperbolic labs", "voltage park", "sf compute", "prime intellect", NULL, NULL}},
+    {"Vultr/FluidStack", {"fluidstack", "vultr gpu", "paperspace", "runpod", "vast.ai", NULL}},
+    /* Inference Engines, Serving Runtimes & Kernels */
+    {"vLLM", {"vllm", "pagedattention", NULL, NULL, NULL, NULL}},
+    {"SGLang", {"sglang", "radixattention", "lmsys", NULL, NULL, NULL}},
+    {"TensorRT-LLM", {"tensorrt-llm", "tensorrt", "triton inference server", "nvidia dynamo", NULL, NULL}},
+    {"llama.cpp/GGUF", {"llama.cpp", "gguf", "ggml", "ollama", "apple mlx", "exllamav2"}},
+    {"FlashAttention", {"flashattention", "flashattention-2", "flashattention-3", "flash-decoding", NULL, NULL}},
+    {"FlashInfer/Triton", {"flashinfer", "openai triton", "triton kernel", "cutlass", "thunderkittens", "torch.compile"}},
+    {"Speculative-Decode", {"speculative decoding", "medusa head", "eagle decoding", "multi-token prediction", "draft model", NULL}},
+    {"KV-Cache/Disagg", {"kv cache", "kv-cache", "prefill-decode", "disaggregated serving", "mooncake", "prefix caching"}},
+    {"FP8/AWQ/GPTQ", {"fp8", "fp4", "awq", "gptq", "int4 quantization", "qlora"}},
+    /* AI Silicon, Accelerators & Cluster Interconnects */
+    {"NVIDIA-Blackwell", {"blackwell", "b200", "gb200", "nvl72", "vera rubin", "b100"}},
+    {"NVIDIA-Hopper", {"h100", "h200", "gh200", "hopper gpu", "hgx", NULL}},
+    {"AMD-Instinct", {"mi300x", "mi325x", "mi350", "amd rocm", "instinct gpu", NULL}},
+    {"Google-TPU", {"tpu v5p", "tpu v5e", "tpu v6", "trillium tpu", "ironwood", "xla compiler"}},
+    {"Groq-LPU", {"groq", "lpu inference", "language processing unit", NULL, NULL, NULL}},
+    {"Cerebras-WSE", {"cerebras", "wafer-scale engine", "wse-3", "cs-3", NULL, NULL}},
+    {"SambaNova-RDU", {"sambanova", "reconfigurable dataflow", "sn40l", NULL, NULL, NULL}},
+    {"Tenstorrent", {"tenstorrent", "wormhole", "blackhole", "grayskull", "tensix", NULL}},
+    {"Etched/MatX-ASIC", {"etched sohu", "transformer asic", "matx", "d-matrix", "furiosaai", "hailo"}},
+    {"AWS-Trainium", {"trainium", "trainium2", "inferentia", "inferentia2", NULL, NULL}},
+    {"Huawei-Ascend", {"ascend 910b", "ascend 910c", "huawei cann", "kunpeng", NULL, NULL}},
+    {"NVLink/InfiniBand", {"nvlink", "nvswitch", "infiniband", "rocev2", "ultra ethernet", "cowos"}},
 };
 
 typedef struct {
@@ -1326,6 +1439,87 @@ void entities_extract(const char *title,
 
   out->fiscal_stance = stance;
   out->macro_score = (double)out->asset_count * 1.4 + (double)out->fiscal_event_count * 2.2 + best_macro;
+
+  /* Extract AI Foundation Models, Neoclouds, Inference Engines & Compute Silicon */
+  for(size_t i = 0; i < sizeof(k_ai_model_rules) / sizeof(k_ai_model_rules[0]); ++i) {
+    if(out->ai_model_count >= MAX_EXTRACTED_AI_MODELS) break;
+    for(size_t t = 0; t < 6u && k_ai_model_rules[i].terms[t]; ++t) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_ai_model_rules[i].terms[t])) {
+        strncpy(out->ai_models[out->ai_model_count], k_ai_model_rules[i].model_family, 23u);
+        out->ai_models[out->ai_model_count][23] = '\0';
+        out->ai_model_count++;
+        break;
+      }
+    }
+  }
+
+  for(size_t i = 0; i < sizeof(k_ai_infra_rules) / sizeof(k_ai_infra_rules[0]); ++i) {
+    if(out->ai_infra_count >= MAX_EXTRACTED_AI_INFRA) break;
+    for(size_t t = 0; t < 6u && k_ai_infra_rules[i].terms[t]; ++t) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_ai_infra_rules[i].terms[t])) {
+        strncpy(out->ai_infra[out->ai_infra_count], k_ai_infra_rules[i].infra_name, 23u);
+        out->ai_infra[out->ai_infra_count][23] = '\0';
+        out->ai_infra_count++;
+        break;
+      }
+    }
+  }
+
+  if(out->ai_model_count > 0 || out->ai_infra_count > 0) {
+    out->direct_ontology_mask |= BIT(ONTO_AI);
+    out->closure_ontology_mask = ontology_upward_closure(out->direct_ontology_mask);
+  }
+
+  AiComputeTier ai_tier = AI_TIER_NONE;
+  double ai_score = (double)out->ai_model_count * 2.4 + (double)out->ai_infra_count * 2.8;
+
+  if((out->direct_ontology_mask & BIT(ONTO_AI)) != 0u ||
+     text_contains_word(lower, len, "rag") || text_contains_word(lower, len, "vector database") ||
+     text_contains_word(lower, len, "embedding") || text_contains_word(lower, len, "prompt") ||
+     text_contains_word(lower, len, "copilot") || text_contains_word(lower, len, "agentic")) {
+    ai_score += 1.8;
+    if(ai_tier < AI_TIER_APPLIED_RAG) ai_tier = AI_TIER_APPLIED_RAG;
+  }
+
+  if(text_contains_word(lower, len, "inference") || text_contains_word(lower, len, "vllm") ||
+     text_contains_word(lower, len, "sglang") || text_contains_word(lower, len, "tensorrt-llm") ||
+     text_contains_word(lower, len, "kv cache") || text_contains_word(lower, len, "kv-cache") ||
+     text_contains_word(lower, len, "pagedattention") || text_contains_word(lower, len, "flashattention") ||
+     text_contains_word(lower, len, "speculative decoding") || text_contains_word(lower, len, "quantization") ||
+     text_contains_word(lower, len, "ttft") || text_contains_word(lower, len, "tpot") ||
+     text_contains_word(lower, len, "tokens per second") || text_contains_word(lower, len, "fp8") ||
+     text_contains_word(lower, len, "gguf") || text_contains_word(lower, len, "llama.cpp")) {
+    ai_score += 3.6;
+    if(ai_tier < AI_TIER_INFERENCE_STACK) ai_tier = AI_TIER_INFERENCE_STACK;
+  }
+
+  if(text_contains_word(lower, len, "neocloud") || text_contains_word(lower, len, "coreweave") ||
+     text_contains_word(lower, len, "lambda labs") || text_contains_word(lower, len, "together ai") ||
+     text_contains_word(lower, len, "fireworks ai") || text_contains_word(lower, len, "crusoe") ||
+     text_contains_word(lower, len, "nebius") || text_contains_word(lower, len, "baseten") ||
+     text_contains_word(lower, len, "blackwell") || text_contains_word(lower, len, "gb200") ||
+     text_contains_word(lower, len, "nvl72") || text_contains_word(lower, len, "h100") ||
+     text_contains_word(lower, len, "h200") || text_contains_word(lower, len, "mi300x") ||
+     text_contains_word(lower, len, "groq") || text_contains_word(lower, len, "cerebras") ||
+     text_contains_word(lower, len, "infiniband") || text_contains_word(lower, len, "nvlink") ||
+     text_contains_word(lower, len, "gpu cluster")) {
+    ai_score += 4.5;
+    if(ai_tier < AI_TIER_NEOCLOUD_CLUSTER) ai_tier = AI_TIER_NEOCLOUD_CLUSTER;
+  }
+
+  if(text_contains_word(lower, len, "pretraining") || text_contains_word(lower, len, "pre-training") ||
+     text_contains_word(lower, len, "post-training") || text_contains_word(lower, len, "test-time compute") ||
+     text_contains_word(lower, len, "rlhf") || text_contains_word(lower, len, "grpo") ||
+     text_contains_word(lower, len, "dpo") || text_contains_word(lower, len, "mixture of experts") ||
+     text_contains_word(lower, len, "scaling laws") || text_contains_word(lower, len, "chinchilla") ||
+     text_contains_word(lower, len, "frontier model") || text_contains_word(lower, len, "chain-of-thought") ||
+     text_contains_word(lower, len, "reward model") || text_contains_word(lower, len, "open weights")) {
+    ai_score += 5.2;
+    if(ai_tier < AI_TIER_FRONTIER_PRETRAINING) ai_tier = AI_TIER_FRONTIER_PRETRAINING;
+  }
+
+  out->ai_tier = ai_tier;
+  out->ai_compute_score = ai_score;
 }
 
 static const char *const k_stopwords[] = {
@@ -1365,17 +1559,24 @@ typedef struct {
 static const DomainAlias k_domain_aliases[] = {
     {"0-day", "zero-day"},
     {"0day", "zero-day"},
+    {"agi", "artificial-general-intelligence"},
     {"ai", "artificial-intelligence"},
     {"apt", "advanced-persistent-threat"},
+    {"asi", "artificial-superintelligence"},
+    {"awq", "activation-aware-quantization"},
+    {"bf16", "bfloat16"},
     {"boe", "bank-of-england"},
     {"boj", "bank-of-japan"},
     {"bps", "basis-point"},
     {"btc", "bitcoin"},
     {"cbdc", "central-bank-digital-currency"},
     {"cisa", "cybersecurity-agency"},
+    {"cowos", "chip-on-wafer-on-substrate"},
     {"cpi", "consumer-price-index"},
+    {"cuda", "gpu-compute-runtime"},
     {"cve", "vulnerability"},
     {"ddos", "denial-of-service"},
+    {"dpo", "direct-preference-optimization"},
     {"dxy", "dollar-index"},
     {"ebpf", "extended-bpf"},
     {"ecb", "european-central-bank"},
@@ -1384,11 +1585,18 @@ static const DomainAlias k_domain_aliases[] = {
     {"fed", "federal-reserve"},
     {"fomc", "federal-reserve"},
     {"forex", "foreign-exchange"},
+    {"fp4", "low-bit-quantization"},
+    {"fp8", "low-bit-quantization"},
     {"fx", "foreign-exchange"},
     {"gdp", "gross-domestic-product"},
     {"geoint", "geospatial-intelligence"},
+    {"gguf", "quantized-model-weights"},
     {"gilt", "sovereign-bond"},
     {"gilts", "sovereign-bond"},
+    {"gptq", "post-training-quantization"},
+    {"grpo", "group-relative-policy-optimization"},
+    {"h100", "hopper-gpu"},
+    {"h200", "hopper-gpu"},
     {"hbm", "high-bandwidth-memory"},
     {"humint", "human-intelligence"},
     {"imf", "international-monetary-fund"},
@@ -1396,15 +1604,23 @@ static const DomainAlias k_domain_aliases[] = {
     {"jgb", "japanese-government-bond"},
     {"jgbs", "japanese-government-bond"},
     {"jwst", "james-webb-telescope"},
+    {"kv-cache", "key-value-attention-cache"},
     {"lhc", "large-hadron-collider"},
     {"llm", "large-language-model"},
     {"llms", "large-language-model"},
     {"lng", "liquefied-natural-gas"},
+    {"lora", "low-rank-adaptation"},
+    {"mcts", "monte-carlo-tree-search"},
+    {"mi300x", "instinct-gpu"},
     {"ml-dsa", "dilithium"},
     {"ml-kem", "kyber"},
+    {"mlx", "apple-silicon-ml"},
+    {"moe", "mixture-of-experts"},
     {"mrna", "messenger-rna"},
+    {"nccl", "collective-gpu-communication"},
     {"nfp", "nonfarm-payroll"},
     {"nsa", "national-security-agency"},
+    {"nvlink", "gpu-interconnect"},
     {"oob", "out-of-bounds"},
     {"opec+", "opec"},
     {"opsec", "operational-security"},
@@ -1413,20 +1629,30 @@ static const DomainAlias k_domain_aliases[] = {
     {"pce", "personal-consumption"},
     {"pqc", "post-quantum-cryptography"},
     {"qe", "quantitative-easing"},
+    {"qlora", "quantized-low-rank-adaptation"},
     {"qt", "quantitative-tightening"},
+    {"rag", "retrieval-augmented-generation"},
     {"rbi", "reserve-bank-of-india"},
     {"rce", "remote-code-execution"},
+    {"rlhf", "reinforcement-learning-human-feedback"},
     {"rmb", "renminbi"},
+    {"rocm", "amd-gpu-compute"},
     {"s&p500", "sp500"},
+    {"sft", "supervised-fine-tuning"},
+    {"sglang", "structured-generation-runtime"},
     {"sigint", "signals-intelligence"},
     {"smr", "small-modular-reactor"},
     {"snb", "swiss-national-bank"},
     {"sqli", "sql-injection"},
     {"ssrf", "server-side-forgery"},
     {"tokamak", "nuclear-fusion-tokamak"},
+    {"tpot", "time-per-output-token"},
+    {"tpu", "tensor-processing-unit"},
+    {"ttft", "time-to-first-token"},
     {"uaf", "use-after-free"},
     {"uav", "drone"},
     {"ust", "treasury-yield"},
+    {"vllm", "paged-attention-serving"},
     {"wasm", "webassembly"},
     {"xss", "cross-site-scripting"},
     {"ycc", "yield-curve-control"},

@@ -279,6 +279,20 @@ static void test_category_theory_and_ontology(void) {
   assert(fin_ent.asset_count >= 4u);
   assert(fin_ent.fiscal_event_count >= 3u);
   assert(fin_ent.macro_score > 10.0);
+
+  /* AI Foundation Models, Neoclouds, Inference Stack & Compute Tier extraction */
+  ExtractedEntities ai_ent;
+  entities_extract("CoreWeave deploys NVIDIA Blackwell GB200 NVL72 clusters running DeepSeek-R1 and Llama-3 with vLLM and SGLang",
+                   "FlashAttention-3 FP8 quantization and speculative decoding accelerate GRPO reinforcement learning test-time compute.",
+                   "Together AI, Fireworks AI, and Groq LPU inference clusters benchmark KV-cache disaggregation over InfiniBand.",
+                   "ai",
+                   NULL,
+                   0,
+                   &ai_ent);
+  assert(ai_ent.ai_tier == AI_TIER_FRONTIER_PRETRAINING);
+  assert(ai_ent.ai_model_count >= 2u);
+  assert(ai_ent.ai_infra_count >= 5u);
+  assert(ai_ent.ai_compute_score > 20.0);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
@@ -286,7 +300,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 520u);
+  assert(seeded >= 565u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",
@@ -429,6 +443,43 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(http_handle_request(&ctx, "GET", "/api/v1/security", "", 0, &status, &json) == 0);
   assert(status == 200);
   assert(strstr(json.data, "\"clearance_levels\":") != NULL);
+  buffer_free(&json);
+
+  /* Ingest an AI neocloud / inference article and test /api/v1/ai and ?ai_model= / ?ai_infra= fibers */
+  uint32_t a4 = 0;
+  engine_ingest_article(&eng,
+                        f_tw,
+                        "tw-ai-4",
+                        "CoreWeave and Together AI scale DeepSeek-R1 inference on NVIDIA Blackwell GB200 with vLLM",
+                        "https://focustaiwan.tw/4",
+                        "AI Desk",
+                        "PagedAttention KV-cache and SGLang speculative decoding boost token throughput.",
+                        "<p>CoreWeave GB200 NVL72 neocloud clusters serve DeepSeek-R1 and Llama 3.3 using vLLM FP8.</p>",
+                        "2026-11-03T03:00:00Z",
+                        1762130500000ULL,
+                        "",
+                        NULL,
+                        0,
+                        &a4,
+                        &ins);
+  assert(ins == 1);
+
+  ArticleQuery ai_q;
+  memset(&ai_q, 0, sizeof(ai_q));
+  ai_q.ai_model = "DeepSeek-R1/V3";
+  ai_q.ai_infra = "CoreWeave";
+  ai_q.ai_tier = "neocloud-and-cluster";
+  ai_q.limit = 10u;
+  assert(engine_search(&eng, &ai_q, &res) == 0);
+  assert(res.total == 1u);
+  assert(res.hits[0].article->id == a4);
+  search_response_free(&res);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/ai", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"ai_compute_tiers\":") != NULL);
+  assert(strstr(json.data, "\"DEEPSEEK-R1/V3\":1") != NULL);
+  assert(strstr(json.data, "\"COREWEAVE\":1") != NULL);
   buffer_free(&json);
 
   m1_tokenizer_free(&tok);
