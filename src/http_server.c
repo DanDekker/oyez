@@ -16,7 +16,23 @@
 
 static int url_is_safe(const char *url) {
   if(!url) return 0;
-  if(strncmp(url, "http://", 7u) != 0 && strncmp(url, "https://", 8u) != 0) return 0;
+  const char *host = NULL;
+  if(strncmp(url, "http://", 7u) == 0) host = url + 7u;
+  else if(strncmp(url, "https://", 8u) == 0) host = url + 8u;
+  else return 0;
+  if(*host == '\0' || *host == '/') return 0;
+
+  /* Block local/loopback/link-local SSRF targets */
+  if(strncasecmp(host, "localhost", 9u) == 0 &&
+     (host[9] == '\0' || host[9] == ':' || host[9] == '/')) return 0;
+  if(strncmp(host, "127.", 4u) == 0 ||
+     strncmp(host, "0.0.0.0", 7u) == 0 ||
+     strncmp(host, "169.254.", 8u) == 0 ||
+     strncmp(host, "[::1]", 5u) == 0 ||
+     strncmp(host, "[0:0:0:0:0:0:0:1]", 17u) == 0) {
+    return 0;
+  }
+
   for(const char *p = url; *p; ++p) {
     unsigned char c = (unsigned char)*p;
     if(c <= 0x20u || c >= 0x7Fu || c == '\'' || c == '"' || c == '`' || c == '$' || c == ';' ||
@@ -33,7 +49,7 @@ int http_fetch_url(const char *url, Buffer *out) {
   char cmd[2048];
   int n = snprintf(cmd,
                    sizeof(cmd),
-                   "curl -fsSL --max-time 12 -A 'Oyez/1.0 (+https://github.com/dandekker/oyez)' '%s' 2>/dev/null",
+                   "curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-redirs 5 --max-time 12 -A 'Oyez/1.0 (+https://github.com/dandekker/oyez)' '%s' 2>/dev/null",
                    url);
   if(n < 0 || (size_t)n >= sizeof(cmd)) return -1;
 
@@ -1072,17 +1088,23 @@ int http_handle_request(ServerContext *ctx,
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/centrality") == 0) {
     RankedEntity ents[24];
     ScoredArticle arts[16];
+    memset(ents, 0, sizeof(ents));
+    memset(arts, 0, sizeof(arts));
     size_t ecount = engine_bipartite_pagerank(eng, 15u, 0.85, ents, 24u, arts, 16u);
-    size_t acount = eng->article_count < 16u ? eng->article_count : 16u;
+    size_t acount = (ecount > 0) ? (eng->article_count < 16u ? eng->article_count : 16u) : 0u;
     buffer_text(out_json, "{\"entities\":[");
     for(size_t i = 0; i < ecount; ++i) {
       if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json, "{\"id\":\"%s\",\"label\":\"%s\",\"kind\":\"%s\",\"score\":%.6f,\"degree\":%u}",
-                    ents[i].id, ents[i].label, ents[i].kind, ents[i].score, ents[i].degree);
+      buffer_text(out_json, "{\"id\":"); json_cstr(out_json, ents[i].id);
+      buffer_text(out_json, ",\"label\":"); json_cstr(out_json, ents[i].label);
+      buffer_text(out_json, ",\"kind\":"); json_cstr(out_json, ents[i].kind);
+      buffer_format(out_json, ",\"score\":%.6f,\"degree\":%u}", ents[i].score, ents[i].degree);
     }
     buffer_text(out_json, "],\"top_articles\":[");
+    size_t emitted = 0;
     for(size_t i = 0; i < acount; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
+      if(!arts[i].article) continue;
+      if(emitted++ > 0) buffer_text(out_json, ",");
       serialize_article(out_json, arts[i].article, arts[i].score, 0);
     }
     buffer_text(out_json, "]}");
@@ -1453,8 +1475,14 @@ int http_handle_request(ServerContext *ctx,
   }
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/extract") == 0) {
-    char html[32768], url[512];
-    json_extract_field(body, body_len, "html", html, sizeof(html));
+    char *html = malloc(32768u);
+    if(!html) {
+      *out_status = 500;
+      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
+      return 0;
+    }
+    char url[512];
+    json_extract_field(body, body_len, "html", html, 32768u);
     json_extract_field(body, body_len, "url", url, sizeof(url));
 
     Buffer fetched;
@@ -1468,6 +1496,7 @@ int http_handle_request(ServerContext *ctx,
       }
     }
     if(src_len == 0) {
+      free(html);
       buffer_free(&fetched);
       *out_status = 400;
       buffer_text(out_json, "{\"error\":\"missing_html_or_url\"}");
@@ -1551,15 +1580,22 @@ int http_handle_request(ServerContext *ctx,
 
     readability_free(&ex);
     buffer_free(&fetched);
+    free(html);
     return 0;
   }
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/tokenize") == 0 && ctx->tokenizer) {
-    char text[16384];
-    json_extract_field(body, body_len, "text", text, sizeof(text));
+    char *text = malloc(16384u);
+    if(!text) {
+      *out_status = 500;
+      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
+      return 0;
+    }
+    json_extract_field(body, body_len, "text", text, 16384u);
     uint32_t *tokens = NULL;
     size_t count = 0;
     m1_tokenizer_encode(ctx->tokenizer, (const uint8_t *)text, strlen(text), &tokens, &count);
+    free(text);
     buffer_format(out_json,
                   "{\"vocab_size\":%u,\"sha256\":\"%s\",\"token_count\":%zu,\"tokens\":[",
                   m1_tokenizer_vocab_size(ctx->tokenizer),
@@ -1631,13 +1667,19 @@ static void *http_client_worker(void *arg) {
   setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+  const size_t req_cap = 65536u;
+  char *req = malloc(req_cap);
+  if(!req) {
+    close(client);
+    return NULL;
+  }
+
   /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection */
   for(int req_idx = 0; req_idx < 16; ++req_idx) {
-    char req[65536];
     size_t used = 0;
     const char *hdr_end = NULL;
-    while(used + 1u < sizeof(req)) {
-      ssize_t n = recv(client, req + used, sizeof(req) - 1u - used, 0);
+    while(used + 1u < req_cap) {
+      ssize_t n = recv(client, req + used, req_cap - 1u - used, 0);
       if(n <= 0) break;
       used += (size_t)n;
       req[used] = '\0';
@@ -1654,12 +1696,12 @@ static void *http_client_worker(void *arg) {
     }
     if(cl_hdr && (size_t)(cl_hdr - req) < hdr_len) {
       expected_body = (size_t)strtoul(cl_hdr + 15u, NULL, 10);
-      if(expected_body > sizeof(req) - 1u - hdr_len) {
-        expected_body = sizeof(req) - 1u - hdr_len;
+      if(expected_body > req_cap - 1u - hdr_len) {
+        expected_body = req_cap - 1u - hdr_len;
       }
     }
-    while(used - hdr_len < expected_body && used + 1u < sizeof(req)) {
-      ssize_t n = recv(client, req + used, sizeof(req) - 1u - used, 0);
+    while(used - hdr_len < expected_body && used + 1u < req_cap) {
+      ssize_t n = recv(client, req + used, req_cap - 1u - used, 0);
       if(n <= 0) break;
       used += (size_t)n;
       req[used] = '\0';
@@ -1723,6 +1765,7 @@ static void *http_client_worker(void *arg) {
     if(want_close || send_err) break;
   }
 
+  free(req);
   close(client);
   return NULL;
 }
