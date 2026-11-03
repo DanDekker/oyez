@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -1620,6 +1621,7 @@ static const char *status_reason(int code) {
     case 200: return "OK";
     case 201: return "Created";
     case 400: return "Bad Request";
+    case 413: return "Content Too Large";
     case 404: return "Not Found";
     default: return "Internal Server Error";
   }
@@ -1653,11 +1655,102 @@ static int send_all(int fd, const char *data, size_t len) {
   return 0;
 }
 
-static void *http_client_worker(void *arg) {
-  ClientConnTask *task = (ClientConnTask *)arg;
-  ServerContext *ctx = task->ctx;
-  int client = task->client_fd;
-  free(task);
+static size_t request_header_end(const char *req, size_t used) {
+  for(size_t i = 0; i + 3u < used; ++i) {
+    if(req[i] == '\r' && req[i + 1u] == '\n' && req[i + 2u] == '\r' && req[i + 3u] == '\n') {
+      return i + 4u;
+    }
+  }
+  return 0;
+}
+
+static int header_has_token(const char *value, size_t len, const char *token) {
+  size_t token_len = strlen(token);
+  for(size_t i = 0; i < len;) {
+    while(i < len && (value[i] == ' ' || value[i] == '\t' || value[i] == ',')) i++;
+    size_t start = i;
+    while(i < len && value[i] != ',') i++;
+    size_t end = i;
+    while(end > start && (value[end - 1u] == ' ' || value[end - 1u] == '\t')) end--;
+    if(end - start == token_len && strncasecmp(value + start, token, token_len) == 0) return 1;
+  }
+  return 0;
+}
+
+static int parse_request_headers(char *req, size_t hdr_len, size_t cap,
+                                 char method[16], char target[1024],
+                                 size_t *body_len, int *want_close) {
+  for(size_t i = 0; i < hdr_len; ++i) {
+    unsigned char c = (unsigned char)req[i];
+    if(c == 0 || (c < 0x20u && c != '\r' && c != '\n' && c != '\t') || c == 0x7fu) return 400;
+    if(c == '\r' && (i + 1u >= hdr_len || req[i + 1u] != '\n')) return 400;
+    if(c == '\n' && (i == 0 || req[i - 1u] != '\r')) return 400;
+  }
+  char *first_end = strstr(req, "\r\n");
+  if(!first_end || (size_t)(first_end - req) >= hdr_len) return 400;
+  char saved = *first_end;
+  *first_end = '\0';
+  char version[16] = {0};
+  char extra = 0;
+  int parts = sscanf(req, "%15s %1023s %15s %c", method, target, version, &extra);
+  *first_end = saved;
+  if(parts != 3 || (strcmp(version, "HTTP/1.1") != 0 && strcmp(version, "HTTP/1.0") != 0) ||
+     target[0] != '/') return 400;
+
+  *body_len = 0;
+  *want_close = strcmp(version, "HTTP/1.0") == 0;
+  int saw_length = 0;
+  char *p = first_end + 2u;
+  char *headers_end = req + hdr_len - 4u;
+  while(p < headers_end) {
+    char *end = strstr(p, "\r\n");
+    if(!end || end > headers_end || end == p) return 400;
+    char *colon = memchr(p, ':', (size_t)(end - p));
+    if(!colon || colon == p) return 400;
+    for(char *q = p; q < colon; ++q) {
+      unsigned char c = (unsigned char)*q;
+      if(!isalnum(c) && c != '-') return 400;
+    }
+    const char *value = colon + 1u;
+    while(value < end && (*value == ' ' || *value == '\t')) value++;
+    size_t name_len = (size_t)(colon - p);
+    if(name_len == 14u && strncasecmp(p, "Content-Length", 14u) == 0) {
+      if(saw_length || value == end) return 400;
+      saw_length = 1;
+      size_t length = 0;
+      const char *q = value;
+      while(q < end && *q >= '0' && *q <= '9') {
+        unsigned digit = (unsigned)(*q++ - '0');
+        if(length > (SIZE_MAX - digit) / 10u) return 413;
+        length = length * 10u + digit;
+      }
+      if(q == value) return 400;
+      while(q < end && (*q == ' ' || *q == '\t')) q++;
+      if(q != end) return 400;
+      *body_len = length;
+    } else if(name_len == 17u && strncasecmp(p, "Transfer-Encoding", 17u) == 0) {
+      return 400; /* Chunked bodies are not implemented. */
+    } else if(name_len == 10u && strncasecmp(p, "Connection", 10u) == 0) {
+      if(header_has_token(value, (size_t)(end - value), "close")) *want_close = 1;
+      if(strcmp(version, "HTTP/1.0") == 0 &&
+         header_has_token(value, (size_t)(end - value), "keep-alive")) *want_close = 0;
+    }
+    p = end + 2u;
+  }
+  if(*body_len > cap - hdr_len - 1u) return 413;
+  return 0;
+}
+
+static void send_request_error(int client, int status) {
+  char response[192];
+  int n = snprintf(response, sizeof(response),
+                   "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                   status, status_reason(status));
+  if(n > 0 && (size_t)n < sizeof(response)) send_all(client, response, (size_t)n);
+}
+
+void http_serve_client(ServerContext *ctx, int client) {
+  if(!ctx || client < 0) return;
 
 #ifdef SO_NOSIGPIPE
   int nosig = 1;
@@ -1671,62 +1764,59 @@ static void *http_client_worker(void *arg) {
   char *req = malloc(req_cap);
   if(!req) {
     close(client);
-    return NULL;
+    return;
   }
 
-  /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection */
+  size_t used = 0;
+  /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection. */
   for(int req_idx = 0; req_idx < 16; ++req_idx) {
-    size_t used = 0;
-    const char *hdr_end = NULL;
-    while(used + 1u < req_cap) {
-      ssize_t n = recv(client, req + used, req_cap - 1u - used, 0);
-      if(n <= 0) break;
-      used += (size_t)n;
-      req[used] = '\0';
-      hdr_end = strstr(req, "\r\n\r\n");
-      if(hdr_end) break;
-    }
-    if(used == 0 || !hdr_end) break;
-
-    size_t hdr_len = (size_t)((hdr_end + 4u) - req);
-    size_t expected_body = 0;
-    const char *cl_hdr = strstr(req, "Content-Length:");
-    if(!cl_hdr || (size_t)(cl_hdr - req) >= hdr_len) {
-      cl_hdr = strstr(req, "content-length:");
-    }
-    if(cl_hdr && (size_t)(cl_hdr - req) < hdr_len) {
-      expected_body = (size_t)strtoul(cl_hdr + 15u, NULL, 10);
-      if(expected_body > req_cap - 1u - hdr_len) {
-        expected_body = req_cap - 1u - hdr_len;
-      }
-    }
-    while(used - hdr_len < expected_body && used + 1u < req_cap) {
-      ssize_t n = recv(client, req + used, req_cap - 1u - used, 0);
-      if(n <= 0) break;
-      used += (size_t)n;
-      req[used] = '\0';
-    }
-
     char method[16] = {0};
     char target[1024] = {0};
-    if(sscanf(req, "%15s %1023s", method, target) != 2) break;
-
-    int want_close = (strstr(req, "Connection: close") != NULL ||
-                      strstr(req, "connection: close") != NULL);
+    size_t hdr_len = 0, expected_body = 0;
+    int want_close = 0;
+    int parse_status = 0;
+    for(;;) {
+      hdr_len = request_header_end(req, used);
+      if(hdr_len) {
+        parse_status = parse_request_headers(req, hdr_len, req_cap, method, target,
+                                             &expected_body, &want_close);
+        if(parse_status) break;
+        if(used >= hdr_len + expected_body) break;
+      }
+      if(used + 1u >= req_cap) {
+        parse_status = 413;
+        break;
+      }
+      ssize_t n = recv(client, req + used, req_cap - 1u - used, 0);
+      if(n <= 0) break;
+      used += (size_t)n;
+      req[used] = '\0';
+    }
+    if(parse_status) {
+      send_request_error(client, parse_status);
+      break;
+    }
+    if(!hdr_len || used < hdr_len + expected_body) break;
 
     if(strcmp(method, "OPTIONS") == 0) {
-      const char *cors =
+      char cors[256];
+      int cors_len = snprintf(cors, sizeof(cors),
           "HTTP/1.1 204 No Content\r\n"
           "Access-Control-Allow-Origin: *\r\n"
           "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
           "Access-Control-Allow-Headers: Content-Type\r\n"
-          "Connection: keep-alive\r\n\r\n";
-      if(send_all(client, cors, strlen(cors)) != 0 || want_close) break;
+          "Connection: %s\r\n\r\n", want_close ? "close" : "keep-alive");
+      if(cors_len < 0 || (size_t)cors_len >= sizeof(cors) ||
+         send_all(client, cors, (size_t)cors_len) != 0 || want_close) break;
+      size_t consumed = hdr_len + expected_body;
+      used -= consumed;
+      memmove(req, req + consumed, used);
+      req[used] = '\0';
       continue;
     }
 
     const char *body = req + hdr_len;
-    size_t body_len = used - hdr_len;
+    size_t body_len = expected_body;
 
     int is_write = (strcmp(method, "POST") == 0 &&
                     (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
@@ -1763,10 +1853,22 @@ static void *http_client_worker(void *arg) {
     buffer_free(&payload);
     buffer_free(&resp);
     if(want_close || send_err) break;
+    size_t consumed = hdr_len + expected_body;
+    used -= consumed;
+    memmove(req, req + consumed, used);
+    req[used] = '\0';
   }
 
   free(req);
   close(client);
+}
+
+static void *http_client_worker(void *arg) {
+  ClientConnTask *task = (ClientConnTask *)arg;
+  ServerContext *ctx = task->ctx;
+  int client = task->client_fd;
+  free(task);
+  http_serve_client(ctx, client);
   return NULL;
 }
 

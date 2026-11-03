@@ -27,5 +27,7 @@ int http_handle_request(ServerContext *ctx,
                         Buffer *out_json);
 
 int http_server_listen(ServerContext *ctx);
+/* Takes ownership of client_fd and closes it before returning. */
+void http_serve_client(ServerContext *ctx, int client_fd);
 
 #endif

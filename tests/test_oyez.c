@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 static void test_checksum_and_wire(void) {
@@ -978,6 +979,114 @@ static void test_hardening_and_concurrency(void) {
   engine_free(&eng);
 }
 
+typedef struct {
+  ServerContext *ctx;
+  int fd;
+} HttpSocketTask;
+
+static void *serve_test_socket(void *arg) {
+  HttpSocketTask *task = (HttpSocketTask *)arg;
+  http_serve_client(task->ctx, task->fd);
+  return NULL;
+}
+
+static void http_socket_exchange(ServerContext *ctx, const char *request, size_t split_at,
+                                 Buffer *response) {
+  int fd[2];
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+  HttpSocketTask task = {ctx, fd[1]};
+  pthread_t thread;
+  assert(pthread_create(&thread, NULL, serve_test_socket, &task) == 0);
+  size_t len = strlen(request);
+  assert(split_at <= len);
+  if(split_at == 0) split_at = len;
+  assert(write(fd[0], request, split_at) == (ssize_t)split_at);
+  if(split_at < len) {
+    struct timespec pause = {.tv_sec = 0, .tv_nsec = 20000000};
+    nanosleep(&pause, NULL);
+    assert(write(fd[0], request + split_at, len - split_at) == (ssize_t)(len - split_at));
+  }
+  shutdown(fd[0], SHUT_WR);
+  buffer_init(response);
+  char chunk[2048];
+  ssize_t n;
+  while((n = read(fd[0], chunk, sizeof(chunk))) > 0) buffer_append(response, chunk, (size_t)n);
+  close(fd[0]);
+  pthread_join(thread, NULL);
+}
+
+static size_t count_substring(const char *text, const char *needle) {
+  size_t count = 0;
+  size_t n = strlen(needle);
+  const char *p = text;
+  while((p = strstr(p, needle)) != NULL) {
+    count++;
+    p += n;
+  }
+  return count;
+}
+
+static void test_http_connection_framing(void) {
+  OyezEngine eng;
+  engine_init(&eng);
+  ServerContext ctx = {&eng, NULL, NULL, 0};
+  Buffer response;
+
+  const char *two_gets =
+      "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+      "GET /api/v1/stats HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  http_socket_exchange(&ctx, two_gets, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 200 OK") == 2u);
+  buffer_free(&response);
+
+  const char *body = "{\"html\":\"<p>Framed body text</p>\"}";
+  char post_then_get[512];
+  int written = snprintf(post_then_get, sizeof(post_then_get),
+      "POST /api/v1/extract HTTP/1.1\r\nHost: localhost\r\nContent-Length: %zu\r\n\r\n%s"
+      "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+      strlen(body), body);
+  assert(written > 0 && (size_t)written < sizeof(post_then_get));
+  const char *body_start = strstr(post_then_get, "\r\n\r\n");
+  assert(body_start != NULL);
+  size_t split_at = (size_t)(body_start + 4u - post_then_get) + 5u;
+  http_socket_exchange(&ctx, post_then_get, split_at, &response);
+  assert(count_substring(response.data, "HTTP/1.1 200 OK") == 2u);
+  assert(strstr(response.data, "Framed body text") != NULL);
+  buffer_free(&response);
+
+  const char *duplicate_length =
+      "POST /api/v1/extract HTTP/1.1\r\nContent-Length: 1\r\ncontent-length: 2\r\n\r\nx";
+  http_socket_exchange(&ctx, duplicate_length, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 400 Bad Request") == 1u);
+  buffer_free(&response);
+
+  const char *misleading_header =
+      "GET /health HTTP/1.1\r\nX-Note: Content-Length: 100\r\nConnection: close\r\n\r\n";
+  http_socket_exchange(&ctx, misleading_header, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 200 OK") == 1u);
+  buffer_free(&response);
+
+  const char *bare_newline =
+      "GET /health HTTP/1.1\r\nX-Note: value\ncontinued\r\n\r\n";
+  http_socket_exchange(&ctx, bare_newline, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 400 Bad Request") == 1u);
+  buffer_free(&response);
+
+  const char *chunked =
+      "POST /api/v1/extract HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+  http_socket_exchange(&ctx, chunked, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 400 Bad Request") == 1u);
+  buffer_free(&response);
+
+  const char *incomplete_body =
+      "POST /api/v1/extract HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort";
+  http_socket_exchange(&ctx, incomplete_body, 0, &response);
+  assert(response.len == 0u);
+  buffer_free(&response);
+
+  engine_free(&eng);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
@@ -985,6 +1094,7 @@ int main(void) {
   test_category_theory_and_ontology();
   test_engine_search_and_categorical_endpoints();
   test_hardening_and_concurrency();
+  test_http_connection_framing();
   printf("ALL C23 OYEZ TESTS PASSED\n");
   return 0;
 }
