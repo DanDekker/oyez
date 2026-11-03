@@ -7,6 +7,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
+    "index:world": "bun run src/cli/ingest-world.ts",
     "test": "bun test",
     "typecheck": "bun x tsc --noEmit"
   },
