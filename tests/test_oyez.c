@@ -221,6 +221,22 @@ static void test_category_theory_and_ontology(void) {
          NEWS_TYPE_INVESTIGATIVE_REPORT);
   assert(news_type_classify("Central bank raises interest rate by 50 basis points", "", "", "economy") ==
          NEWS_TYPE_MARKET_AND_ECONOMIC);
+
+  /* CVE, OPSEC & High-Clearance extraction */
+  ExtractedEntities sec_ent;
+  entities_extract("Zero-day exploit chain in V8 WebAssembly sandbox (CVE-2026-1337 and CVE-2026-9001)",
+                   "Cloudflare Turnstile JA4 TLS fingerprint and DARPA SIGINT mitigation.",
+                   "Post-quantum lattice cryptography and zero-knowledge proofs.",
+                   "cyber",
+                   NULL,
+                   0,
+                   &sec_ent);
+  assert(sec_ent.cve_count == 2u);
+  assert(strcmp(sec_ent.cves[0], "CVE-2026-1337") == 0);
+  assert(strcmp(sec_ent.cves[1], "CVE-2026-9001") == 0);
+  assert(sec_ent.clearance == CLEARANCE_STRATEGIC);
+  assert(sec_ent.opsec_score > 10.0);
+  assert((sec_ent.direct_ontology_mask & (1u << ONTO_CRYPTOGRAPHY)) != 0u);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
@@ -228,7 +244,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 370u);
+  assert(seeded >= 435u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",

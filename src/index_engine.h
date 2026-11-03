@@ -61,6 +61,10 @@ typedef struct {
   size_t mentioned_country_count;
   char mentioned_orgs[MAX_EXTRACTED_ORGS][24];
   size_t mentioned_org_count;
+  char mentioned_cves[MAX_EXTRACTED_CVES][20];
+  size_t mentioned_cve_count;
+  ClearanceLevel clearance;
+  double opsec_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -115,6 +119,7 @@ typedef struct {
   BitSet all_articles;
   BitSet by_region[WORLD_REGION_COUNT];
   BitSet by_news_type[NEWS_TYPE_COUNT];
+  BitSet by_clearance[CLEARANCE_LEVEL_COUNT];
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
@@ -134,6 +139,7 @@ typedef struct {
   const char *category;
   int use_category_morphism;
   const char *news_type;
+  const char *clearance;
   const char *region;
   const char *country;
   const char *mentioned_country;

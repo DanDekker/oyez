@@ -258,6 +258,7 @@ void engine_free(OyezEngine *engine) {
   bitset_free(&engine->all_articles);
   for(size_t i = 0; i < WORLD_REGION_COUNT; ++i) bitset_free(&engine->by_region[i]);
   for(size_t i = 0; i < NEWS_TYPE_COUNT; ++i) bitset_free(&engine->by_news_type[i]);
+  for(size_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) bitset_free(&engine->by_clearance[i]);
   for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
@@ -363,6 +364,9 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   }
   if((unsigned)a->news_type < NEWS_TYPE_COUNT) {
     bitset_set(&engine->by_news_type[a->news_type], slot);
+  }
+  if((unsigned)a->clearance < CLEARANCE_LEVEL_COUNT) {
+    bitset_set(&engine->by_clearance[a->clearance], slot);
   }
   for(uint32_t node = 0; node < ONTOLOGY_NODE_COUNT; ++node) {
     if(a->direct_ontology_mask & (1u << node)) {
@@ -490,8 +494,14 @@ int engine_ingest_article(OyezEngine *engine,
   ExtractedEntities ent;
   entities_extract(a->title, a->summary, a->content_text, a->feed_category, tags, tag_count, &ent);
   a->news_type = ent.news_type;
+  a->clearance = ent.clearance;
+  a->opsec_score = ent.opsec_score;
   a->direct_ontology_mask = ent.direct_ontology_mask;
   a->closure_ontology_mask = ent.closure_ontology_mask;
+
+  for(size_t i = 0; i < ent.cve_count && a->mentioned_cve_count < MAX_EXTRACTED_CVES; ++i) {
+    strcpy(a->mentioned_cves[a->mentioned_cve_count++], ent.cves[i]);
+  }
 
   /* Always include feed country if valid 2-letter ISO code */
   if(strlen(a->feed_country) == 2u && strcmp(a->feed_country, "UN") != 0 &&
@@ -584,6 +594,16 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     NewsType nt;
     if(news_type_from_slug(q->news_type, &nt) == 0) {
       bitset_and_inplace(&candidates, &engine->by_news_type[nt]);
+    } else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->clearance && q->clearance[0]) {
+    ClearanceLevel cl;
+    if(clearance_level_from_slug(q->clearance, &cl) == 0) {
+      bitset_and_inplace(&candidates, &engine->by_clearance[cl]);
     } else {
       bitset_free(&candidates);
       return 0;

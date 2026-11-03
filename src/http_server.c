@@ -220,7 +220,14 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_text(buf, "\"feed_language\":"); json_cstr(buf, a->feed_language); buffer_text(buf, ",");
   buffer_text(buf, "\"feed_source_tier\":"); json_cstr(buf, a->feed_source_tier); buffer_text(buf, ",");
   buffer_text(buf, "\"news_type\":"); json_cstr(buf, news_type_slug(a->news_type)); buffer_text(buf, ",");
-  buffer_text(buf, "\"mentioned_topics\":");
+  buffer_text(buf, "\"clearance\":"); json_cstr(buf, clearance_level_slug(a->clearance)); buffer_text(buf, ",");
+  buffer_format(buf, "\"opsec_score\":%.2f,", a->opsec_score);
+  buffer_text(buf, "\"mentioned_cves\":[");
+  for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_cves[i]);
+  }
+  buffer_text(buf, "],\"mentioned_topics\":");
   serialize_ontology_mask_array(buf, a->direct_ontology_mask);
   buffer_text(buf, ",\"category_closure\":");
   serialize_ontology_mask_array(buf, a->closure_ontology_mask);
@@ -317,6 +324,12 @@ int http_handle_request(ServerContext *ctx,
       if(nt > 0) buffer_text(out_json, ",");
       json_cstr(out_json, news_type_slug((NewsType)nt));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_news_type[nt]));
+    }
+    buffer_text(out_json, "},\"clearance_levels\":{");
+    for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
+      if(cl > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
     }
     buffer_text(out_json, "},\"categories_presheaf\":{");
     for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
@@ -549,12 +562,13 @@ int http_handle_request(ServerContext *ctx,
   }
 
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
-    char q_str[256], cat[64], morph[16], ntype[64], reg[64], ctry[16], mctry[16], lang[16], tier[32];
+    char q_str[256], cat[64], morph[16], ntype[64], clr[64], reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
     query_param(qs, "category", cat, sizeof(cat));
     query_param(qs, "category_morphism", morph, sizeof(morph));
     query_param(qs, "news_type", ntype, sizeof(ntype));
+    query_param(qs, "clearance", clr, sizeof(clr));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -572,6 +586,7 @@ int http_handle_request(ServerContext *ctx,
     aq.category = cat[0] ? cat : NULL;
     aq.use_category_morphism = (strcmp(morph, "0") != 0 && strcmp(morph, "false") != 0);
     aq.news_type = ntype[0] ? ntype : NULL;
+    aq.clearance = clr[0] ? clr : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;

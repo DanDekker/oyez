@@ -32,6 +32,14 @@ static const char *const k_news_type_slugs[NEWS_TYPE_COUNT] = {
     "general-report",
 };
 
+static const char *const k_clearance_slugs[CLEARANCE_LEVEL_COUNT] = {
+    "public-open",
+    "osint-verified",
+    "tradecraft-and-opsec",
+    "zero-day-and-crypto",
+    "strategic-high-clearance",
+};
+
 #define BIT(x) (1u << (uint32_t)(x))
 
 static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
@@ -127,6 +135,22 @@ int news_type_from_slug(const char *slug, NewsType *out) {
   for(uint32_t i = 0; i < NEWS_TYPE_COUNT; ++i) {
     if(strcmp(slug, k_news_type_slugs[i]) == 0) {
       *out = (NewsType)i;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+const char *clearance_level_slug(ClearanceLevel level) {
+  if((unsigned)level >= CLEARANCE_LEVEL_COUNT) return "public-open";
+  return k_clearance_slugs[level];
+}
+
+int clearance_level_from_slug(const char *slug, ClearanceLevel *out) {
+  if(!slug || !out) return -1;
+  for(uint32_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) {
+    if(strcmp(slug, k_clearance_slugs[i]) == 0) {
+      *out = (ClearanceLevel)i;
       return 0;
     }
   }
@@ -623,7 +647,46 @@ static const OrgRule k_org_rules[] = {
     {"RIKEN", {"riken", NULL, NULL, NULL}},
     {"CSIRO", {"csiro", NULL, NULL, NULL}},
     {"ITER", {"iter", "iter organization", NULL, NULL}},
+    {"NSA", {"national security agency", "nsa", "cnsa 2.0", NULL}},
+    {"DARPA", {"darpa", "defense advanced research", NULL, NULL}},
+    {"IARPA", {"iarpa", NULL, NULL, NULL}},
+    {"GCHQ/NCSC", {"gchq", "ncsc", NULL, NULL}},
+    {"CISA", {"cisa", "known exploited vulnerabilities", NULL, NULL}},
+    {"ANSSI", {"anssi", "cert-fr", NULL, NULL}},
+    {"BSI", {"bsi", NULL, NULL, NULL}},
+    {"ENISA", {"enisa", NULL, NULL, NULL}},
+    {"W3C", {"w3c", "world wide web consortium", "webgpu", "webauthn"}},
+    {"WHATWG", {"whatwg", "html living standard", NULL, NULL}},
+    {"IETF", {"ietf", "internet engineering task force", "quic", "privacy pass"}},
+    {"Tor Project", {"tor project", "onion service", "pluggable transport", NULL}},
 };
+
+static void extract_cve_identifiers(const char *lower_text, size_t len, ExtractedEntities *out) {
+  if(!lower_text || len < 9u) return;
+  size_t i = 0;
+  while(i + 9u <= len && out->cve_count < MAX_EXTRACTED_CVES) {
+    if(memcmp(lower_text + i, "cve-", 4u) == 0 &&
+       isdigit((unsigned char)lower_text[i + 4u]) &&
+       isdigit((unsigned char)lower_text[i + 5u]) &&
+       isdigit((unsigned char)lower_text[i + 6u]) &&
+       isdigit((unsigned char)lower_text[i + 7u]) &&
+       lower_text[i + 8u] == '-') {
+      size_t j = i + 9u;
+      while(j < len && isdigit((unsigned char)lower_text[j]) && (j - i) < 18u) j++;
+      if(j > i + 9u) {
+        size_t clen = j - i;
+        for(size_t k = 0; k < clen; ++k) {
+          out->cves[out->cve_count][k] = (char)toupper((unsigned char)lower_text[i + k]);
+        }
+        out->cves[out->cve_count][clen] = '\0';
+        out->cve_count++;
+        i = j;
+        continue;
+      }
+    }
+    i++;
+  }
+}
 
 void entities_extract(const char *title,
                       const char *summary,
@@ -692,6 +755,52 @@ void entities_extract(const char *title,
   out->direct_ontology_mask = direct;
   out->closure_ontology_mask = ontology_upward_closure(direct);
   out->news_type = news_type_classify(title, summary, content, feed_category);
+
+  extract_cve_identifiers(lower, len, out);
+
+  /* Compute OPSEC / Tradecraft / High-Clearance score & classification */
+  double opsec = 0.0;
+  ClearanceLevel level = CLEARANCE_PUBLIC;
+
+  if(text_contains_word(lower, len, "osint") || text_contains_word(lower, len, "satellite imagery") ||
+     text_contains_word(lower, len, "geolocation") || text_contains_word(lower, len, "telemetry") ||
+     text_contains_word(lower, len, "sinkhole") || text_contains_word(lower, len, "bgp")) {
+    opsec += 2.2;
+    if(level < CLEARANCE_OSINT) level = CLEARANCE_OSINT;
+  }
+
+  if(text_contains_word(lower, len, "opsec") || text_contains_word(lower, len, "anti-bot") ||
+     text_contains_word(lower, len, "turnstile") || text_contains_word(lower, len, "fingerprint") ||
+     text_contains_word(lower, len, "ja3") || text_contains_word(lower, len, "ja4") ||
+     text_contains_word(lower, len, "webauthn") || text_contains_word(lower, len, "passkey") ||
+     text_contains_word(lower, len, "webassembly") || text_contains_word(lower, len, "sandbox") ||
+     text_contains_word(lower, len, "onion") || text_contains_word(lower, len, "qubes") ||
+     text_contains_word(lower, len, "grapheneos") || text_contains_word(lower, len, "wireguard")) {
+    opsec += 3.5;
+    if(level < CLEARANCE_TRADECRAFT) level = CLEARANCE_TRADECRAFT;
+  }
+
+  if(out->cve_count > 0 || text_contains_word(lower, len, "zero-day") ||
+     text_contains_word(lower, len, "0-day") || text_contains_word(lower, len, "exploit") ||
+     text_contains_word(lower, len, "shellcode") || text_contains_word(lower, len, "rootkit") ||
+     text_contains_word(lower, len, "bootkit") || text_contains_word(lower, len, "spyware") ||
+     text_contains_word(lower, len, "pegasus") || text_contains_word(lower, len, "heap") ||
+     text_contains_word(lower, len, "use-after-free") || text_contains_word(lower, len, "post-quantum")) {
+    opsec += 4.8 + (double)out->cve_count * 1.5;
+    if(level < CLEARANCE_ZERO_DAY) level = CLEARANCE_ZERO_DAY;
+  }
+
+  if(text_contains_word(lower, len, "sigint") || text_contains_word(lower, len, "geoint") ||
+     text_contains_word(lower, len, "c4isr") || text_contains_word(lower, len, "reconnaissance") ||
+     text_contains_word(lower, len, "hypersonic") || text_contains_word(lower, len, "deterrence") ||
+     text_contains_word(lower, len, "classified") || text_contains_word(lower, len, "darpa") ||
+     text_contains_word(lower, len, "iarpa") || text_contains_word(lower, len, "nsa")) {
+    opsec += 5.2;
+    if(level < CLEARANCE_STRATEGIC) level = CLEARANCE_STRATEGIC;
+  }
+
+  out->clearance = level;
+  out->opsec_score = opsec;
 }
 
 static const char *const k_stopwords[] = {

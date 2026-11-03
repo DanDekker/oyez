@@ -8,10 +8,20 @@ enum {
   WORLD_REGION_COUNT = 11,
   NEWS_TYPE_COUNT = 10,
   ONTOLOGY_NODE_COUNT = 32,
+  CLEARANCE_LEVEL_COUNT = 5,
   MAX_EXTRACTED_COUNTRIES = 12,
   MAX_EXTRACTED_ORGS = 12,
+  MAX_EXTRACTED_CVES = 8,
   MAX_LEXICAL_TOKENS = 256
 };
+
+typedef enum {
+  CLEARANCE_PUBLIC = 0,       /* Open general reporting */
+  CLEARANCE_OSINT = 1,        /* Verified open-source intelligence / telemetry */
+  CLEARANCE_TRADECRAFT = 2,   /* Browser internals, anti-bot, OPSEC & defensive advisories */
+  CLEARANCE_ZERO_DAY = 3,     /* Exploit chains, 0-day vulnerability & cryptographic breaks */
+  CLEARANCE_STRATEGIC = 4     /* High-clearance national security, C4ISR, SIGINT & deterrence */
+} ClearanceLevel;
 
 typedef enum {
   REGION_NORTH_AMERICA = 0,
@@ -96,9 +106,13 @@ typedef struct {
   size_t country_count;
   char organizations[MAX_EXTRACTED_ORGS][24];
   size_t org_count;
+  char cves[MAX_EXTRACTED_CVES][20];
+  size_t cve_count;
   uint32_t direct_ontology_mask;
   uint32_t closure_ontology_mask;
   NewsType news_type;
+  ClearanceLevel clearance;
+  double opsec_score;
 } ExtractedEntities;
 
 typedef struct {
@@ -117,6 +131,9 @@ NewsType news_type_classify(const char *title,
                             const char *summary,
                             const char *content,
                             const char *feed_category);
+
+const char *clearance_level_slug(ClearanceLevel level);
+int clearance_level_from_slug(const char *slug, ClearanceLevel *out);
 
 void ontology_init(void);
 const OntologyNode *ontology_node(OntologyNodeId id);
