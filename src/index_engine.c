@@ -2421,8 +2421,8 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     return -1;
   }
 
-  engine_free(engine);
-  engine_init(engine);
+  OyezEngine staged;
+  engine_init(&staged);
 
   size_t off = 8u;
   uint32_t fcount = 0;
@@ -2459,14 +2459,16 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     if(reg >= WORLD_REGION_COUNT) reg = (uint32_t)REGION_GLOBAL;
     CatalogEntry ce = {title, furl, surl, cat, (WorldRegion)reg, country, subreg, lang, tier, focus};
     uint32_t actual_id = 0;
-    int up_rc = engine_upsert_feed(engine, &ce, &actual_id);
+    size_t prior_count = staged.feed_count;
+    int up_rc = engine_upsert_feed(&staged, &ce, &actual_id);
     free(title); free(furl); free(surl); free(cat);
     free(country); free(subreg); free(lang); free(tier); free(focus);
-    if(up_rc != 0) goto fail;
-    if(engine->feed_count > 0) {
-      engine->feeds[engine->feed_count - 1u].id = fid;
-      if(fid >= engine->next_feed_id) engine->next_feed_id = fid + 1u;
+    if(up_rc != 0 || staged.feed_count != prior_count + 1u) goto fail;
+    for(size_t j = 0; j < prior_count; ++j) {
+      if(staged.feeds[j].id == fid) goto fail;
     }
+    staged.feeds[staged.feed_count - 1u].id = fid;
+    if(fid >= staged.next_feed_id) staged.next_feed_id = fid + 1u;
   }
 
   for(uint32_t i = 0; i < acount; ++i) {
@@ -2489,16 +2491,25 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
       free(guid); free(title); free(url); free(author); free(summary); free(chtml); free(pub_at); free(img);
       goto fail;
     }
-    engine_ingest_article(engine, fid, guid, title, url, author, summary, chtml, pub_at, pub_ms, img, NULL, 0, NULL, NULL);
+    int inserted = 0;
+    int ingest_rc = engine_ingest_article(&staged, fid, guid, title, url, author, summary,
+                                          chtml, pub_at, pub_ms, img, NULL, 0, NULL, &inserted);
     free(guid); free(title); free(url); free(author); free(summary); free(chtml); free(pub_at); free(img);
+    if(ingest_rc != 0 || !inserted) goto fail;
   }
 
+  if(off != payload_len) goto fail;
   free(bytes);
+  pthread_mutex_destroy(&staged.cache_lock);
+  pthread_rwlock_destroy(&staged.rwlock);
+  engine_free(engine);
+  memcpy(engine, &staged, offsetof(OyezEngine, rwlock));
+  pthread_rwlock_init(&engine->rwlock, NULL);
+  pthread_mutex_init(&engine->cache_lock, NULL);
   return 0;
 
 fail:
-  engine_free(engine);
-  engine_init(engine);
+  engine_free(&staged);
   free(bytes);
   return -1;
 }

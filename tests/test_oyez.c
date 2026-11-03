@@ -903,6 +903,36 @@ static void test_hardening_and_concurrency(void) {
   assert(snap_eng.article_count == 0u);
   engine_free(&snap_eng);
   remove("/tmp/oyez_corrupt_test.snap");
+  /* A checksum-valid but truncated record must leave an existing engine intact. */
+  Buffer malformed_snap;
+  buffer_init(&malformed_snap);
+  buffer_append(&malformed_snap, "OYEZIX01", 8u);
+  wire_append_u32(&malformed_snap, 1u);
+  wire_append_u32(&malformed_snap, 0u);
+  wire_append_u32(&malformed_snap, checksum_crc32(malformed_snap.data, malformed_snap.len));
+  FILE *malformed_fp = fopen("/tmp/oyez_valid_crc_truncated.snap", "wb");
+  assert(malformed_fp != NULL);
+  assert(fwrite(malformed_snap.data, 1u, malformed_snap.len, malformed_fp) == malformed_snap.len);
+  fclose(malformed_fp);
+  buffer_free(&malformed_snap);
+  assert(engine_load_snapshot(&eng, "/tmp/oyez_valid_crc_truncated.snap") == -1);
+  assert(eng.feed_count == 1u && eng.article_count == 2u);
+  assert(engine_get_article_by_id(&eng, 1u) != NULL);
+  remove("/tmp/oyez_valid_crc_truncated.snap");
+
+  OyezEngine replacement;
+  engine_init(&replacement);
+  CatalogEntry other_feed = {"Other", "https://other.example/rss", "https://other.example",
+                             "science", REGION_EUROPE, "GB", "Europe", "en", "specialist", "Other"};
+  assert(engine_upsert_feed(&replacement, &other_feed, NULL) == 0);
+  assert(engine_save_snapshot(&eng, "/tmp/oyez_replace_test.snap") == 0);
+  assert(engine_load_snapshot(&replacement, "/tmp/oyez_replace_test.snap") == 0);
+  assert(replacement.feed_count == eng.feed_count && replacement.article_count == eng.article_count);
+  assert(engine_find_feed_by_url(&replacement, "https://other.example/rss") == NULL);
+  assert(engine_get_article_by_id(&replacement, 2u) != NULL);
+  engine_free(&replacement);
+  remove("/tmp/oyez_replace_test.snap");
+
 
   /* 8. Deeply repeated unclosed CDATA recursion guard & CDATA/comment closing-tag shielding */
   Buffer cdata_in, cdata_out;
