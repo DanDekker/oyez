@@ -1,5 +1,7 @@
-node_modules/
+build/
 data/
+*.o
+*.d
+*.a
 *.log
 .DS_Store
-.env
