@@ -1,15 +1,18 @@
-import { mkdir, appendFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { stripHtmlToText } from "../parser/xml.ts";
 import type {
   Article,
   EngineStats,
+  FacetCounts,
   FeedConfig,
   ParsedFeedItem,
   ScoredArticle,
   SearchQuery,
   SearchResult,
+  StoryCluster,
 } from "../types.ts";
-import { stripHtmlToText } from "../parser/xml.ts";
+import { extractArticleEntities } from "./entities.ts";
 import { extractWeightedTermFrequencies, tokenize } from "./tokenizer.ts";
 
 interface WalEntry {
@@ -33,7 +36,6 @@ export function computeCanonicalHash(url: string, guid: string): string {
     if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
       const u = new URL(normalized);
       u.hash = "";
-      // Strip common tracking query parameters
       const trackingParams = [
         "utm_source",
         "utm_medium",
@@ -67,6 +69,47 @@ export function extractDomain(url: string): string {
   }
 }
 
+function addToSetMap(map: Map<string, Set<string>>, key: string, id: string): void {
+  const clean = key.trim().toLowerCase();
+  if (!clean) return;
+  let set = map.get(clean);
+  if (!set) {
+    set = new Set();
+    map.set(clean, set);
+  }
+  set.add(id);
+}
+
+function removeFromSetMap(
+  map: Map<string, Set<string>>,
+  key: string,
+  id: string
+): void {
+  const clean = key.trim().toLowerCase();
+  if (!clean) return;
+  const set = map.get(clean);
+  if (set) {
+    set.delete(id);
+    if (set.size === 0) map.delete(clean);
+  }
+}
+
+function setMapToCounts(
+  map: Map<string, Set<string>>,
+  upperCaseKeys = false,
+  maxEntries?: number
+): Record<string, number> {
+  const entries: Array<[string, number]> = [];
+  for (const [k, set] of map.entries()) {
+    if (set.size > 0) {
+      entries.push([upperCaseKeys ? k.toUpperCase() : k, set.size]);
+    }
+  }
+  entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const sliced = maxEntries ? entries.slice(0, maxEntries) : entries;
+  return Object.fromEntries(sliced);
+}
+
 export class OyezIndexEngine {
   private readonly dataDir: string;
   private readonly feedsPath: string;
@@ -82,15 +125,19 @@ export class OyezIndexEngine {
 
   // Proprietary Inverted Index: term -> Map<articleId, weightedTermFrequency>
   private invertedIndex = new Map<string, Map<string, number>>();
-  // Per-document total weighted token length (for BM25 length normalization)
   private docLengths = new Map<string, number>();
   private totalDocLengthSum = 0;
 
-  // Secondary indexes
+  // Deep multi-dimensional secondary indexes
   private byFeed = new Map<string, Set<string>>();
   private byCategory = new Map<string, Set<string>>();
+  private byRegion = new Map<string, Set<string>>();
+  private byCountry = new Map<string, Set<string>>();
+  private byMentionedCountry = new Map<string, Set<string>>();
+  private byLanguage = new Map<string, Set<string>>();
+  private byTopic = new Map<string, Set<string>>();
+  private byEntity = new Map<string, Set<string>>();
   private byDomain = new Map<string, Set<string>>();
-  // Maintained sorted in descending order of article.publishedAt
   private timeSortedIds: string[] = [];
 
   private walOpsSinceSnapshot = 0;
@@ -105,7 +152,6 @@ export class OyezIndexEngine {
   async init(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true });
 
-    // 1. Load snapshot if present
     const snapshotFile = Bun.file(this.snapshotPath);
     if (await snapshotFile.exists()) {
       try {
@@ -113,12 +159,12 @@ export class OyezIndexEngine {
         this.lastSnapshotAt = snapshot.savedAt;
         if (Array.isArray(snapshot.feeds)) {
           for (const f of snapshot.feeds) {
-            this.feeds.set(f.id, f);
+            this.feeds.set(f.id, this.normalizeFeedConfig(f));
           }
         }
         if (Array.isArray(snapshot.articles)) {
           for (const a of snapshot.articles) {
-            this.indexArticleInMemory(a);
+            this.indexArticleInMemory(this.normalizeArticle(a));
           }
         }
       } catch (err) {
@@ -126,7 +172,6 @@ export class OyezIndexEngine {
       }
     }
 
-    // 2. Load feeds.json override if newer
     const feedsFile = Bun.file(this.feedsPath);
     if (await feedsFile.exists()) {
       try {
@@ -134,7 +179,7 @@ export class OyezIndexEngine {
         if (Array.isArray(feedsList)) {
           this.feeds.clear();
           for (const f of feedsList) {
-            this.feeds.set(f.id, f);
+            this.feeds.set(f.id, this.normalizeFeedConfig(f));
           }
         }
       } catch (err) {
@@ -142,7 +187,6 @@ export class OyezIndexEngine {
       }
     }
 
-    // 3. Replay WAL entries
     const walFile = Bun.file(this.walPath);
     if (await walFile.exists()) {
       try {
@@ -154,7 +198,7 @@ export class OyezIndexEngine {
           if (!trimmed) continue;
           const entry = JSON.parse(trimmed) as WalEntry;
           if (entry.op === "upsert_article" && entry.article) {
-            this.indexArticleInMemory(entry.article);
+            this.indexArticleInMemory(this.normalizeArticle(entry.article));
             replayed++;
           } else if (entry.op === "delete_article" && entry.articleId) {
             this.removeArticleFromMemory(entry.articleId);
@@ -171,6 +215,55 @@ export class OyezIndexEngine {
         console.warn("[OyezEngine] Warning replaying WAL:", err);
       }
     }
+  }
+
+  private normalizeFeedConfig(feed: Partial<FeedConfig> & { id: string; url: string }): FeedConfig {
+    const now = Date.now();
+    return {
+      id: feed.id,
+      url: feed.url,
+      title: feed.title || feed.url,
+      description: feed.description,
+      siteUrl: feed.siteUrl,
+      region: feed.region ?? "global",
+      country: (feed.country ?? "INT").toUpperCase(),
+      language: (feed.language ?? "en").toLowerCase().slice(0, 2),
+      category: (feed.category ?? "general").toLowerCase(),
+      tags: Array.isArray(feed.tags) ? feed.tags : [],
+      enabled: feed.enabled ?? true,
+      pollIntervalSeconds: feed.pollIntervalSeconds ?? 900,
+      scrapeFullContent: feed.scrapeFullContent ?? false,
+      etag: feed.etag,
+      lastModified: feed.lastModified,
+      lastPolledAt: feed.lastPolledAt,
+      lastSuccessAt: feed.lastSuccessAt,
+      nextPollAt: feed.nextPollAt ?? now,
+      consecutiveFailures: feed.consecutiveFailures ?? 0,
+      lastError: feed.lastError,
+      createdAt: feed.createdAt ?? now,
+      updatedAt: feed.updatedAt ?? now,
+    };
+  }
+
+  private normalizeArticle(article: Article): Article {
+    const region = article.region ?? "global";
+    const country = (article.country ?? "INT").toUpperCase();
+    const language = (article.language ?? "en").toLowerCase().slice(0, 2);
+    const entities =
+      article.entities ??
+      extractArticleEntities(
+        article.title,
+        article.summary,
+        article.contentText,
+        country
+      );
+    return {
+      ...article,
+      region,
+      country,
+      language,
+      entities,
+    };
   }
 
   private insertIntoTimeSorted(articleId: string, publishedAt: number): void {
@@ -196,8 +289,24 @@ export class OyezIndexEngine {
     }
   }
 
+  private getArticleWeightedFields(article: Article) {
+    return [
+      { text: article.title, weight: 3.5 },
+      {
+        text: [
+          ...article.entities.organizationsAndPeople,
+          ...article.entities.topics,
+        ].join(" "),
+        weight: 3.0,
+      },
+      { text: article.categories.join(" "), weight: 2.5 },
+      { text: article.author ?? "", weight: 2.0 },
+      { text: article.summary, weight: 1.5 },
+      { text: article.contentText, weight: 1.0 },
+    ];
+  }
+
   private indexArticleInMemory(article: Article): void {
-    // If replacing an existing article, unindex old version first
     if (this.articles.has(article.id)) {
       this.removeArticleFromMemory(article.id);
     }
@@ -205,47 +314,32 @@ export class OyezIndexEngine {
     this.articles.set(article.id, article);
     this.canonicalToArticleId.set(article.canonicalHash, article.id);
 
-    // Secondary index: feed
-    let feedSet = this.byFeed.get(article.feedId);
-    if (!feedSet) {
-      feedSet = new Set();
-      this.byFeed.set(article.feedId, feedSet);
-    }
-    feedSet.add(article.id);
-
-    // Secondary index: categories
-    for (const cat of article.categories) {
-      const normCat = cat.toLowerCase().trim();
-      if (!normCat) continue;
-      let catSet = this.byCategory.get(normCat);
-      if (!catSet) {
-        catSet = new Set();
-        this.byCategory.set(normCat, catSet);
-      }
-      catSet.add(article.id);
-    }
-
-    // Secondary index: domain
+    addToSetMap(this.byFeed, article.feedId, article.id);
+    addToSetMap(this.byRegion, article.region, article.id);
+    addToSetMap(this.byCountry, article.country, article.id);
+    addToSetMap(this.byLanguage, article.language, article.id);
     if (article.domain) {
-      let domSet = this.byDomain.get(article.domain);
-      if (!domSet) {
-        domSet = new Set();
-        this.byDomain.set(article.domain, domSet);
-      }
-      domSet.add(article.id);
+      addToSetMap(this.byDomain, article.domain, article.id);
     }
 
-    // Secondary index: time-sorted
+    for (const cat of article.categories) {
+      addToSetMap(this.byCategory, cat, article.id);
+    }
+    for (const mc of article.entities.mentionedCountries) {
+      addToSetMap(this.byMentionedCountry, mc, article.id);
+    }
+    for (const topic of article.entities.topics) {
+      addToSetMap(this.byTopic, topic, article.id);
+    }
+    for (const ent of article.entities.organizationsAndPeople) {
+      addToSetMap(this.byEntity, ent, article.id);
+    }
+
     this.insertIntoTimeSorted(article.id, article.publishedAt);
 
-    // Inverted index: field-weighted tokenization
-    const { termFreqs, totalWeightedLength } = extractWeightedTermFrequencies([
-      { text: article.title, weight: 3.5 },
-      { text: article.categories.join(" "), weight: 2.5 },
-      { text: article.author ?? "", weight: 2.0 },
-      { text: article.summary, weight: 1.5 },
-      { text: article.contentText, weight: 1.0 },
-    ]);
+    const { termFreqs, totalWeightedLength } = extractWeightedTermFrequencies(
+      this.getArticleWeightedFields(article)
+    );
 
     this.docLengths.set(article.id, totalWeightedLength);
     this.totalDocLengthSum += totalWeightedLength;
@@ -267,27 +361,36 @@ export class OyezIndexEngine {
     this.articles.delete(articleId);
     this.canonicalToArticleId.delete(existing.canonicalHash);
 
-    this.byFeed.get(existing.feedId)?.delete(articleId);
-    for (const cat of existing.categories) {
-      const normCat = cat.toLowerCase().trim();
-      this.byCategory.get(normCat)?.delete(articleId);
-    }
+    removeFromSetMap(this.byFeed, existing.feedId, articleId);
+    removeFromSetMap(this.byRegion, existing.region, articleId);
+    removeFromSetMap(this.byCountry, existing.country, articleId);
+    removeFromSetMap(this.byLanguage, existing.language, articleId);
     if (existing.domain) {
-      this.byDomain.get(existing.domain)?.delete(articleId);
+      removeFromSetMap(this.byDomain, existing.domain, articleId);
     }
+
+    for (const cat of existing.categories) {
+      removeFromSetMap(this.byCategory, cat, articleId);
+    }
+    for (const mc of existing.entities.mentionedCountries) {
+      removeFromSetMap(this.byMentionedCountry, mc, articleId);
+    }
+    for (const topic of existing.entities.topics) {
+      removeFromSetMap(this.byTopic, topic, articleId);
+    }
+    for (const ent of existing.entities.organizationsAndPeople) {
+      removeFromSetMap(this.byEntity, ent, articleId);
+    }
+
     this.removeFromTimeSorted(articleId);
 
     const prevLen = this.docLengths.get(articleId) ?? 0;
     this.totalDocLengthSum = Math.max(0, this.totalDocLengthSum - prevLen);
     this.docLengths.delete(articleId);
 
-    const { termFreqs } = extractWeightedTermFrequencies([
-      { text: existing.title, weight: 3.5 },
-      { text: existing.categories.join(" "), weight: 2.5 },
-      { text: existing.author ?? "", weight: 2.0 },
-      { text: existing.summary, weight: 1.5 },
-      { text: existing.contentText, weight: 1.0 },
-    ]);
+    const { termFreqs } = extractWeightedTermFrequencies(
+      this.getArticleWeightedFields(existing)
+    );
 
     for (const term of termFreqs.keys()) {
       const postings = this.invertedIndex.get(term);
@@ -303,18 +406,18 @@ export class OyezIndexEngine {
   }
 
   private removeFeedArticlesFromMemory(feedId: string): number {
-    const ids = Array.from(this.byFeed.get(feedId) ?? []);
+    const ids = Array.from(this.byFeed.get(feedId.toLowerCase()) ?? []);
     for (const id of ids) {
       this.removeArticleFromMemory(id);
     }
-    this.byFeed.delete(feedId);
+    this.byFeed.delete(feedId.toLowerCase());
     return ids.length;
   }
 
   private async appendWal(entry: WalEntry): Promise<void> {
     await appendFile(this.walPath, JSON.stringify(entry) + "\n", "utf8");
     this.walOpsSinceSnapshot++;
-    if (this.walOpsSinceSnapshot >= 250) {
+    if (this.walOpsSinceSnapshot >= 400) {
       await this.compactSnapshot();
     }
   }
@@ -339,7 +442,6 @@ export class OyezIndexEngine {
     this.walOpsSinceSnapshot = 0;
   }
 
-  // Feed CRUD
   listFeeds(): FeedConfig[] {
     return Array.from(this.feeds.values()).sort(
       (a, b) => b.createdAt - a.createdAt
@@ -359,9 +461,10 @@ export class OyezIndexEngine {
   }
 
   async upsertFeed(feed: FeedConfig): Promise<FeedConfig> {
-    this.feeds.set(feed.id, feed);
+    const norm = this.normalizeFeedConfig(feed);
+    this.feeds.set(norm.id, norm);
     await this.saveFeeds();
-    return feed;
+    return norm;
   }
 
   async deleteFeed(feedId: string): Promise<boolean> {
@@ -378,10 +481,9 @@ export class OyezIndexEngine {
   }
 
   getFeedArticleCount(feedId: string): number {
-    return this.byFeed.get(feedId)?.size ?? 0;
+    return this.byFeed.get(feedId.toLowerCase())?.size ?? 0;
   }
 
-  // Article Ingest & Upsert
   async ingestFeedItems(
     feed: FeedConfig,
     items: ParsedFeedItem[]
@@ -398,12 +500,26 @@ export class OyezIndexEngine {
       const contentText = existing?.fullContentExtracted
         ? existing.contentText
         : stripHtmlToText(item.contentHtml || item.summary);
-      const words = contentText ? contentText.split(/\s+/).filter(Boolean).length : 0;
+      const words = contentText
+        ? contentText.split(/\s+/).filter(Boolean).length
+        : 0;
+
+      const entities = extractArticleEntities(
+        item.title,
+        item.summary,
+        contentText || item.summary,
+        feed.country
+      );
 
       const categories = Array.from(
         new Set(
-          [feed.category, ...feed.tags, ...item.categories]
-            .map((c) => c.trim())
+          [
+            feed.category,
+            ...feed.tags,
+            ...item.categories,
+            ...entities.topics,
+          ]
+            .map((c) => c.trim().toLowerCase())
             .filter(Boolean)
         )
       );
@@ -416,6 +532,9 @@ export class OyezIndexEngine {
         url: item.url,
         canonicalHash,
         domain: extractDomain(item.url || feed.siteUrl || feed.url),
+        region: feed.region ?? "global",
+        country: (feed.country ?? "INT").toUpperCase(),
+        language: (feed.language ?? "en").toLowerCase().slice(0, 2),
         title: item.title,
         summary: item.summary,
         contentHtml: item.contentHtml ?? existing?.contentHtml,
@@ -423,6 +542,7 @@ export class OyezIndexEngine {
         markdownContent: existing?.markdownContent,
         author: item.author ?? existing?.author,
         categories,
+        entities,
         imageUrl: item.imageUrl ?? existing?.imageUrl,
         publishedAt: item.publishedAt || existing?.publishedAt || now,
         ingestedAt: existing ? existing.ingestedAt : now,
@@ -451,13 +571,22 @@ export class OyezIndexEngine {
   }
 
   async upsertArticle(article: Article): Promise<Article> {
-    this.indexArticleInMemory(article);
+    const enriched = this.normalizeArticle({
+      ...article,
+      entities: extractArticleEntities(
+        article.title,
+        article.summary,
+        article.contentText,
+        article.country
+      ),
+    });
+    this.indexArticleInMemory(enriched);
     await this.appendWal({
       op: "upsert_article",
-      article,
+      article: enriched,
       ts: Date.now(),
     });
-    return article;
+    return enriched;
   }
 
   getArticle(id: string): Article | undefined {
@@ -477,14 +606,13 @@ export class OyezIndexEngine {
   }
 
   /**
-   * Proprietary Okapi BM25 + Secondary Index Search Engine
+   * Proprietary Okapi BM25 + Geopolitical & Entity Faceted Search Engine
    */
   search(query: SearchQuery): SearchResult {
     const startTime = performance.now();
     const limit = Math.min(Math.max(query.limit ?? 25, 1), 200);
     const offset = Math.max(query.offset ?? 0, 0);
 
-    // 1. Build candidate set from secondary indexes if filters are provided
     let candidateIds: Set<string> | null = null;
 
     const intersectWith = (set: Set<string>) => {
@@ -500,11 +628,46 @@ export class OyezIndexEngine {
     };
 
     if (query.feedId) {
-      intersectWith(this.byFeed.get(query.feedId) ?? new Set());
+      intersectWith(
+        this.byFeed.get(query.feedId.trim().toLowerCase()) ?? new Set()
+      );
     }
     if (query.category) {
-      const normCat = query.category.toLowerCase().trim();
-      intersectWith(this.byCategory.get(normCat) ?? new Set());
+      intersectWith(
+        this.byCategory.get(query.category.trim().toLowerCase()) ?? new Set()
+      );
+    }
+    if (query.region) {
+      intersectWith(
+        this.byRegion.get(query.region.trim().toLowerCase()) ?? new Set()
+      );
+    }
+    if (query.country) {
+      intersectWith(
+        this.byCountry.get(query.country.trim().toLowerCase()) ?? new Set()
+      );
+    }
+    if (query.mentionedCountry) {
+      intersectWith(
+        this.byMentionedCountry.get(
+          query.mentionedCountry.trim().toLowerCase()
+        ) ?? new Set()
+      );
+    }
+    if (query.language) {
+      intersectWith(
+        this.byLanguage.get(query.language.trim().toLowerCase()) ?? new Set()
+      );
+    }
+    if (query.topic) {
+      intersectWith(
+        this.byTopic.get(query.topic.trim().toLowerCase()) ?? new Set()
+      );
+    }
+    if (query.entity) {
+      intersectWith(
+        this.byEntity.get(query.entity.trim().toLowerCase()) ?? new Set()
+      );
     }
     if (query.domain) {
       const normDom = query.domain.toLowerCase().replace(/^www\./, "").trim();
@@ -514,7 +677,6 @@ export class OyezIndexEngine {
     const hasTextQuery = Boolean(query.q && query.q.trim().length > 0);
     const sortMode = query.sort ?? (hasTextQuery ? "relevance" : "date");
 
-    // 2. If no text query, use time-sorted index directly
     if (!hasTextQuery) {
       const matched: ScoredArticle[] = [];
       for (const id of this.timeSortedIds) {
@@ -536,7 +698,6 @@ export class OyezIndexEngine {
       };
     }
 
-    // 3. Full-text Okapi BM25 scoring
     const rawQuery = query.q!.trim();
     const queryTokens = tokenize(rawQuery);
     const rawPhraseLower = rawQuery.toLowerCase();
@@ -560,7 +721,6 @@ export class OyezIndexEngine {
     const matchedTermsMap = new Map<string, Set<string>>();
 
     for (const qTerm of queryTokens) {
-      // Exact stem postings
       const exactPostings = this.invertedIndex.get(qTerm);
       if (exactPostings) {
         const df = exactPostings.size;
@@ -569,10 +729,8 @@ export class OyezIndexEngine {
         for (const [docId, tf] of exactPostings.entries()) {
           if (candidateIds !== null && !candidateIds.has(docId)) continue;
           const dl = this.docLengths.get(docId) ?? avgdl;
-          const numerator = tf * (k1 + 1);
-          const denominator = tf + k1 * (1 - b + b * (dl / avgdl));
-          const bm25 = idf * (numerator / denominator);
-
+          const bm25 =
+            idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avgdl))));
           scores.set(docId, (scores.get(docId) ?? 0) + bm25);
           let termSet = matchedTermsMap.get(docId);
           if (!termSet) {
@@ -583,12 +741,11 @@ export class OyezIndexEngine {
         }
       }
 
-      // Prefix expansion for terms >= 3 chars
       if (qTerm.length >= 3) {
         for (const [vocabTerm, postings] of this.invertedIndex.entries()) {
           if (vocabTerm === qTerm || !vocabTerm.startsWith(qTerm)) continue;
           const df = postings.size;
-          const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5)) * 0.45; // Discounted prefix weight
+          const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5)) * 0.45;
 
           for (const [docId, tf] of postings.entries()) {
             if (candidateIds !== null && !candidateIds.has(docId)) continue;
@@ -615,8 +772,6 @@ export class OyezIndexEngine {
       if (query.to !== undefined && article.publishedAt > query.to) continue;
 
       let finalScore = baseScore;
-
-      // Phrase match boost if multi-token or exact substring in title/content
       if (rawPhraseLower.length >= 3) {
         if (article.title.toLowerCase().includes(rawPhraseLower)) {
           finalScore *= 1.45;
@@ -625,7 +780,6 @@ export class OyezIndexEngine {
         }
       }
 
-      // Multi-term coverage boost (reward docs matching more unique query terms)
       const matchedCount = matchedTermsMap.get(docId)?.size ?? 1;
       if (queryTokens.length > 1 && matchedCount > 1) {
         finalScore *= 1 + 0.15 * (matchedCount - 1);
@@ -661,20 +815,166 @@ export class OyezIndexEngine {
     };
   }
 
+  /**
+   * Find related articles across the world covering the same story or entities
+   */
+  findRelatedArticles(articleId: string, limit = 8): ScoredArticle[] {
+    const source = this.articles.get(articleId);
+    if (!source) return [];
+
+    const queryText = [
+      source.title,
+      ...source.entities.organizationsAndPeople,
+      ...source.entities.topics,
+    ].join(" ");
+
+    const rawRes = this.search({
+      q: queryText,
+      limit: limit + 10,
+      sort: "relevance",
+    });
+
+    const filtered: ScoredArticle[] = [];
+    for (const item of rawRes.results) {
+      if (item.article.id === articleId) continue;
+      // Boost cross-country / cross-feed perspective
+      let score = item.score;
+      if (item.article.feedId !== source.feedId) {
+        score *= 1.15;
+      }
+      if (item.article.country !== source.country) {
+        score *= 1.1;
+      }
+      filtered.push({
+        article: item.article,
+        score: Number(score.toFixed(4)),
+        matchedTerms: item.matchedTerms,
+      });
+    }
+
+    filtered.sort((a, b) => b.score - a.score);
+    return filtered.slice(0, limit);
+  }
+
+  /**
+   * Discover multi-source global story clusters across recent articles
+   */
+  discoverStoryClusters(maxClusters = 15, recentPoolSize = 400): StoryCluster[] {
+    const recentIds = this.timeSortedIds.slice(0, recentPoolSize);
+    const assigned = new Set<string>();
+    const clusters: StoryCluster[] = [];
+
+    // Pre-tokenize titles + entities for fast Jaccard/IDF overlap
+    const docFeatures = new Map<string, Set<string>>();
+    for (const id of recentIds) {
+      const art = this.articles.get(id);
+      if (!art) continue;
+      const tokens = tokenize(
+        `${art.title} ${art.entities.organizationsAndPeople.join(" ")}`
+      );
+      docFeatures.set(id, new Set(tokens));
+    }
+
+    for (let i = 0; i < recentIds.length; i++) {
+      const seedId = recentIds[i];
+      if (assigned.has(seedId)) continue;
+      const seedArt = this.articles.get(seedId);
+      const seedFeat = docFeatures.get(seedId);
+      if (!seedArt || !seedFeat || seedFeat.size < 3) continue;
+
+      const members: Article[] = [seedArt];
+      const sharedCounts = new Map<string, number>();
+      for (const t of seedFeat) sharedCounts.set(t, 1);
+
+      for (let j = i + 1; j < recentIds.length; j++) {
+        const candId = recentIds[j];
+        if (assigned.has(candId)) continue;
+        const candArt = this.articles.get(candId);
+        const candFeat = docFeatures.get(candId);
+        if (!candArt || !candFeat || candFeat.size < 3) continue;
+
+        let intersection = 0;
+        for (const t of candFeat) {
+          if (seedFeat.has(t)) intersection++;
+        }
+
+        const minSize = Math.min(seedFeat.size, candFeat.size);
+        const overlapRatio = intersection / minSize;
+        if (intersection >= 3 && overlapRatio >= 0.42) {
+          members.push(candArt);
+          for (const t of candFeat) {
+            if (seedFeat.has(t)) {
+              sharedCounts.set(t, (sharedCounts.get(t) ?? 0) + 1);
+            }
+          }
+        }
+      }
+
+      if (members.length >= 2) {
+        for (const m of members) assigned.add(m.id);
+        const sources = Array.from(new Set(members.map((m) => m.feedTitle)));
+        const regions = Array.from(new Set(members.map((m) => m.region)));
+        const countries = Array.from(new Set(members.map((m) => m.country)));
+        const topics = Array.from(
+          new Set(members.flatMap((m) => m.entities.topics))
+        );
+        const sharedTerms = Array.from(sharedCounts.entries())
+          .filter(([, c]) => c >= 2)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 6)
+          .map(([t]) => t);
+
+        clusters.push({
+          id: `cluster_${seedArt.canonicalHash}`,
+          headline: seedArt.title,
+          leadArticleId: seedArt.id,
+          articleCount: members.length,
+          sources,
+          regions,
+          countries,
+          topics,
+          sharedTerms,
+          latestPublishedAt: Math.max(...members.map((m) => m.publishedAt)),
+          articles: members.slice(0, 10).map((m) => ({
+            id: m.id,
+            title: m.title,
+            feedTitle: m.feedTitle,
+            country: m.country,
+            region: m.region,
+            url: m.url,
+            publishedAt: m.publishedAt,
+          })),
+        });
+      }
+    }
+
+    clusters.sort(
+      (a, b) =>
+        b.sources.length - a.sources.length ||
+        b.articleCount - a.articleCount ||
+        b.latestPublishedAt - a.latestPublishedAt
+    );
+
+    return clusters.slice(0, maxClusters);
+  }
+
+  getFacets(): FacetCounts {
+    return {
+      regions: setMapToCounts(this.byRegion),
+      countries: setMapToCounts(this.byCountry, true),
+      mentionedCountries: setMapToCounts(this.byMentionedCountry, true, 40),
+      categories: setMapToCounts(this.byCategory, false, 40),
+      topics: setMapToCounts(this.byTopic),
+      languages: setMapToCounts(this.byLanguage),
+      domains: setMapToCounts(this.byDomain, false, 40),
+      topEntities: setMapToCounts(this.byEntity, false, 40),
+    };
+  }
+
   getStats(): EngineStats {
     let totalPostings = 0;
     for (const postings of this.invertedIndex.values()) {
       totalPostings += postings.size;
-    }
-
-    const categories: Record<string, number> = {};
-    for (const [cat, set] of this.byCategory.entries()) {
-      if (set.size > 0) categories[cat] = set.size;
-    }
-
-    const domains: Record<string, number> = {};
-    for (const [dom, set] of this.byDomain.entries()) {
-      if (set.size > 0) domains[dom] = set.size;
     }
 
     let enabledFeeds = 0;
@@ -688,6 +988,8 @@ export class OyezIndexEngine {
         ? Number((this.totalDocLengthSum / totalArticles).toFixed(2))
         : 0;
 
+    const facets = this.getFacets();
+
     return {
       totalFeeds: this.feeds.size,
       enabledFeeds,
@@ -695,8 +997,7 @@ export class OyezIndexEngine {
       vocabularySize: this.invertedIndex.size,
       totalPostings,
       averageDocumentLength: avgDocLength,
-      categories,
-      domains,
+      ...facets,
       dataDir: this.dataDir,
       lastSnapshotAt: this.lastSnapshotAt,
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
