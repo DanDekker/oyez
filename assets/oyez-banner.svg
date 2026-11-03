@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Oyez — a news engine in C</title>
+  <desc id="desc">A dark blue banner with a network of connected points and the Oyez wordmark.</desc>
+  <rect width="1200" height="300" fill="#0c1d26"/>
+  <path d="M0 270H1200M0 228H1200M0 186H1200M0 144H1200M0 102H1200M0 60H1200M0 18H1200" stroke="#17333d" stroke-width="1"/>
+  <path d="M90 0V300M180 0V300M270 0V300M360 0V300M450 0V300M540 0V300M630 0V300M720 0V300M810 0V300M900 0V300M990 0V300M1080 0V300M1170 0V300" stroke="#17333d" stroke-width="1"/>
+  <path d="M725 213L790 152L857 190L923 100L1007 150L1081 77L1152 119M790 152L830 72L923 100L947 226L1007 150L1081 212L1152 119M725 213L810 245L857 190L947 226L1081 212" fill="none" stroke="#3a7776" stroke-width="2"/>
+  <g fill="#8fd8bd"><circle cx="725" cy="213" r="4"/><circle cx="790" cy="152" r="5"/><circle cx="830" cy="72" r="3"/><circle cx="857" cy="190" r="4"/><circle cx="923" cy="100" r="6"/><circle cx="947" cy="226" r="4"/><circle cx="1007" cy="150" r="5"/><circle cx="1081" cy="77" r="4"/><circle cx="1081" cy="212" r="3"/><circle cx="1152" cy="119" r="4"/><circle cx="810" cy="245" r="3"/></g>
+  <rect x="66" y="55" width="43" height="3" fill="#95d7b9"/>
+  <text x="66" y="144" fill="#f4f6ef" font-family="Georgia, serif" font-size="82" font-weight="bold" letter-spacing="-2">Oyez</text>
+  <text x="69" y="185" fill="#a5c2bf" font-family="Arial, sans-serif" font-size="21" letter-spacing="1">A NEWS ENGINE IN C</text>
+  <text x="69" y="235" fill="#71938f" font-family="Arial, sans-serif" font-size="16">COLLECT  /  INDEX  /  EXPLORE</text>
+</svg>
