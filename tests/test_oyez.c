@@ -903,6 +903,78 @@ static void test_hardening_and_concurrency(void) {
   engine_free(&snap_eng);
   remove("/tmp/oyez_corrupt_test.snap");
 
+  /* 8. Deeply repeated unclosed CDATA recursion guard & CDATA/comment closing-tag shielding */
+  Buffer cdata_in, cdata_out;
+  buffer_init(&cdata_in);
+  buffer_init(&cdata_out);
+  buffer_text(&cdata_in, "<p>Safe prefix</p>");
+  for(int i = 0; i < 2000; ++i) {
+    buffer_text(&cdata_in, "<![CDATA[unclosed ");
+  }
+  assert(markup_strip_html(cdata_in.data, cdata_in.len, &cdata_out) == 0);
+  assert(strstr(cdata_out.data, "Safe prefix") != NULL);
+  buffer_free(&cdata_in);
+  buffer_free(&cdata_out);
+
+  const char *rss_cdata_close =
+    "<rss version=\"2.0\"><channel><title>CDATA Shield Feed</title>"
+    "<item><title>Item One</title>"
+    "<!-- </item> inside comment must not close item -->"
+    "<description><![CDATA[Literal </item> and </description> inside CDATA block]]></description>"
+    "<link>https://sec.example/item-1</link></item>"
+    "</channel></rss>";
+  ParsedFeed pfeed;
+  assert(feed_parse(rss_cdata_close, strlen(rss_cdata_close), "https://sec.example/rss", &pfeed) == 0);
+  assert(pfeed.item_count == 1u);
+  assert(strcmp(pfeed.items[0].url, "https://sec.example/item-1") == 0);
+  assert(strstr(pfeed.items[0].summary, "Literal") != NULL);
+  feed_free(&pfeed);
+
+  /* 9. Exact calendar day-of-month, leap-year & timezone bounds */
+  assert(parse_timestamp_ms("2026-02-31T12:00:00Z") == 0u);
+  assert(parse_timestamp_ms("2026-04-31T12:00:00Z") == 0u);
+  assert(parse_timestamp_ms("2026-02-29T12:00:00Z") == 0u);
+  assert(parse_timestamp_ms("2024-02-29T12:00:00Z") > 0u);
+  assert(parse_timestamp_ms("2026-11-03T12:00:00+25:00") == 0u);
+  assert(parse_timestamp_ms("2026-11-03T12:00:00+02:65") == 0u);
+
+  /* 10. M1Tokenizer sha256 seal updated immediately upon m1_tokenizer_train */
+  M1Tokenizer t_seal;
+  m1_tokenizer_init(&t_seal);
+  char empty_sha[65];
+  memcpy(empty_sha, t_seal.sha256, 65u);
+  const char *train_sample = "categorical presheaf cohomology kan extension topological sheaf ";
+  assert(m1_tokenizer_train(&t_seal, (const uint8_t *)train_sample, strlen(train_sample), 320u) == 0);
+  assert(sha256_valid_hex(t_seal.sha256));
+  assert(strcmp(t_seal.sha256, empty_sha) != 0);
+  m1_tokenizer_free(&t_seal);
+
+  /* 11. PageRank damping clamp (negative / zero / NaN) & empty-engine /api/v1/centrality safety */
+  RankedEntity pr_ents[8];
+  ScoredArticle pr_arts[8];
+  size_t pr_n1 = engine_bipartite_pagerank(&eng, 10u, -1.0, pr_ents, 8u, pr_arts, 8u);
+  size_t pr_n2 = engine_bipartite_pagerank(&eng, 10u, 0.0 / 0.0, pr_ents, 8u, pr_arts, 8u);
+  assert(pr_n1 > 0u && pr_n1 == pr_n2);
+  assert(pr_ents[0].score > 0.0 && pr_arts[0].score > 0.0);
+
+  OyezEngine empty_eng;
+  engine_init(&empty_eng);
+  ServerContext empty_ctx = {&empty_eng, NULL, NULL, 0};
+  Buffer cent_out;
+  assert(http_handle_request(&empty_ctx, "GET", "/api/v1/centrality", "", 0, &status, &cent_out) == 0);
+  assert(status == 200);
+  assert(strcmp(cent_out.data, "{\"entities\":[],\"top_articles\":[]}") == 0);
+  buffer_free(&cent_out);
+  engine_free(&empty_eng);
+
+  /* 12. SSRF local/loopback/metadata target rejection in http_fetch_url */
+  Buffer ssrf_buf;
+  assert(http_fetch_url("http://localhost:8787/api/v1/health", &ssrf_buf) == -1);
+  assert(http_fetch_url("http://127.0.0.1:8787/api/v1/health", &ssrf_buf) == -1);
+  assert(http_fetch_url("http://169.254.169.254/latest/meta-data/", &ssrf_buf) == -1);
+  assert(http_fetch_url("http://[::1]:8787/api/v1/health", &ssrf_buf) == -1);
+  assert(http_fetch_url("file:///etc/passwd", &ssrf_buf) == -1);
+
   engine_free(&eng);
 }
 
