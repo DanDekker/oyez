@@ -1,5 +1,7 @@
 # Oyez
 
+Oyez! Oyez! Oyez! A news API and RSS aggregator for the people.
+
 **Oyez** is a zero-dependency, first-party **C23** global news aggregator API, RSS/Atom/JSON Feed parser, readability content extractor, category-theoretic ontology engine, and in-memory BM25 + 64-bit BitSet search engine.
 
 Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only `-lm -lpthread`.
