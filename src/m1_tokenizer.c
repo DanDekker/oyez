@@ -708,21 +708,41 @@ int m1_tokenizer_save(M1Tokenizer *tokenizer, const char *path) {
   buffer_free(&bpe_buf);
 
   char digest[65];
+  if(payload.truncated || !payload.data) {
+    buffer_free(&payload);
+    return -1;
+  }
   sha256_hex(payload.data, payload.len, digest);
   uint32_t crc = checksum_crc32(payload.data, payload.len);
   buffer_append(&payload, digest, 64u);
   wire_append_u32(&payload, crc);
+  if(payload.truncated || !payload.data) {
+    buffer_free(&payload);
+    return -1;
+  }
 
-  FILE *fp = fopen(path, "wb");
+  char tmp_path[1024];
+  int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+  const char *write_path = (tn > 0 && (size_t)tn < sizeof(tmp_path)) ? tmp_path : path;
+
+  FILE *fp = fopen(write_path, "wb");
   if(!fp) {
     buffer_free(&payload);
     return -1;
   }
   size_t written = fwrite(payload.data, 1u, payload.len, fp);
+  int flush_rc = fflush(fp);
   fclose(fp);
   size_t expected = payload.len;
   buffer_free(&payload);
-  if(written != expected) return -1;
+  if(written != expected || flush_rc != 0) {
+    if(write_path == tmp_path) remove(tmp_path);
+    return -1;
+  }
+  if(write_path == tmp_path && rename(tmp_path, path) != 0) {
+    remove(tmp_path);
+    return -1;
+  }
   memcpy(tokenizer->sha256, digest, 65u);
   return 0;
 }
@@ -736,7 +756,7 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
     return -1;
   }
   long size = ftell(fp);
-  if(size < 84 || fseek(fp, 0, SEEK_SET) != 0) {
+  if(size < 84 || size > 64L * 1024L * 1024L || fseek(fp, 0, SEEK_SET) != 0) {
     fclose(fp);
     return -1;
   }
@@ -774,6 +794,8 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
   uint32_t bpe_len = 0;
   if(!wire_read_u32(bytes, payload_len, &off, &target_vocab) ||
      !wire_read_u32(bytes, payload_len, &off, &bpe_len) ||
+     target_vocab < M1_FIXED_VOCAB_SIZE ||
+     target_vocab > M1_DEFAULT_VOCAB_SIZE ||
      off + bpe_len != payload_len) {
     free(bytes);
     return -1;
