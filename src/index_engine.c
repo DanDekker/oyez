@@ -100,9 +100,9 @@ int bitset_or_inplace(BitSet *dst, const BitSet *other) {
 
 static BitSet *country_fiber_get(CountryFiber *table, size_t cap, const char *code, int create) {
   if(!code || code[0] == '\0') return NULL;
-  char norm[24];
+  char norm[64];
   size_t k = 0;
-  while(code[k] && k < 23u) {
+  while(code[k] && k < 63u) {
     norm[k] = (char)toupper((unsigned char)code[k]);
     k++;
   }
@@ -267,6 +267,7 @@ void engine_free(OyezEngine *engine) {
   for(size_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) bitset_free(&engine->by_clearance[i]);
   for(size_t i = 0; i < FISCAL_STANCE_COUNT; ++i) bitset_free(&engine->by_fiscal_stance[i]);
   for(size_t i = 0; i < AI_TIER_COUNT; ++i) bitset_free(&engine->by_ai_tier[i]);
+  for(size_t i = 0; i < AI_LICENSE_COUNT; ++i) bitset_free(&engine->by_ai_license[i]);
   for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
@@ -281,6 +282,7 @@ void engine_free(OyezEngine *engine) {
     if(engine->by_org[i].occupied) bitset_free(&engine->by_org[i].bits);
     if(engine->by_ai_model[i].occupied) bitset_free(&engine->by_ai_model[i].bits);
     if(engine->by_ai_infra[i].occupied) bitset_free(&engine->by_ai_infra[i].bits);
+    if(engine->by_hf_repo[i].occupied) bitset_free(&engine->by_hf_repo[i].bits);
   }
   for(size_t i = 0; i < 64u; ++i) {
     if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
@@ -392,6 +394,9 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   if((unsigned)a->ai_tier < AI_TIER_COUNT) {
     bitset_set(&engine->by_ai_tier[a->ai_tier], slot);
   }
+  if((unsigned)a->ai_license < AI_LICENSE_COUNT) {
+    bitset_set(&engine->by_ai_license[a->ai_license], slot);
+  }
   for(uint32_t node = 0; node < ONTOLOGY_NODE_COUNT; ++node) {
     if(a->direct_ontology_mask & (1u << node)) {
       bitset_set(&engine->by_direct_ontology[node], slot);
@@ -431,6 +436,10 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   for(size_t i = 0; i < a->mentioned_ai_infra_count; ++i) {
     BitSet *i_cb = country_fiber_get(engine->by_ai_infra, 128u, a->mentioned_ai_infra[i], 1);
     if(i_cb) bitset_set(i_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_hf_repo_count; ++i) {
+    BitSet *h_cb = country_fiber_get(engine->by_hf_repo, 128u, a->mentioned_hf_repos[i], 1);
+    if(h_cb) bitset_set(h_cb, slot);
   }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
@@ -548,6 +557,8 @@ int engine_ingest_article(OyezEngine *engine,
   a->macro_score = ent.macro_score;
   a->ai_tier = ent.ai_tier;
   a->ai_compute_score = ent.ai_compute_score;
+  a->ai_license = ent.ai_license;
+  a->openness_score = ent.openness_score;
   a->direct_ontology_mask = ent.direct_ontology_mask;
   a->closure_ontology_mask = ent.closure_ontology_mask;
 
@@ -565,6 +576,9 @@ int engine_ingest_article(OyezEngine *engine,
   }
   for(size_t i = 0; i < ent.ai_infra_count && a->mentioned_ai_infra_count < MAX_EXTRACTED_AI_INFRA; ++i) {
     strcpy(a->mentioned_ai_infra[a->mentioned_ai_infra_count++], ent.ai_infra[i]);
+  }
+  for(size_t i = 0; i < ent.hf_repo_count && a->mentioned_hf_repo_count < MAX_EXTRACTED_HF_REPOS; ++i) {
+    strcpy(a->mentioned_hf_repos[a->mentioned_hf_repo_count++], ent.hf_repos[i]);
   }
 
   /* Always include feed country if valid 2-letter ISO code */
@@ -658,6 +672,8 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   h ^= mix64(fnv1a64_cstr(q->ai_tier ? q->ai_tier : "") + 15u);
   h ^= mix64(fnv1a64_cstr(q->ai_model ? q->ai_model : "") + 16u);
   h ^= mix64(fnv1a64_cstr(q->ai_infra ? q->ai_infra : "") + 17u);
+  h ^= mix64(fnv1a64_cstr(q->ai_license ? q->ai_license : "") + 18u);
+  h ^= mix64(fnv1a64_cstr(q->hf_repo ? q->hf_repo : "") + 19u);
   h ^= mix64(fnv1a64_cstr(q->region ? q->region : "") + 8u);
   h ^= mix64(fnv1a64_cstr(q->country ? q->country : "") + 9u);
   h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
@@ -793,6 +809,25 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   if(q->ai_infra && q->ai_infra[0]) {
     const BitSet *ib = country_fiber_get((CountryFiber *)engine->by_ai_infra, 128u, q->ai_infra, 0);
     if(ib) bitset_and_inplace(&candidates, ib);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->ai_license && q->ai_license[0]) {
+    AiWeightLicense al;
+    if(ai_weight_license_from_slug(q->ai_license, &al) == 0) {
+      bitset_and_inplace(&candidates, &engine->by_ai_license[al]);
+    } else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->hf_repo && q->hf_repo[0]) {
+    const BitSet *hb = country_fiber_get((CountryFiber *)engine->by_hf_repo, 128u, q->hf_repo, 0);
+    if(hb) bitset_and_inplace(&candidates, hb);
     else {
       bitset_free(&candidates);
       return 0;
@@ -1191,6 +1226,8 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
   int by_event = (pivot_dimension && strcmp(pivot_dimension, "fiscal_event") == 0);
   int by_ai_model = (pivot_dimension && strcmp(pivot_dimension, "ai_model") == 0);
   int by_ai_infra = (pivot_dimension && strcmp(pivot_dimension, "ai_infra") == 0);
+  int by_hf_repo = (pivot_dimension && strcmp(pivot_dimension, "hf_repo") == 0);
+  int by_ai_license = (pivot_dimension && strcmp(pivot_dimension, "ai_license") == 0);
 
   for(size_t i = 0; i < engine->article_count && found < max_pairs; ++i) {
     const ArticleRecord *a = &engine->articles[i];
@@ -1262,6 +1299,19 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
               break;
             }
           }
+        }
+      } else if(by_hf_repo) {
+        for(size_t ha = 0; ha < a->mentioned_hf_repo_count && !witness; ++ha) {
+          for(size_t hb = 0; hb < b->mentioned_hf_repo_count; ++hb) {
+            if(strcmp(a->mentioned_hf_repos[ha], b->mentioned_hf_repos[hb]) == 0) {
+              witness = a->mentioned_hf_repos[ha];
+              break;
+            }
+          }
+        }
+      } else if(by_ai_license) {
+        if(a->ai_license != AI_LICENSE_UNSPECIFIED && a->ai_license == b->ai_license) {
+          witness = ai_weight_license_slug(a->ai_license);
         }
       } else if(by_type) {
         if(a->news_type == b->news_type) {
@@ -1380,6 +1430,20 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
       snprintf(e->id, sizeof(e->id), "infra:%s", engine->by_ai_infra[i].key);
       snprintf(e->label, sizeof(e->label), "%s", engine->by_ai_infra[i].key);
       e->kind = "ai_infra";
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+
+  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
+    if(engine->by_hf_repo[i].occupied) {
+      uint32_t deg = bitset_popcount(&engine->by_hf_repo[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_hf_repo[i].bits;
+      RankedEntity *e = &ents[ent_count++];
+      snprintf(e->id, sizeof(e->id), "hf:%s", engine->by_hf_repo[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", engine->by_hf_repo[i].key);
+      e->kind = "hf_repo";
       e->degree = deg;
       e->score = 1.0;
     }

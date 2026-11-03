@@ -293,6 +293,25 @@ static void test_category_theory_and_ontology(void) {
   assert(ai_ent.ai_model_count >= 2u);
   assert(ai_ent.ai_infra_count >= 5u);
   assert(ai_ent.ai_compute_score > 20.0);
+  assert(ai_ent.ai_license == AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE);
+  assert(ai_ent.openness_score > 0.0);
+
+  /* Hugging Face Hub <org>/<model> repo ID & Open-Science vs Closed-Frontier license extraction */
+  ExtractedEntities hf_ent;
+  entities_extract("AllenAI releases allenai/OLMo-2-1124-13B alongside deepseek-ai/DeepSeek-R1-Distill-Qwen-32B on Hugging Face Hub",
+                   "Open-source OSI AI with reproducible pretraining data on FineWeb and Dolma outpaces closed-source API frontier models.",
+                   "Developers quantize meta-llama/Llama-3.3-70B-Instruct and Qwen/Qwen2.5-Coder-32B-Instruct into GGUF with Unsloth.",
+                   "ai",
+                   NULL,
+                   0,
+                   &hf_ent);
+  assert(hf_ent.hf_repo_count >= 4u);
+  assert(strcmp(hf_ent.hf_repos[0], "deepseek-ai/deepseek-r1-distill-qwen-32b") == 0);
+  assert(strcmp(hf_ent.hf_repos[1], "meta-llama/llama-3.3-70b-instruct") == 0);
+  assert(strcmp(hf_ent.hf_repos[2], "qwen/qwen2.5-coder-32b-instruct") == 0);
+  assert(strcmp(hf_ent.hf_repos[3], "allenai/olmo-2-1124-13b") == 0);
+  assert(hf_ent.ai_license == AI_LICENSE_OPEN_SCIENCE_OSI);
+  assert(hf_ent.openness_score > 15.0);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
@@ -300,7 +319,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 565u);
+  assert(seeded >= 585u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",
@@ -445,16 +464,16 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(strstr(json.data, "\"clearance_levels\":") != NULL);
   buffer_free(&json);
 
-  /* Ingest an AI neocloud / inference article and test /api/v1/ai and ?ai_model= / ?ai_infra= fibers */
+  /* Ingest an AI neocloud / inference article and test /api/v1/ai and ?ai_model= / ?ai_infra= / ?hf_repo= / ?ai_license= fibers */
   uint32_t a4 = 0;
   engine_ingest_article(&eng,
                         f_tw,
                         "tw-ai-4",
-                        "CoreWeave and Together AI scale DeepSeek-R1 inference on NVIDIA Blackwell GB200 with vLLM",
+                        "CoreWeave and Together AI scale deepseek-ai/DeepSeek-R1-Distill-Qwen-32B inference on NVIDIA Blackwell GB200 with vLLM",
                         "https://focustaiwan.tw/4",
                         "AI Desk",
-                        "PagedAttention KV-cache and SGLang speculative decoding boost token throughput.",
-                        "<p>CoreWeave GB200 NVL72 neocloud clusters serve DeepSeek-R1 and Llama 3.3 using vLLM FP8.</p>",
+                        "PagedAttention KV-cache and SGLang speculative decoding boost open-weights token throughput.",
+                        "<p>CoreWeave GB200 NVL72 neocloud clusters serve deepseek-ai/DeepSeek-R1-Distill-Qwen-32B and meta-llama/Llama-3.3-70B-Instruct using vLLM FP8.</p>",
                         "2026-11-03T03:00:00Z",
                         1762130500000ULL,
                         "",
@@ -469,6 +488,8 @@ static void test_engine_search_and_categorical_endpoints(void) {
   ai_q.ai_model = "DeepSeek-R1/V3";
   ai_q.ai_infra = "CoreWeave";
   ai_q.ai_tier = "neocloud-and-cluster";
+  ai_q.ai_license = "open-weights-permissive";
+  ai_q.hf_repo = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B";
   ai_q.limit = 10u;
   assert(engine_search(&eng, &ai_q, &res) == 0);
   assert(res.total == 1u);
@@ -478,8 +499,11 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(http_handle_request(&ctx, "GET", "/api/v1/ai", "", 0, &status, &json) == 0);
   assert(status == 200);
   assert(strstr(json.data, "\"ai_compute_tiers\":") != NULL);
+  assert(strstr(json.data, "\"ai_license_spectrum\":") != NULL);
+  assert(strstr(json.data, "\"open_vs_closed_summary\":") != NULL);
   assert(strstr(json.data, "\"DEEPSEEK-R1/V3\":1") != NULL);
   assert(strstr(json.data, "\"COREWEAVE\":1") != NULL);
+  assert(strstr(json.data, "\"DEEPSEEK-AI/DEEPSEEK-R1-DISTILL-QWEN-32B\":1") != NULL);
   buffer_free(&json);
 
   m1_tokenizer_free(&tok);

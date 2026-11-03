@@ -71,12 +71,16 @@ typedef struct {
   size_t mentioned_ai_model_count;
   char mentioned_ai_infra[MAX_EXTRACTED_AI_INFRA][24];
   size_t mentioned_ai_infra_count;
+  char mentioned_hf_repos[MAX_EXTRACTED_HF_REPOS][64];
+  size_t mentioned_hf_repo_count;
   ClearanceLevel clearance;
   double opsec_score;
   FiscalStance fiscal_stance;
   double macro_score;
   AiComputeTier ai_tier;
   double ai_compute_score;
+  AiWeightLicense ai_license;
+  double openness_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -111,7 +115,7 @@ typedef struct {
 } StoryCluster;
 
 typedef struct {
-  char key[24];
+  char key[64];
   BitSet bits;
   int occupied;
 } CountryFiber;
@@ -134,6 +138,7 @@ typedef struct {
   BitSet by_clearance[CLEARANCE_LEVEL_COUNT];
   BitSet by_fiscal_stance[FISCAL_STANCE_COUNT];
   BitSet by_ai_tier[AI_TIER_COUNT];
+  BitSet by_ai_license[AI_LICENSE_COUNT];
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
@@ -145,6 +150,7 @@ typedef struct {
   CountryFiber by_org[128];
   CountryFiber by_ai_model[128];
   CountryFiber by_ai_infra[128];
+  CountryFiber by_hf_repo[128];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -179,6 +185,8 @@ typedef struct {
   const char *ai_tier;
   const char *ai_model;
   const char *ai_infra;
+  const char *ai_license;
+  const char *hf_repo;
   const char *region;
   const char *country;
   const char *mentioned_country;
@@ -221,8 +229,8 @@ typedef struct {
 } PullbackPair;
 
 typedef struct {
-  char id[32];
-  char label[32];
+  char id[80];
+  char label[64];
   const char *kind;
   double score;
   uint32_t degree;

@@ -15,6 +15,7 @@ LIB_SRCS = \
 	src/index_engine.c \
 	src/http_server.c
 
+LIB_HDRS = $(wildcard src/*.h)
 LIB_OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 
 .PHONY: all test bench clean
@@ -24,7 +25,7 @@ all: $(BUILD_DIR)/oyez $(BUILD_DIR)/test_oyez
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: src/%.c $(LIB_HDRS) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/oyez: $(LIB_OBJS) src/main.c | $(BUILD_DIR)

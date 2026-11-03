@@ -326,6 +326,8 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_format(buf, "\"macro_score\":%.2f,", a->macro_score);
   buffer_text(buf, "\"ai_tier\":"); json_cstr(buf, ai_compute_tier_slug(a->ai_tier)); buffer_text(buf, ",");
   buffer_format(buf, "\"ai_compute_score\":%.2f,", a->ai_compute_score);
+  buffer_text(buf, "\"ai_license\":"); json_cstr(buf, ai_weight_license_slug(a->ai_license)); buffer_text(buf, ",");
+  buffer_format(buf, "\"openness_score\":%.2f,", a->openness_score);
   buffer_text(buf, "\"mentioned_ai_models\":[");
   for(size_t i = 0; i < a->mentioned_ai_model_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
@@ -335,6 +337,11 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   for(size_t i = 0; i < a->mentioned_ai_infra_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
     json_cstr(buf, a->mentioned_ai_infra[i]);
+  }
+  buffer_text(buf, "],\"mentioned_hf_repos\":[");
+  for(size_t i = 0; i < a->mentioned_hf_repo_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_hf_repos[i]);
   }
   buffer_text(buf, "],\"mentioned_cves\":[");
   for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
@@ -778,7 +785,25 @@ int http_handle_request(ServerContext *ctx,
       json_cstr(out_json, ai_compute_tier_slug((AiComputeTier)at));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_tier[at]));
     }
-    buffer_text(out_json, "},\"ai_models\":{");
+    buffer_text(out_json, "},\"ai_license_spectrum\":{");
+    for(uint32_t al = 0; al < AI_LICENSE_COUNT; ++al) {
+      if(al > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ai_weight_license_slug((AiWeightLicense)al));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_license[al]));
+    }
+    uint32_t closed_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_CLOSED_PROPRIETARY]);
+    uint32_t open_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED]) +
+                        bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE]) +
+                        bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_SCIENCE_OSI]);
+    double open_ratio = (open_cnt + closed_cnt) > 0
+                            ? ((double)open_cnt / (double)(open_cnt + closed_cnt))
+                            : 0.0;
+    buffer_format(out_json,
+                  "},\"open_vs_closed_summary\":{\"open_ecosystem_articles\":%u,"
+                  "\"closed_frontier_articles\":%u,\"openness_ratio\":%.4f},\"ai_models\":{",
+                  open_cnt,
+                  closed_cnt,
+                  open_ratio);
     int first_m = 1;
     for(size_t i = 0; i < 128u; ++i) {
       if(eng->by_ai_model[i].occupied) {
@@ -796,6 +821,16 @@ int http_handle_request(ServerContext *ctx,
         json_cstr(out_json, eng->by_ai_infra[i].key);
         buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_infra[i].bits));
         first_i = 0;
+      }
+    }
+    buffer_text(out_json, "},\"huggingface_repos\":{");
+    int first_h = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_hf_repo[i].occupied) {
+        if(!first_h) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_hf_repo[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_hf_repo[i].bits));
+        first_h = 0;
       }
     }
     buffer_text(out_json, "},\"top_ai_articles\":[");
@@ -835,7 +870,7 @@ int http_handle_request(ServerContext *ctx,
 
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
     char q_str[256], cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
-    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32];
+    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[48];
     char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
@@ -851,6 +886,8 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "ai_tier", ait_str, sizeof(ait_str));
     query_param(qs, "ai_model", aim_str, sizeof(aim_str));
     query_param(qs, "ai_infra", aii_str, sizeof(aii_str));
+    query_param(qs, "ai_license", ail_str, sizeof(ail_str));
+    query_param(qs, "hf_repo", hfr_str, sizeof(hfr_str));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -877,6 +914,8 @@ int http_handle_request(ServerContext *ctx,
     aq.ai_tier = ait_str[0] ? ait_str : NULL;
     aq.ai_model = aim_str[0] ? aim_str : NULL;
     aq.ai_infra = aii_str[0] ? aii_str : NULL;
+    aq.ai_license = ail_str[0] ? ail_str : NULL;
+    aq.hf_repo = hfr_str[0] ? hfr_str : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;
@@ -1003,7 +1042,9 @@ int http_handle_request(ServerContext *ctx,
     }
     buffer_text(out_json, "],\"ai_tier\":");
     json_cstr(out_json, ai_compute_tier_slug(ent.ai_tier));
-    buffer_format(out_json, ",\"ai_compute_score\":%.2f,\"ai_models\":[", ent.ai_compute_score);
+    buffer_format(out_json, ",\"ai_compute_score\":%.2f,\"ai_license\":", ent.ai_compute_score);
+    json_cstr(out_json, ai_weight_license_slug(ent.ai_license));
+    buffer_format(out_json, ",\"openness_score\":%.2f,\"ai_models\":[", ent.openness_score);
     for(size_t i = 0; i < ent.ai_model_count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       json_cstr(out_json, ent.ai_models[i]);
@@ -1012,6 +1053,11 @@ int http_handle_request(ServerContext *ctx,
     for(size_t i = 0; i < ent.ai_infra_count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       json_cstr(out_json, ent.ai_infra[i]);
+    }
+    buffer_text(out_json, "],\"hf_repos\":[");
+    for(size_t i = 0; i < ent.hf_repo_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.hf_repos[i]);
     }
     buffer_text(out_json, "]}}");
 

@@ -56,6 +56,14 @@ static const char *const k_ai_tier_slugs[AI_TIER_COUNT] = {
     "frontier-model-and-rl",
 };
 
+static const char *const k_ai_license_slugs[AI_LICENSE_COUNT] = {
+    "non-model-baseline",
+    "closed-frontier-api",
+    "open-weights-custom-license",
+    "open-weights-permissive",
+    "open-source-osi-full",
+};
+
 #define BIT(x) (1u << (uint32_t)(x))
 
 static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
@@ -321,6 +329,22 @@ int ai_compute_tier_from_slug(const char *slug, AiComputeTier *out) {
   for(uint32_t i = 0; i < AI_TIER_COUNT; ++i) {
     if(strcmp(slug, k_ai_tier_slugs[i]) == 0) {
       *out = (AiComputeTier)i;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+const char *ai_weight_license_slug(AiWeightLicense lic) {
+  if((unsigned)lic >= AI_LICENSE_COUNT) return "non-model-baseline";
+  return k_ai_license_slugs[lic];
+}
+
+int ai_weight_license_from_slug(const char *slug, AiWeightLicense *out) {
+  if(!slug || !out) return -1;
+  for(uint32_t i = 0; i < AI_LICENSE_COUNT; ++i) {
+    if(strcmp(slug, k_ai_license_slugs[i]) == 0) {
+      *out = (AiWeightLicense)i;
       return 0;
     }
   }
@@ -1152,30 +1176,41 @@ static const AssetRule k_asset_rules[] = {
 
 typedef struct {
   const char *model_family;
+  AiWeightLicense default_license;
   const char *const terms[6];
 } AiModelRule;
 
 static const AiModelRule k_ai_model_rules[] = {
-    {"GPT-4o/o1/o3", {"gpt-4", "gpt-4o", "openai o1", "openai o3", "gpt-5", "o3-mini"}},
-    {"Claude-3.5/3.7", {"claude 3", "claude 3.5", "claude 3.7", "claude sonnet", "claude opus", "claude haiku"}},
-    {"Gemini-2.0/1.5", {"gemini 1.5", "gemini 2.0", "gemini pro", "gemini flash", "gemini ultra", "deep think"}},
-    {"Llama-3/4", {"llama 3", "llama-3", "llama 3.1", "llama 3.3", "llama 4", "codellama"}},
-    {"DeepSeek-R1/V3", {"deepseek-r1", "deepseek r1", "deepseek-v3", "deepseek v3", "deepseek coder", "deepseek-v2"}},
-    {"Qwen-2.5/QwQ", {"qwen", "qwen-2.5", "qwen2.5", "qwq", "qwen-vl", "qwen-coder"}},
-    {"Mistral/Mixtral", {"mistral large", "mixtral", "codestral", "pixtral", "ministral", "mathstral"}},
-    {"Gemma-2", {"gemma 2", "gemma-2", "codegemma", "paligemma", "recurrentgemma", NULL}},
-    {"Grok-2/3", {"grok-2", "grok 2", "grok-3", "grok 3", "xai grok", NULL}},
-    {"Command-R+", {"command r+", "command-r+", "command r", "cohere aya", NULL, NULL}},
-    {"Falcon-2/Mamba", {"falcon 2", "falcon-180b", "falcon mamba", NULL, NULL, NULL}},
-    {"Phi-3/4", {"phi-3", "phi-4", "orca-2", "smollm", NULL, NULL}},
-    {"Nemotron/Cosmos", {"nemotron", "nvidia cosmos", "llama-nemotron", NULL, NULL, NULL}},
-    {"OLMo-2/StarCoder", {"olmo", "olmo 2", "starcoder2", "starcoder", "tupo", NULL}},
-    {"Yi/GLM-4/Kimi", {"glm-4", "chatglm", "yi-lightning", "kimi k1.5", "minimax", "baichuan"}},
-    {"Flux/SD3", {"flux.1", "stable diffusion 3", "sdxl", "midjourney v6", "ideogram", NULL}},
-    {"Sora/Veo-2", {"openai sora", "veo 2", "runway gen-3", "kling", "luma dream", NULL}},
-    {"AlphaFold-3/ESM3", {"alphafold", "alphafold 3", "esm3", "evo 2", "boltz-1", "rosettafold"}},
-    {"Whisper/AudioLM", {"whisper-large", "elevenlabs", "moshi", "voicebox", NULL, NULL}},
-    {"OpenVLA/Pi-0", {"openvla", "pi-0", "rt-2", "octo model", "figure helix", NULL}},
+    /* Closed-Source Proprietary Frontier APIs */
+    {"GPT-4o/o1/o3", AI_LICENSE_CLOSED_PROPRIETARY, {"gpt-4", "gpt-4o", "openai o1", "openai o3", "gpt-5", "o3-mini"}},
+    {"Claude-3.5/3.7", AI_LICENSE_CLOSED_PROPRIETARY, {"claude 3", "claude 3.5", "claude 3.7", "claude sonnet", "claude opus", "claude haiku"}},
+    {"Gemini-2.0/1.5", AI_LICENSE_CLOSED_PROPRIETARY, {"gemini 1.5", "gemini 2.0", "gemini pro", "gemini flash", "gemini ultra", "deep think"}},
+    {"Grok-2/3", AI_LICENSE_CLOSED_PROPRIETARY, {"grok-2", "grok 2", "grok-3", "grok 3", "xai grok", NULL}},
+    {"Sora/Veo-2", AI_LICENSE_CLOSED_PROPRIETARY, {"openai sora", "veo 2", "runway gen-3", "kling", "luma dream", NULL}},
+    /* Open-Weights under Community / Custom / Usage-Cap / Non-Commercial Licenses */
+    {"Llama-3/4", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"llama 3", "llama-3", "llama 3.1", "llama 3.3", "llama 4", "codellama"}},
+    {"Gemma-2/PaliGemma", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"gemma 2", "gemma-2", "codegemma", "paligemma", "recurrentgemma", "shieldgemma"}},
+    {"Command-R+/Aya", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"command r+", "command-r+", "command r", "cohere aya", "aya-expanse", NULL}},
+    {"Nemotron/Cosmos", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"nemotron", "nvidia cosmos", "llama-nemotron", "minitron", "nvlm", NULL}},
+    {"Flux/SD3", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"flux.1", "flux.1-dev", "stable diffusion 3", "sd3.5", "sdxl", "ideogram"}},
+    /* Permissively Licensed Open-Weights on Hugging Face (Apache-2.0 / MIT) */
+    {"DeepSeek-R1/V3", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"deepseek-r1", "deepseek r1", "deepseek-v3", "deepseek v3", "deepseek coder", "janus-pro"}},
+    {"Qwen-2.5/QwQ", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"qwen", "qwen-2.5", "qwen2.5", "qwq", "qwen-vl", "qwen-coder"}},
+    {"Mistral/Mixtral", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"mistral large", "mixtral", "codestral", "pixtral", "ministral", "mathstral"}},
+    {"Phi-3/4", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"phi-3", "phi-3.5", "phi-4", "orca-2", "phi-3-mini", NULL}},
+    {"Falcon-2/Mamba", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"falcon 2", "falcon-180b", "falcon mamba", "mamba-2", "jamba", "zamba"}},
+    {"Yi/GLM-4/Kimi", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"glm-4", "chatglm", "yi-1.5", "yi-lightning", "kimi k1.5", "internlm2"}},
+    {"SmolLM2/Zephyr", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"smollm", "smollm2", "smolvlm", "zephyr-7b", "open-r1", "tinyllama"}},
+    {"Hermes-3/Nous", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"hermes-3", "nous-hermes", "nousresearch", "deephermes", "dolphin-llama", NULL}},
+    {"MiniMax/HunYuan", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"minimax-01", "minimax", "hunyuan", "baichuan", "step-2", "minicpm"}},
+    {"DBRX/Arctic/Liquid", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"dbrx", "snowflake-arctic", "liquid lfm", "granite-3", "modernbert", "deberta"}},
+    {"Whisper/Kokoro/Moshi", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"whisper-large", "kokoro-82m", "moshi", "parler-tts", "f5-tts", "elevenlabs"}},
+    {"BGE-M3/Nomic-Embed", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"bge-m3", "nomic-embed", "jina-embeddings", "e5-mistral", "colpali", "gliner"}},
+    {"AlphaFold-3/ESM3", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"alphafold", "alphafold 3", "esm3", "evo 2", "boltz-1", "chai-1"}},
+    /* Full OSI Open-Source AI (Weights + Open Pretraining Dataset + Training Code) */
+    {"OLMo-2/StarCoder", AI_LICENSE_OPEN_SCIENCE_OSI, {"olmo", "olmo 2", "olmo-2", "tulu-3", "starcoder2", "starcoder"}},
+    {"Pythia/MAP-Neo/DCLM", AI_LICENSE_OPEN_SCIENCE_OSI, {"pythia", "map-neo", "dclm", "amber-7b", "bloom-176b", "openlm"}},
+    {"OpenVLA/Pi-0", AI_LICENSE_OPEN_SCIENCE_OSI, {"openvla", "pi-0", "rt-2", "octo model", "figure helix", "gr00t"}},
 };
 
 typedef struct {
@@ -1207,6 +1242,11 @@ static const AiInfraRule k_ai_infra_rules[] = {
     {"Speculative-Decode", {"speculative decoding", "medusa head", "eagle decoding", "multi-token prediction", "draft model", NULL}},
     {"KV-Cache/Disagg", {"kv cache", "kv-cache", "prefill-decode", "disaggregated serving", "mooncake", "prefix caching"}},
     {"FP8/AWQ/GPTQ", {"fp8", "fp4", "awq", "gptq", "int4 quantization", "qlora"}},
+    /* Hugging Face Hub & Open-Weights Post-Training / Evaluation Stack */
+    {"HF-Transformers/TGI", {"safetensors", "text-generation-inference", "huggingface hub", "hf hub", "model card", "gradio"}},
+    {"HF-TRL/PEFT/Unsloth", {"unsloth", "axolotl", "peft", "trl library", "bitsandbytes", "torchtune"}},
+    {"HF-Datasets/FineWeb", {"fineweb", "fineweb-edu", "the-stack-v2", "dolma dataset", "redpajama", "datatrove"}},
+    {"LM-Eval/Arena", {"lm-evaluation-harness", "open llm leaderboard", "chatbot arena", "swe-bench", "gpqa", "arc-agi"}},
     /* AI Silicon, Accelerators & Cluster Interconnects */
     {"NVIDIA-Blackwell", {"blackwell", "b200", "gb200", "nvl72", "vera rubin", "b100"}},
     {"NVIDIA-Hopper", {"h100", "h200", "gh200", "hopper gpu", "hgx", NULL}},
@@ -1264,6 +1304,67 @@ static void extract_cve_identifiers(const char *lower_text, size_t len, Extracte
       }
     }
     i++;
+  }
+}
+
+static int is_hf_repo_char(char c) {
+  return isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.';
+}
+
+static void push_hf_repo(ExtractedEntities *out, const char *repo, size_t rlen) {
+  if(!out || out->hf_repo_count >= MAX_EXTRACTED_HF_REPOS || rlen < 5u) return;
+  while(rlen > 0 && (repo[rlen - 1u] == '.' || repo[rlen - 1u] == '-' || repo[rlen - 1u] == '_')) {
+    rlen--;
+  }
+  if(rlen < 5u || rlen >= 63u) return;
+  const char *slash = memchr(repo, '/', rlen);
+  if(!slash || slash == repo || (size_t)(slash - repo) + 2u > rlen) return;
+  if(memchr(slash + 1u, '/', rlen - (size_t)(slash + 1u - repo)) != NULL) return;
+  for(size_t i = 0; i < out->hf_repo_count; ++i) {
+    if(strlen(out->hf_repos[i]) == rlen && memcmp(out->hf_repos[i], repo, rlen) == 0) return;
+  }
+  memcpy(out->hf_repos[out->hf_repo_count], repo, rlen);
+  out->hf_repos[out->hf_repo_count][rlen] = '\0';
+  out->hf_repo_count++;
+}
+
+static void extract_hf_repo_ids(const char *lower_text, size_t len, ExtractedEntities *out) {
+  if(!lower_text || len < 6u) return;
+  static const char *const k_hf_orgs[] = {
+      "deepseek-ai/",         "meta-llama/",          "qwen/",
+      "mistralai/",           "allenai/",             "bigcode/",
+      "huggingfacetb/",       "huggingfaceh4/",       "black-forest-labs/",
+      "stabilityai/",         "nousresearch/",        "cohereforai/",
+      "01-ai/",               "thudm/",               "moonshotai/",
+      "tiiuae/",              "baai/",                "nomic-ai/",
+      "eleutherai/",          "openbmb/",             "ibm-granite/",
+      "sentence-transformers/","unsloth/",            "zyphra/",
+      "liquidai/",            "google/gemma",         "google/paligemma",
+      "microsoft/phi",        "nvidia/llama",         "nvidia/nemotron",
+      "openai/whisper",       "openai/clip",          "apple/mlx",
+  };
+  for(size_t k = 0; k < sizeof(k_hf_orgs) / sizeof(k_hf_orgs[0]); ++k) {
+    if(out->hf_repo_count >= MAX_EXTRACTED_HF_REPOS) break;
+    const char *prefix = k_hf_orgs[k];
+    size_t plen = strlen(prefix);
+    const char *p = lower_text;
+    const char *end = lower_text + len;
+    while(p + plen < end) {
+      const char *hit = strstr(p, prefix);
+      if(!hit) break;
+      int boundary_ok = (hit == lower_text) ||
+                        (!isalnum((unsigned char)hit[-1]) && hit[-1] != '.' && hit[-1] != '-');
+      if(boundary_ok) {
+        const char *slash = strchr(prefix, '/');
+        size_t org_len = (size_t)(slash - prefix);
+        size_t cur = org_len + 1u;
+        while(hit + cur < end && is_hf_repo_char(hit[cur]) && cur < 62u) cur++;
+        if(cur > org_len + 2u) {
+          push_hf_repo(out, hit, cur);
+        }
+      }
+      p = hit + plen;
+    }
   }
 }
 
@@ -1440,7 +1541,10 @@ void entities_extract(const char *title,
   out->fiscal_stance = stance;
   out->macro_score = (double)out->asset_count * 1.4 + (double)out->fiscal_event_count * 2.2 + best_macro;
 
-  /* Extract AI Foundation Models, Neoclouds, Inference Engines & Compute Silicon */
+  /* Extract AI Foundation Models, Neoclouds, Inference Engines, HF Repos & Open/Closed Spectrum */
+  extract_hf_repo_ids(lower, len, out);
+
+  double lic_scores[AI_LICENSE_COUNT] = {0};
   for(size_t i = 0; i < sizeof(k_ai_model_rules) / sizeof(k_ai_model_rules[0]); ++i) {
     if(out->ai_model_count >= MAX_EXTRACTED_AI_MODELS) break;
     for(size_t t = 0; t < 6u && k_ai_model_rules[i].terms[t]; ++t) {
@@ -1448,6 +1552,9 @@ void entities_extract(const char *title,
         strncpy(out->ai_models[out->ai_model_count], k_ai_model_rules[i].model_family, 23u);
         out->ai_models[out->ai_model_count][23] = '\0';
         out->ai_model_count++;
+        if((unsigned)k_ai_model_rules[i].default_license < AI_LICENSE_COUNT) {
+          lic_scores[k_ai_model_rules[i].default_license] += 3.0;
+        }
         break;
       }
     }
@@ -1465,13 +1572,60 @@ void entities_extract(const char *title,
     }
   }
 
-  if(out->ai_model_count > 0 || out->ai_infra_count > 0) {
+  if(out->ai_model_count > 0 || out->ai_infra_count > 0 || out->hf_repo_count > 0) {
     out->direct_ontology_mask |= BIT(ONTO_AI);
     out->closure_ontology_mask = ontology_upward_closure(out->direct_ontology_mask);
   }
 
+  /* Open-Source (OSI) vs Open-Weights (Permissive / Restricted) vs Closed-Source Frontier API scoring */
+  if(out->hf_repo_count > 0) {
+    lic_scores[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE] += (double)out->hf_repo_count * 2.6;
+  }
+  if(text_contains_word(lower, len, "closed-source") || text_contains_word(lower, len, "closed source") ||
+     text_contains_word(lower, len, "proprietary model") || text_contains_word(lower, len, "frontier api") ||
+     text_contains_word(lower, len, "walled garden") || text_contains_word(lower, len, "unreleased weights")) {
+    lic_scores[AI_LICENSE_CLOSED_PROPRIETARY] += 4.2;
+  }
+  if(text_contains_word(lower, len, "community license") || text_contains_word(lower, len, "non-commercial") ||
+     text_contains_word(lower, len, "custom license") || text_contains_word(lower, len, "gated model")) {
+    lic_scores[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED] += 4.0;
+  }
+  if(text_contains_word(lower, len, "open-weights") || text_contains_word(lower, len, "open weights") ||
+     text_contains_word(lower, len, "apache-2.0") || text_contains_word(lower, len, "apache 2.0") ||
+     text_contains_word(lower, len, "mit license") || text_contains_word(lower, len, "safetensors") ||
+     text_contains_word(lower, len, "gguf") || text_contains_word(lower, len, "hugging face") ||
+     text_contains_word(lower, len, "huggingface")) {
+    lic_scores[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE] += 3.8;
+  }
+  if(text_contains_word(lower, len, "open-source ai definition") || text_contains_word(lower, len, "osaid") ||
+     text_contains_word(lower, len, "open pretraining") || text_contains_word(lower, len, "reproducible pretraining") ||
+     text_contains_word(lower, len, "dolma") || text_contains_word(lower, len, "the-stack-v2") ||
+     text_contains_word(lower, len, "fineweb") || text_contains_word(lower, len, "fully open-source") ||
+     text_contains_word(lower, len, "open science ai") || text_contains_word(lower, len, "open-source osi")) {
+    lic_scores[AI_LICENSE_OPEN_SCIENCE_OSI] += 6.5;
+  }
+
+  AiWeightLicense best_lic = AI_LICENSE_UNSPECIFIED;
+  double best_lic_sc = 0.5;
+  for(uint32_t l = 1u; l < AI_LICENSE_COUNT; ++l) {
+    if(lic_scores[l] >= best_lic_sc) {
+      best_lic_sc = lic_scores[l];
+      best_lic = (AiWeightLicense)l;
+    }
+  }
+  if(lic_scores[AI_LICENSE_OPEN_SCIENCE_OSI] >= 7.5 &&
+     lic_scores[AI_LICENSE_OPEN_SCIENCE_OSI] >= lic_scores[AI_LICENSE_CLOSED_PROPRIETARY]) {
+    best_lic = AI_LICENSE_OPEN_SCIENCE_OSI;
+  }
+  out->ai_license = best_lic;
+  out->openness_score = lic_scores[AI_LICENSE_OPEN_SCIENCE_OSI] * 1.5 +
+                        lic_scores[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE] * 1.2 +
+                        lic_scores[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED] * 0.8 -
+                        lic_scores[AI_LICENSE_CLOSED_PROPRIETARY] * 0.6;
+
   AiComputeTier ai_tier = AI_TIER_NONE;
-  double ai_score = (double)out->ai_model_count * 2.4 + (double)out->ai_infra_count * 2.8;
+  double ai_score = (double)out->ai_model_count * 2.4 + (double)out->ai_infra_count * 2.8 +
+                    (double)out->hf_repo_count * 3.0;
 
   if((out->direct_ontology_mask & BIT(ONTO_AI)) != 0u ||
      text_contains_word(lower, len, "rag") || text_contains_word(lower, len, "vector database") ||
