@@ -1,4 +1,5 @@
-import type { ArticleEntities } from "../types.ts";
+import type { ArticleEntities, NewsType } from "../types.ts";
+import { OYEZ_NEWS_ONTOLOGY } from "./category_theory.ts";
 
 const COUNTRY_GAZETTEER: Record<string, string[]> = {
   US: ["united states", "u.s.", "usa", "washington d.c.", "pentagon", "white house", "wall street", "american", "california", "new york", "texas"],
@@ -361,7 +362,6 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Precompile boundary regexes for gazetteer & organizations
 const COUNTRY_PATTERNS: Array<{ code: string; regex: RegExp }> = Object.entries(
   COUNTRY_GAZETTEER
 ).map(([code, terms]) => {
@@ -378,11 +378,107 @@ const ORG_PATTERNS: Array<{ name: string; regex: RegExp }> =
     regex: new RegExp(`\\b${escapeRegex(name)}\\b`, "i"),
   }));
 
+/**
+ * Classify the epistemic / journalistic genre (NewsType) of an article
+ */
+export function classifyNewsType(
+  title: string,
+  summary: string,
+  contentText: string,
+  feedCategory?: string,
+  url?: string
+): NewsType {
+  const text = `${title} ${summary} ${contentText.slice(0, 1000)}`.toLowerCase();
+  const urlLower = (url ?? "").toLowerCase();
+
+  if (
+    feedCategory === "investigative" ||
+    /\b(?:investigation|investigative|revealed|leaked|whistleblower|exclusive report|osint|bellingcat|propublica|icij)\b/.test(
+      text
+    )
+  ) {
+    return "investigative-report";
+  }
+
+  if (
+    urlLower.includes("/opinion/") ||
+    urlLower.includes("/editorial/") ||
+    urlLower.includes("/commentisfree/") ||
+    /\b(?:opinion:|editorial:|op-ed|column:|commentary:|why we must|in my view)\b/.test(
+      text
+    )
+  ) {
+    return "opinion-and-editorial";
+  }
+
+  if (
+    feedCategory === "science" ||
+    /\b(?:study finds|researchers|peer-reviewed|published in nature|clinical trial|scientists discover|journal of|laboratory|genome|arxiv)\b/.test(
+      text
+    )
+  ) {
+    return "scientific-research";
+  }
+
+  if (
+    /\b(?:explained:|explainer:|what to know about|how does|everything you need to know|q&a:|deep dive|guide to)\b/.test(
+      text
+    )
+  ) {
+    return "explainer-and-analysis";
+  }
+
+  if (
+    /\b(?:supreme court|parliament passes|legislation|bill signed|central bank|regulation|sanctions imposed|treaty ratified|ruling|indictment|verdict|ministry announced)\b/.test(
+      text
+    )
+  ) {
+    return "policy-and-legislative";
+  }
+
+  if (
+    /\b(?:quarterly earnings|stock market|gdp growth|bond yields|inflation rate|interest rates|ipo|market rally|barrel of oil|trade deficit|fiscal quarter)\b/.test(
+      text
+    )
+  ) {
+    return "market-and-economic";
+  }
+
+  if (
+    /\b(?:press release|official statement|joint communique|ministry of foreign affairs states)\b/.test(
+      text
+    )
+  ) {
+    return "press-and-official";
+  }
+
+  if (
+    /\b(?:breaking:|just in:|live updates:|urgent:|flash:|developing story)\b/.test(
+      text
+    )
+  ) {
+    return "breaking-dispatch";
+  }
+
+  if (
+    feedCategory === "culture" ||
+    /\b(?:book review|film festival|exhibition|album|museum|architecture|cuisine|portrait of)\b/.test(
+      text
+    )
+  ) {
+    return "cultural-and-feature";
+  }
+
+  return "general-report";
+}
+
 export function extractArticleEntities(
   title: string,
   summary: string,
   contentText: string,
-  sourceCountry?: string
+  sourceCountry?: string,
+  feedCategory?: string,
+  extraCategories: string[] = []
 ): ArticleEntities {
   const combined = `${title}\n${summary}\n${contentText.slice(0, 4000)}`;
   const lower = combined.toLowerCase();
@@ -409,7 +505,15 @@ export function extractArticleEntities(
     }
   }
 
-  // 3. Organizations and multi-word Proper Noun phrases
+  // 3. Functorial upward closure in the News Ontology Poset Category C
+  const seedNodes = [
+    ...(feedCategory ? [feedCategory] : []),
+    ...extraCategories,
+    ...topicsSet,
+  ];
+  const ontologyClosure = OYEZ_NEWS_ONTOLOGY.upwardClosureOf(seedNodes);
+
+  // 4. Organizations and multi-word Proper Noun phrases
   const entitiesSet = new Set<string>();
   for (const { name, regex } of ORG_PATTERNS) {
     if (regex.test(combined)) {
@@ -417,7 +521,6 @@ export function extractArticleEntities(
     }
   }
 
-  // Extract capitalized 2-to-3 word proper noun sequences from title & summary
   const titleAndSummary = `${title} . ${summary}`;
   const properPhraseRegex =
     /\b([A-Z][a-z]{2,15}(?:\s+[A-Z][a-z]{2,15}){1,2})\b/g;
@@ -433,6 +536,7 @@ export function extractArticleEntities(
   return {
     mentionedCountries: Array.from(mentionedSet),
     topics: Array.from(topicsSet),
+    ontologyClosure,
     organizationsAndPeople: Array.from(entitiesSet).slice(0, 12),
   };
 }
