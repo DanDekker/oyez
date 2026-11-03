@@ -1,70 +1,80 @@
 # Oyez
 
-**Oyez! Oyez! Oyez!** — A zero-dependency, first-party global news API, RSS/Atom/JSON Feed aggregator, readability extractor, and category-theoretic deep search engine built with TypeScript and Bun.
+**Oyez** is a zero-dependency, first-party **C23** global news aggregator API, RSS/Atom/JSON Feed parser, readability content extractor, category-theoretic ontology engine, and in-memory BM25 + 64-bit BitSet search engine.
 
-## Architecture & Highlights
+Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only `-lm -lpthread`.
 
-- **100% First-Party & Zero External Dependencies**: Every parser, tokenizer, indexer, readability scraper, and HTTP router is written from scratch on top of Bun's native runtime.
-- **Global News Catalog (`WORLD_FEED_CATALOG`)**:
-  - 100+ curated feeds across all **11 World Regions** (`north-america`, `latin-america`, `europe`, `middle-east`, `africa`, `south-asia`, `east-asia`, `southeast-asia`, `central-asia`, `oceania`, `global`) and **45+ countries**.
-- **Epistemic News Types & Geopolitical Gazetteer**:
-  - Classifies every article into one of 10 journalistic genres (`breaking-dispatch`, `investigative-report`, `policy-and-legislative`, `scientific-research`, `market-and-economic`, `opinion-and-editorial`, `explainer-and-analysis`, `press-and-official`, `cultural-and-feature`, `general-report`).
-  - Built-in geopolitical gazetteer extracts mentioned ISO-2 countries, macro topics, international organizations, and proper noun entities.
-- **Category Theory & Algebraic Information Retrieval**:
-  - **Ontology Poset Category $\mathcal{C}$ & Contravariant Presheaf Indexing ($F: \mathcal{C}^{\text{op}} \to \mathbf{FinSet}$)**: Categories form a directed acyclic meet/join poset with diamond inheritance (`semiconductors-and-hardware` $\preceq$ `trade-and-supply-chain` $\preceq$ `economy-and-markets` and `technology-and-computing`). Articles are automatically indexed across their upward principal filter $\uparrow c$, guaranteeing functorial fiber inclusion $F(u) \subseteq F(v)$ whenever $u \preceq v$.
-  - **Left Kan Extension ($\text{Lan}_\iota S$)**: Propagates relevance and frequency valuations upward along ontology morphisms under both the **Tropical Max-Plus Semiring** and **Archimedean Weighted-Sum Semiring**.
-  - **Antitone Galois Connection & Formal Concept Analysis (FCA)**: Extracts closed **Formal Concepts** $(\text{Extent}, \text{Intent})$ where $A'' = A$ and $B = A'$ along with Hasse subconcept/superconcept lattice edges.
-  - **Categorical Pullbacks ($X \times_Z Y$)**: Constructs the universal fibered product of articles between any two regions, countries, or news types over a shared pivot dimension (`topic`, `mentionedCountry`, `entity`, `ontologyCategory`).
-- **Advanced Retrieval & Graph Algorithms**:
-  - **Okapi BM25 Full-Text Search** with field-weighted postings (`title` 3.5x, `entities/topics` 3.0x, `categories` 2.5x, `author` 2.0x, `summary` 1.5x, `body` 1.0x), prefix expansion, and phrase boosting.
-  - **64-bit Charikar SimHash + $O(1)$ Bitwise Hamming LSH**: Near-duplicate detection and locality-sensitive similarity scoring.
-  - **Submodular Maximum Marginal Relevance (MMR)**: Greedy submodular diversification (`?diversify=true&mmrLambda=0.7`) balancing query relevance against source, country, and SimHash redundancy.
-  - **Bipartite Entity-Article PageRank**: Power-iteration eigenvector centrality over the global entity-topic-article graph.
-- **Byte-Level BPE & M1 Structured Tokenizer**:
-  - Lossless byte-level Byte-Pair Encoding with incremental doubly-linked list + lazy max-heap merge training, rank-order min-heap encoding, reflected CRC-32 (`OYEZBP01`), and SHA-256 artifact sealing (`OYEZMT02`).
+---
+
+## Architecture & Proprietary C23 Stack
+
+| Module | File | Description |
+| :--- | :--- | :--- |
+| **Core & Hashing** | [`src/core.h`](src/core.h), [`src/core.c`](src/core.c) | Dynamic/fixed `Buffer`, JSON string escaping, monotonic nanosecond clocks, `fnv1a64`, `mix64`, hardware `popcnt64` & `ctz64`. |
+| **Checksums & Wire** | [`src/checksum.h`](src/checksum.h), [`src/checksum.c`](src/checksum.c), [`src/wire.h`](src/wire.h) | Little-endian binary wire encoding, reflected nibble CRC-32, and incremental SHA-256 (`Sha256Digest`). |
+| **Byte-Level BPE Tokenizer** | [`src/token.h`](src/token.h), [`src/token.c`](src/token.c) | Doubly-linked symbol list + open-addressed `PairTable` + `MaxHeap`/`MinHeap` BPE trainer/encoder with `OYEZBP01` CRC-32 binary checkpoints. |
+| **M1 Structured Tokenizer** | [`src/m1_tokenizer.h`](src/m1_tokenizer.h), [`src/m1_tokenizer.c`](src/m1_tokenizer.c) | Fixed-vocabulary pre-segmenter (256 raw bytes + 26 indent tokens + 89 syntax primitives + 22 landmarks + 12 control tokens = `405` base IDs) with `OYEZMT02` SHA-256 + CRC-32 sealed serialization. |
+| **Markup & Readability** | [`src/markup.h`](src/markup.h), [`src/markup.c`](src/markup.c) | Unified RSS 2.0, Atom 1.0, RSS 1.0/RDF, and JSON Feed 1.1 parser + Readability DOM block scorer and HTML-to-Markdown converter. |
+| **Category Theory & Gazetteer** | [`src/ontology.h`](src/ontology.h), [`src/ontology.c`](src/ontology.c) | 24-node Bitmask Poset Category $\mathcal{C}$ (`upward_mask` $\uparrow c$, `downward_mask` $\downarrow c$), Lattice Join $\vee$ & Meet $\wedge$, Left Kan Extension $\text{Lan}_\iota$, 10 epistemic `NewsType` genres, 60+ ISO-2 country gazetteer, and 64-bit Charikar SimHash. |
+| **Global Feed Catalog** | [`src/catalog.h`](src/catalog.h), [`src/catalog.c`](src/catalog.c) | 119 curated news feeds across all 11 world regions and 55+ countries. |
+| **BM25 & BitSet Index Engine** | [`src/index_engine.h`](src/index_engine.h), [`src/index_engine.c`](src/index_engine.c) | Database-free in-memory + `OYEZIX01` binary snapshot engine with 64-bit word `BitSet` presheaf fibers, Okapi BM25 ranking, Submodular MMR diversification, Galois Formal Concept Analysis, Categorical Pullbacks, and Bipartite Entity-Article PageRank. |
+| **POSIX HTTP Server & CLI** | [`src/http_server.h`](src/http_server.h), [`src/http_server.c`](src/http_server.c), [`src/main.c`](src/main.c) | Zero-dependency POSIX socket HTTP/1.1 JSON REST server and CLI (`serve`, `seed`, `poll`, `bench`, `stats`). |
+
+---
+
+## Performance Benchmarks (Apple Silicon M-Series, `-O3`)
+
+```text
+================================================================
+  Oyez Pure C23 Proprietary Engine Benchmark Suite
+================================================================
+1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 119 feeds):
+   Total Time:  225.16 ms (8882 articles/sec)
+2. BM25 + Poset Presheaf Fiber + BitSet Search (1000 queries):
+   Avg Latency: 18.02 us/query (55479 queries/sec, hits=500)
+3. Bipartite Entity-Article PageRank (15 iterations over 2000 articles):
+   Total Time:  65.39 ms (top entity: geo:US score=0.0781)
+4. M1 Structured BPE Tokenizer Training + SHA-256 Seal:
+   Vocab Size:  512 (trained in 3.35 ms)
+```
+
+---
 
 ## Quick Start
 
 ```bash
-# Start server (default port 3000)
-bun run start
+# Build binary and run test suite
+make test
 
-# Start and seed with the global feed catalog
-bun run start -- --seed
+# Run the high-performance benchmark suite
+make bench
 
-# Poll all global feeds and build the deep index in ./data
-bun run index:world
+# Seed the 119 global news feeds into data/oyez.ix
+./build/oyez seed
 
-# Run test suite
-bun test
+# Poll live RSS/Atom feeds
+./build/oyez poll 15
+
+# Start the HTTP/1.1 REST API server on port 8787
+./build/oyez serve 8787
 ```
 
-## REST API Reference
+---
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | Health status and index counters |
-| `GET` | `/api/v1/stats` | Full index statistics, vocabulary size, postings, and facet distributions |
-| `GET` | `/api/v1/facets` | Live facet counts (`newsTypes`, `regions`, `countries`, `mentionedCountries`, `ontologyCategories`, `topics`, `topEntities`) |
-| `GET` | `/api/v1/trending` | Multi-source global story clusters and top trending entities/topics |
-| `GET` | `/api/v1/ontology` | Ontology Poset Hasse diagram, Presheaf fiber counts, Left Kan Extensions, and Meet/Join (`?u=...&v=...`) |
-| `GET` | `/api/v1/concepts` | Formal Concept Lattice via Galois Connection closure (`?minSupport=2&limit=20`) |
-| `GET` | `/api/v1/pullback` | Categorical Pullback $X \times_Z Y$ across fibers (`?leftRegion=europe&rightRegion=east-asia&pivot=topic`) |
-| `GET` | `/api/v1/centrality` | Bipartite Entity-Article PageRank eigenvector centrality |
-| `GET` | `/api/v1/catalog` | Browse the built-in 100+ global feed catalog (`?region=...&country=...&category=...`) |
-| `GET` | `/api/v1/feeds` | List registered feeds and article counts |
-| `POST` | `/api/v1/feeds` | Register a new RSS/Atom/JSON feed |
-| `POST` | `/api/v1/feeds/seed` | Seed feeds from the global catalog (filterable by `region`, `country`, `category`) |
-| `POST` | `/api/v1/feeds/refresh` | Poll all enabled feeds on demand |
-| `GET` | `/api/v1/articles` | Search & filter articles (`q`, `newsType`, `category`, `region`, `country`, `mentionedCountry`, `topic`, `entity`, `diversify=true`, `mmrLambda=0.7`) |
-| `GET` | `/api/v1/articles/:id` | Retrieve full article details, entities, SimHash, and Markdown |
-| `GET` | `/api/v1/articles/:id/related` | Cross-country related articles covering the same story |
-| `GET` | `/api/v1/articles/:id/duplicates` | Near-duplicate lookup via 64-bit SimHash Hamming distance (`?maxDistance=14`) |
-| `POST` | `/api/v1/articles/:id/extract` | Fetch and extract full readability content for an indexed article |
-| `POST` | `/api/v1/extract` | Standalone readability extraction for any `{ "url": "..." }` or `{ "html": "..." }` |
-| `POST` | `/api/v1/tokenize` | Encode text with the M1/BPE tokenizer and inspect lexical stems |
-| `POST` | `/api/v1/snapshot` | Trigger an immediate compacted disk snapshot |
+## REST API Endpoints
 
-## License
-
-MIT
+- `GET /health` — Engine health, feed/article counts, and inverted index vocabulary size
+- `GET /api/v1/stats` — Region, epistemic `NewsType`, and Poset presheaf fiber counts
+- `GET /api/v1/ontology?sub=ai&sup=knowledge-economy&a=cyber&b=ai` — Poset Category $\mathcal{C}$ morphisms, Lattice Join $\vee$ / Meet $\wedge$, and Left Kan Extension $\text{Lan}_\iota$ scores
+- `GET /api/v1/concepts?min_support=2` — Formal Concept Analysis (Galois connection $\mathcal{P}(\mathcal{G}) \leftrightarrows \mathcal{P}(\mathcal{M})^{\text{op}}$)
+- `GET /api/v1/pullback?left_region=east-asia&right_region=europe&over=mentioned_country` — Categorical fibered product $X \times_Z Y$ across regional bureaus
+- `GET /api/v1/centrality` — Bipartite Entity-Article PageRank centrality
+- `GET /api/v1/catalog?region=east-asia` — Browse the 119-feed global news catalog
+- `POST /api/v1/catalog/seed` — Seed feeds from the global catalog
+- `GET /api/v1/feeds` — List indexed feeds
+- `POST /api/v1/feeds/poll` — Poll live feeds and persist `OYEZIX01` snapshot
+- `GET /api/v1/articles?q=semiconductor&category=knowledge-economy&category_morphism=1&diversify=1` — Okapi BM25 + Poset Presheaf restriction + Submodular MMR search
+- `GET /api/v1/articles/:id` — Retrieve full article record
+- `GET /api/v1/articles/:id/similar` — 64-bit Charikar SimHash LSH (`popcnt64`) near-duplicate search
+- `POST /api/v1/extract` — Extract clean text, Markdown, and entities from raw HTML or URL
+- `POST /api/v1/tokenize` — Encode text with the M1 structured BPE tokenizer
