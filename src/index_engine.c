@@ -1,6 +1,7 @@
 #include "index_engine.h"
 
 #include "checksum.h"
+#include "m1_tokenizer.h"
 #include "markup.h"
 #include "wire.h"
 
@@ -329,6 +330,7 @@ static const InvertedBucket *inv_lookup(const OyezEngine *engine, const char *te
 void engine_init(OyezEngine *engine) {
   ontology_init();
   memset(engine, 0, sizeof(*engine));
+  pthread_rwlock_init(&engine->rwlock, NULL);
   engine->next_feed_id = 1u;
   engine->next_article_id = 1u;
   inv_table_grow(engine);
@@ -336,6 +338,21 @@ void engine_init(OyezEngine *engine) {
   for(int b = 0; b < 4; ++b) {
     engine->lsh_bands[b] = calloc(4096u, sizeof(SimHashBucket));
   }
+}
+
+void engine_read_lock(const OyezEngine *engine) {
+  if(!engine) return;
+  pthread_rwlock_rdlock((pthread_rwlock_t *)&engine->rwlock);
+}
+
+void engine_write_lock(OyezEngine *engine) {
+  if(!engine) return;
+  pthread_rwlock_wrlock(&engine->rwlock);
+}
+
+void engine_unlock(const OyezEngine *engine) {
+  if(!engine) return;
+  pthread_rwlock_unlock((pthread_rwlock_t *)&engine->rwlock);
 }
 
 static void free_feed_record(FeedRecord *f) {
@@ -418,6 +435,7 @@ void engine_free(OyezEngine *engine) {
       free(engine->lsh_bands[b]);
     }
   }
+  pthread_rwlock_destroy(&engine->rwlock);
   memset(engine, 0, sizeof(*engine));
 }
 
@@ -576,6 +594,7 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   a->doc_len = doc_tokens > 0 ? doc_tokens : 1u;
   engine->total_doc_len += a->doc_len;
   a->simhash64 = simhash64_compute(terms, term_count);
+  a->m1_sketch64 = m1_structural_sketch64(a->title, strlen(a->title), &a->m1_landmark_hits);
 
   /* Insert into 4-band x 16-bit Multi-Probe LSH index */
   for(int b = 0; b < 4; ++b) {
@@ -793,10 +812,12 @@ static int compare_scored_desc(const void *a, const void *b) {
 
 static double article_similarity(const ArticleRecord *a, const ArticleRecord *b) {
   uint32_t hamming = simhash64_distance(a->simhash64, b->simhash64);
+  uint32_t m1_hamming = simhash64_distance(a->m1_sketch64, b->m1_sketch64);
   double sim_hash = 1.0 - ((double)hamming / 64.0);
+  double sim_m1 = 1.0 - ((double)m1_hamming / 64.0);
   double sim_onto = 1.0 - ontology_wasserstein_distance(a->direct_ontology_mask, b->direct_ontology_mask);
   double same_feed = (a->feed_id == b->feed_id) ? 1.0 : 0.0;
-  return 0.45 * sim_hash + 0.35 * sim_onto + 0.20 * same_feed;
+  return 0.35 * sim_hash + 0.15 * sim_m1 + 0.30 * sim_onto + 0.20 * same_feed;
 }
 
 static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
@@ -1809,6 +1830,167 @@ size_t engine_grothendieck_fibration(const OyezEngine *engine,
         CartesianLift tmp = out_lifts[i];
         out_lifts[i] = out_lifts[j];
         out_lifts[j] = tmp;
+      }
+    }
+  }
+  return found;
+}
+
+void engine_temporal_sheaf(const OyezEngine *engine,
+                           TemporalSheafState *out_temporal) {
+  if(!out_temporal) return;
+  memset(out_temporal, 0, sizeof(*out_temporal));
+  if(!engine || engine->article_count == 0) return;
+
+  size_t n = engine->article_count;
+  for(size_t i = 0; i < n; ++i) {
+    size_t stalk = (i * TEMPORAL_STALK_COUNT) / n;
+    if(stalk >= TEMPORAL_STALK_COUNT) stalk = TEMPORAL_STALK_COUNT - 1u;
+    uint32_t mask = engine->articles[i].closure_ontology_mask;
+    while(mask) {
+      uint32_t c = ctz64((uint64_t)mask);
+      mask &= (mask - 1u);
+      if(c < ONTOLOGY_NODE_COUNT) {
+        out_temporal->stalk_presheaf[stalk][c] += 1.0;
+      }
+    }
+  }
+
+  /* Compute Temporal Sheaf Connection Laplacian ||F_{t+1} - Lan_Y(F_t)||_2 across stalks */
+  double conn_sq = 0.0;
+  double regime_energy = 0.0;
+  for(int t = 0; t < TEMPORAL_STALK_COUNT - 1; ++t) {
+    double transported[ONTOLOGY_NODE_COUNT];
+    ontology_yoneda_kan_transform(out_temporal->stalk_presheaf[t], transported);
+    for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
+      double diff = out_temporal->stalk_presheaf[t + 1][c] - transported[c];
+      conn_sq += diff * diff;
+      double step_v = out_temporal->stalk_presheaf[t + 1][c] - out_temporal->stalk_presheaf[t][c];
+      regime_energy += step_v * step_v * ontology_node_magnitude_weight((OntologyNodeId)c);
+    }
+  }
+  out_temporal->connection_laplacian_norm = sqrt(conn_sq);
+  out_temporal->regime_shift_energy = sqrt(regime_energy);
+
+  double best_vel = -1e18;
+  double best_acc = -1e18;
+  OntologyNodeId best_v_node = ONTO_AI;
+  OntologyNodeId best_a_node = ONTO_AI;
+
+  for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
+    double f0 = out_temporal->stalk_presheaf[0][c];
+    double f1 = out_temporal->stalk_presheaf[1][c];
+    double f2 = out_temporal->stalk_presheaf[2][c];
+    double f3 = out_temporal->stalk_presheaf[3][c];
+    double vel = (f3 - f0) / 3.0;
+    double acc = (f3 - 2.0 * f2 + f1) - (f2 - 2.0 * f1 + f0);
+    out_temporal->velocity[c] = vel;
+    out_temporal->acceleration[c] = acc;
+
+    /* Weight by categorical information specificity so leaf domains surface over broad umbrella nodes */
+    double spec = ontology_information_specificity(1u << c);
+    if(vel * spec > best_vel) {
+      best_vel = vel * spec;
+      best_v_node = (OntologyNodeId)c;
+    }
+    if(acc * spec > best_acc) {
+      best_acc = acc * spec;
+      best_a_node = (OntologyNodeId)c;
+    }
+  }
+  out_temporal->fastest_emerging_node = best_v_node;
+  out_temporal->highest_acceleration_node = best_a_node;
+}
+
+size_t engine_operad_compose(const OyezEngine *engine,
+                             const char *region_a,
+                             const char *region_b,
+                             const char *region_c,
+                             OperadChain *out_chains,
+                             size_t max_chains) {
+  if(!engine || !out_chains || max_chains == 0 || engine->article_count < 3u) return 0;
+
+  WorldRegion ra = REGION_EAST_ASIA, rb = REGION_NORTH_AMERICA, rc = REGION_EUROPE;
+  if(region_a && region_a[0]) world_region_from_slug(region_a, &ra);
+  if(region_b && region_b[0]) world_region_from_slug(region_b, &rb);
+  if(region_c && region_c[0]) world_region_from_slug(region_c, &rc);
+
+  const BitSet *bs_a = &engine->by_region[ra];
+  const BitSet *bs_b = &engine->by_region[rb];
+  const BitSet *bs_c = &engine->by_region[rc];
+  if(bitset_popcount(bs_a) == 0) bs_a = &engine->all_articles;
+  if(bitset_popcount(bs_b) == 0) bs_b = &engine->all_articles;
+  if(bitset_popcount(bs_c) == 0) bs_c = &engine->all_articles;
+
+  size_t found = 0;
+  for(size_t wb = 0; wb < bs_b->word_cap && found < max_chains; ++wb) {
+    uint64_t word_b = bs_b->words[wb];
+    while(word_b && found < max_chains) {
+      uint32_t bit_b = ctz64(word_b);
+      uint32_t slot_b = (uint32_t)(wb * 64u + bit_b);
+      word_b &= (word_b - 1ULL);
+      if(slot_b >= engine->article_count) continue;
+      const ArticleRecord *art_b = &engine->articles[slot_b];
+
+      const ArticleRecord *best_a = NULL;
+      const char *best_wab = NULL;
+      for(size_t wa = 0; wa < bs_a->word_cap && !best_a; ++wa) {
+        uint64_t word_a = bs_a->words[wa];
+        while(word_a) {
+          uint32_t bit_a = ctz64(word_a);
+          uint32_t slot_a = (uint32_t)(wa * 64u + bit_a);
+          word_a &= (word_a - 1ULL);
+          if(slot_a >= engine->article_count || slot_a == slot_b) continue;
+          const ArticleRecord *cand_a = &engine->articles[slot_a];
+          const char *w = find_cartesian_transport_witness(cand_a, art_b);
+          if(w) {
+            best_a = cand_a;
+            best_wab = w;
+            break;
+          }
+        }
+      }
+      if(!best_a || !best_wab) continue;
+
+      for(size_t wc = 0; wc < bs_c->word_cap && found < max_chains; ++wc) {
+        uint64_t word_c = bs_c->words[wc];
+        while(word_c && found < max_chains) {
+          uint32_t bit_c = ctz64(word_c);
+          uint32_t slot_c = (uint32_t)(wc * 64u + bit_c);
+          word_c &= (word_c - 1ULL);
+          if(slot_c >= engine->article_count || slot_c == slot_b || slot_c == best_a->slot) continue;
+          const ArticleRecord *art_c = &engine->articles[slot_c];
+          const char *w_bc = find_cartesian_transport_witness(art_b, art_c);
+          if(!w_bc) continue;
+
+          OperadChain *ch = &out_chains[found++];
+          ch->stage_a = best_a;
+          ch->stage_b = art_b;
+          ch->stage_c = art_c;
+          snprintf(ch->witness_ab, sizeof(ch->witness_ab), "%s", best_wab);
+          snprintf(ch->witness_bc, sizeof(ch->witness_bc), "%s", w_bc);
+          ch->composite_ontology_mask = ontology_lawvere_tierney_sheafify(
+            best_a->direct_ontology_mask | art_b->direct_ontology_mask | art_c->direct_ontology_mask
+          );
+          double d_ab = ontology_lawvere_distance(best_a->direct_ontology_mask, art_b->direct_ontology_mask);
+          double d_bc = ontology_lawvere_distance(art_b->direct_ontology_mask, art_c->direct_ontology_mask);
+          ch->total_lawvere_geodesic = d_ab + d_bc;
+          double sim_ab = article_similarity(best_a, art_b);
+          double sim_bc = article_similarity(art_b, art_c);
+          double spec = ontology_information_specificity(ch->composite_ontology_mask);
+          ch->operad_composition_score = (sim_ab + sim_bc) * spec / (1.0 + 0.1 * ch->total_lawvere_geodesic);
+          break;
+        }
+      }
+    }
+  }
+
+  for(size_t i = 0; i < found; ++i) {
+    for(size_t j = i + 1u; j < found; ++j) {
+      if(out_chains[j].operad_composition_score > out_chains[i].operad_composition_score) {
+        OperadChain tmp = out_chains[i];
+        out_chains[i] = out_chains[j];
+        out_chains[j] = tmp;
       }
     }
   }

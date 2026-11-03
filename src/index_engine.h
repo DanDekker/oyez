@@ -5,6 +5,7 @@
 #include "core.h"
 #include "ontology.h"
 
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -87,6 +88,8 @@ typedef struct {
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
+  uint64_t m1_sketch64;
+  uint32_t m1_landmark_hits;
   uint32_t doc_len;
 } ArticleRecord;
 
@@ -185,6 +188,7 @@ typedef struct {
     int valid;
   } query_cache[64];
   uint64_t index_generation;
+  pthread_rwlock_t rwlock;
 } OyezEngine;
 
 typedef struct {
@@ -292,6 +296,29 @@ typedef struct {
   double cartesian_fidelity;
 } CartesianLift;
 
+#define TEMPORAL_STALK_COUNT 4
+
+typedef struct {
+  double stalk_presheaf[TEMPORAL_STALK_COUNT][ONTOLOGY_NODE_COUNT];
+  double velocity[ONTOLOGY_NODE_COUNT];       /* dF/dt across temporal stalks I_0 -> I_3 */
+  double acceleration[ONTOLOGY_NODE_COUNT];   /* d^2F/dt^2 discrete temporal Laplacian */
+  double connection_laplacian_norm;           /* ||F_{t+1} - Lan_Y(F_t)||_2 temporal sheaf defect */
+  double regime_shift_energy;                 /* Cross-fiber transport kinetic energy */
+  OntologyNodeId fastest_emerging_node;
+  OntologyNodeId highest_acceleration_node;
+} TemporalSheafState;
+
+typedef struct {
+  const ArticleRecord *stage_a;
+  const ArticleRecord *stage_b;
+  const ArticleRecord *stage_c;
+  char witness_ab[32];
+  char witness_bc[32];
+  uint32_t composite_ontology_mask;
+  double total_lawvere_geodesic;
+  double operad_composition_score;
+} OperadChain;
+
 typedef struct {
   char id[80];
   char label[64];
@@ -314,6 +341,9 @@ double bitset_jaccard(const BitSet *a, const BitSet *b);
 
 void engine_init(OyezEngine *engine);
 void engine_free(OyezEngine *engine);
+void engine_read_lock(const OyezEngine *engine);
+void engine_write_lock(OyezEngine *engine);
+void engine_unlock(const OyezEngine *engine);
 
 int engine_upsert_feed(OyezEngine *engine, const CatalogEntry *entry, uint32_t *out_feed_id);
 const FeedRecord *engine_find_feed(const OyezEngine *engine, uint32_t feed_id);
@@ -375,6 +405,16 @@ size_t engine_grothendieck_fibration(const OyezEngine *engine,
                                      const char *base_category,
                                      CartesianLift *out_lifts,
                                      size_t max_lifts);
+
+void engine_temporal_sheaf(const OyezEngine *engine,
+                           TemporalSheafState *out_temporal);
+
+size_t engine_operad_compose(const OyezEngine *engine,
+                             const char *region_a,
+                             const char *region_b,
+                             const char *region_c,
+                             OperadChain *out_chains,
+                             size_t max_chains);
 
 size_t engine_bipartite_pagerank(const OyezEngine *engine,
                                  uint32_t iterations,
