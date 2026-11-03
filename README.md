@@ -15,8 +15,8 @@ Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only 
 | **Byte-Level BPE Tokenizer** | [`src/token.h`](src/token.h), [`src/token.c`](src/token.c) | Doubly-linked symbol list + open-addressed `PairTable` + `MaxHeap`/`MinHeap` BPE trainer/encoder with `OYEZBP01` CRC-32 binary checkpoints. |
 | **M1 Structured Tokenizer** | [`src/m1_tokenizer.h`](src/m1_tokenizer.h), [`src/m1_tokenizer.c`](src/m1_tokenizer.c) | Fixed-vocabulary pre-segmenter (256 raw bytes + 26 indent tokens + 89 syntax primitives + 22 landmarks + 12 control tokens = `405` base IDs) with `OYEZMT02` SHA-256 + CRC-32 sealed serialization. |
 | **Markup & Readability** | [`src/markup.h`](src/markup.h), [`src/markup.c`](src/markup.c) | Unified RSS 2.0, Atom 1.0, RSS 1.0/RDF, and JSON Feed 1.1 parser + Readability DOM block scorer and HTML-to-Markdown converter. |
-| **Category Theory & Gazetteer** | [`src/ontology.h`](src/ontology.h), [`src/ontology.c`](src/ontology.c) | 24-node Bitmask Poset Category $\mathcal{C}$ (`upward_mask` $\uparrow c$, `downward_mask` $\downarrow c$), Lattice Join $\vee$ & Meet $\wedge$, Left Kan Extension $\text{Lan}_\iota$, 10 epistemic `NewsType` genres, 60+ ISO-2 country gazetteer, and 64-bit Charikar SimHash. |
-| **Global Feed Catalog** | [`src/catalog.h`](src/catalog.h), [`src/catalog.c`](src/catalog.c) | 119 curated news feeds across all 11 world regions and 55+ countries. |
+| **Category Theory & Gazetteer** | [`src/ontology.h`](src/ontology.h), [`src/ontology.c`](src/ontology.c) | 24-node Bitmask Poset Category $\mathcal{C}$ (`upward_mask` $\uparrow c$, `downward_mask` $\downarrow c$), Lattice Join $\vee$ & Meet $\wedge$, Left Kan Extension $\text{Lan}_\iota$, 10 epistemic `NewsType` genres, 95+ ISO-2 country gazetteer, and 64-bit Charikar SimHash. |
+| **Global Feed Catalog** | [`src/catalog.h`](src/catalog.h), [`src/catalog.c`](src/catalog.c) | **301 curated news feeds** across all 11 world regions and 90+ countries/territories. |
 | **BM25 & BitSet Index Engine** | [`src/index_engine.h`](src/index_engine.h), [`src/index_engine.c`](src/index_engine.c) | Database-free in-memory + `OYEZIX01` binary snapshot engine with 64-bit word `BitSet` presheaf fibers, Okapi BM25 ranking, Submodular MMR diversification, Galois Formal Concept Analysis, Categorical Pullbacks, and Bipartite Entity-Article PageRank. |
 | **POSIX HTTP Server & CLI** | [`src/http_server.h`](src/http_server.h), [`src/http_server.c`](src/http_server.c), [`src/main.c`](src/main.c) | Zero-dependency POSIX socket HTTP/1.1 JSON REST server and CLI (`serve`, `seed`, `poll`, `bench`, `stats`). |
 
@@ -28,14 +28,14 @@ Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only 
 ================================================================
   Oyez Pure C23 Proprietary Engine Benchmark Suite
 ================================================================
-1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 119 feeds):
-   Total Time:  225.16 ms (8882 articles/sec)
+1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 301 feeds):
+   Total Time:  284.47 ms (7031 articles/sec)
 2. BM25 + Poset Presheaf Fiber + BitSet Search (1000 queries):
-   Avg Latency: 18.02 us/query (55479 queries/sec, hits=500)
+   Avg Latency: 17.86 us/query (56004 queries/sec, hits=500)
 3. Bipartite Entity-Article PageRank (15 iterations over 2000 articles):
-   Total Time:  65.39 ms (top entity: geo:US score=0.0781)
+   Total Time:  91.85 ms (top entity: geo:US score=0.0665)
 4. M1 Structured BPE Tokenizer Training + SHA-256 Seal:
-   Vocab Size:  512 (trained in 3.35 ms)
+   Vocab Size:  512 (trained in 8.68 ms)
 ```
 
 ---
@@ -49,7 +49,7 @@ make test
 # Run the high-performance benchmark suite
 make bench
 
-# Seed the 119 global news feeds into data/oyez.ix
+# Seed the 301 global news feeds into data/oyez.ix
 ./build/oyez seed
 
 # Poll live RSS/Atom feeds
