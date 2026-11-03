@@ -13,11 +13,28 @@ export type WorldRegion =
   | "oceania"
   | "global";
 
+/**
+ * Epistemic / Journalistic Genre Type of a News Article
+ */
+export type NewsType =
+  | "breaking-dispatch"
+  | "investigative-report"
+  | "policy-and-legislative"
+  | "scientific-research"
+  | "market-and-economic"
+  | "opinion-and-editorial"
+  | "explainer-and-analysis"
+  | "press-and-official"
+  | "cultural-and-feature"
+  | "general-report";
+
 export interface ArticleEntities {
   /** ISO-2 country codes mentioned in the article text */
   mentionedCountries: string[];
-  /** High-level semantic topics detected in the article */
+  /** Leaf and intermediate category/topic nodes in the Ontology Poset */
   topics: string[];
+  /** Functorial upward closure of all ancestor categories in the Ontology Poset */
+  ontologyClosure: string[];
   /** International organizations, institutions, and proper noun entities */
   organizationsAndPeople: string[];
 }
@@ -73,10 +90,14 @@ export interface Article {
   guid: string;
   url: string;
   canonicalHash: string;
+  /** 64-bit Charikar SimHash hex fingerprint for O(1) Hamming LSH near-duplicate & similarity */
+  simhash64: string;
   domain: string;
   region: WorldRegion;
   country: string;
   language: string;
+  /** Epistemic / journalistic type of the news article */
+  newsType: NewsType;
   title: string;
   summary: string;
   contentHtml?: string;
@@ -118,6 +139,7 @@ export interface SearchQuery {
   q?: string;
   feedId?: string;
   category?: string;
+  newsType?: NewsType | string;
   region?: WorldRegion | string;
   /** Source publication country ISO-2 */
   country?: string;
@@ -130,6 +152,10 @@ export interface SearchQuery {
   from?: number;
   to?: number;
   sort?: "relevance" | "date";
+  /** Apply Submodular Maximum Marginal Relevance (MMR) diversification */
+  diversify?: boolean;
+  /** MMR trade-off parameter in [0, 1] (default 0.7) */
+  mmrLambda?: number;
   limit?: number;
   offset?: number;
 }
@@ -145,15 +171,18 @@ export interface SearchResult {
   limit: number;
   offset: number;
   queryTimeMs: number;
+  diversified?: boolean;
   facets?: FacetCounts;
   results: ScoredArticle[];
 }
 
 export interface FacetCounts {
+  newsTypes: Record<string, number>;
   regions: Record<string, number>;
   countries: Record<string, number>;
   mentionedCountries: Record<string, number>;
   categories: Record<string, number>;
+  ontologyCategories: Record<string, number>;
   topics: Record<string, number>;
   languages: Record<string, number>;
   domains: Record<string, number>;
@@ -168,6 +197,7 @@ export interface StoryCluster {
   sources: string[];
   regions: string[];
   countries: string[];
+  newsTypes: string[];
   topics: string[];
   sharedTerms: string[];
   latestPublishedAt: number;
@@ -177,6 +207,7 @@ export interface StoryCluster {
     feedTitle: string;
     country: string;
     region: string;
+    newsType: NewsType;
     url: string;
     publishedAt: number;
   }>;
@@ -189,10 +220,12 @@ export interface EngineStats {
   vocabularySize: number;
   totalPostings: number;
   averageDocumentLength: number;
+  newsTypes: Record<string, number>;
   regions: Record<string, number>;
   countries: Record<string, number>;
   mentionedCountries: Record<string, number>;
   categories: Record<string, number>;
+  ontologyCategories: Record<string, number>;
   topics: Record<string, number>;
   languages: Record<string, number>;
   domains: Record<string, number>;
