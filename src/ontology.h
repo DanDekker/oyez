@@ -7,7 +7,7 @@
 enum {
   WORLD_REGION_COUNT = 11,
   NEWS_TYPE_COUNT = 10,
-  ONTOLOGY_NODE_COUNT = 24,
+  ONTOLOGY_NODE_COUNT = 32,
   MAX_EXTRACTED_COUNTRIES = 12,
   MAX_EXTRACTED_ORGS = 12,
   MAX_LEXICAL_TOKENS = 256
@@ -64,7 +64,15 @@ typedef enum {
   ONTO_HUMAN_RIGHTS = 20,
   ONTO_LABOR = 21,
   ONTO_CULTURE = 22,
-  ONTO_SPORTS = 23
+  ONTO_SPORTS = 23,
+  ONTO_QUANTUM = 24,
+  ONTO_SEMICONDUCTORS = 25,
+  ONTO_BIOTECH = 26,
+  ONTO_ROBOTICS = 27,
+  ONTO_MATHEMATICS = 28,
+  ONTO_MATERIALS = 29,
+  ONTO_CRYPTOGRAPHY = 30,
+  ONTO_NUCLEAR_FUSION = 31
 } OntologyNodeId;
 
 typedef struct {
@@ -75,6 +83,13 @@ typedef struct {
   uint32_t upward_mask;   /* Principal filter ^u: all v with u <= v */
   uint32_t downward_mask; /* Principal ideal  vu: all v with v <= u */
 } OntologyNode;
+
+typedef struct {
+  uint32_t grothendieck_sieve[ONTOLOGY_NODE_COUNT]; /* Covering sieve S(c) for each c */
+  double sheaf_section[ONTOLOGY_NODE_COUNT];        /* Glued sheaf section over C */
+  double cohomology_defect[ONTOLOGY_NODE_COUNT];    /* Local-to-global H^1 obstruction */
+  double total_cohomology_norm;
+} SheafCohomology;
 
 typedef struct {
   char countries[MAX_EXTRACTED_COUNTRIES][4];
@@ -112,6 +127,12 @@ uint32_t ontology_downward_closure(uint32_t mask);
 OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b);
 uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b);
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores);
+void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores);
+uint32_t ontology_heyting_implication(uint32_t upper_a, uint32_t upper_b);
+uint32_t ontology_heyting_negation(uint32_t upper_a);
+void ontology_sheaf_cohomology(const double *raw_fiber_counts,
+                               const double *closure_fiber_counts,
+                               SheafCohomology *out);
 
 void entities_extract(const char *title,
                       const char *summary,

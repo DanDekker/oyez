@@ -209,6 +209,9 @@ void engine_init(OyezEngine *engine) {
   engine->next_feed_id = 1u;
   engine->next_article_id = 1u;
   inv_table_grow(engine);
+  for(int b = 0; b < 4; ++b) {
+    engine->lsh_bands[b] = calloc(4096u, sizeof(SimHashBucket));
+  }
 }
 
 static void free_feed_record(FeedRecord *f) {
@@ -270,6 +273,14 @@ void engine_free(OyezEngine *engine) {
     }
   }
   free(engine->inv_table);
+  for(int b = 0; b < 4; ++b) {
+    if(engine->lsh_bands[b]) {
+      for(size_t k = 0; k < 4096u; ++k) {
+        free(engine->lsh_bands[b][k].slots);
+      }
+      free(engine->lsh_bands[b]);
+    }
+  }
   memset(engine, 0, sizeof(*engine));
 }
 
@@ -381,6 +392,25 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   a->doc_len = doc_tokens > 0 ? doc_tokens : 1u;
   engine->total_doc_len += a->doc_len;
   a->simhash64 = simhash64_compute(terms, term_count);
+
+  /* Insert into 4-band x 16-bit Multi-Probe LSH index */
+  for(int b = 0; b < 4; ++b) {
+    if(!engine->lsh_bands[b]) continue;
+    uint16_t band_val = (uint16_t)((a->simhash64 >> (b * 16)) & 0xFFFFu);
+    size_t b_idx = (size_t)(band_val & 0x0FFFu);
+    SimHashBucket *sb = &engine->lsh_bands[b][b_idx];
+    if(sb->count == sb->cap) {
+      uint32_t ncap = sb->cap ? (sb->cap * 2u) : 4u;
+      uint32_t *nslots = realloc(sb->slots, ncap * sizeof(uint32_t));
+      if(nslots) {
+        sb->slots = nslots;
+        sb->cap = ncap;
+      }
+    }
+    if(sb->count < sb->cap) {
+      sb->slots[sb->count++] = slot;
+    }
+  }
 
   for(size_t i = 0; i < term_count; ++i) {
     inv_post(engine, terms[i].term, terms[i].hash, slot, terms[i].weight);
@@ -746,18 +776,91 @@ size_t engine_find_near_duplicates(const OyezEngine *engine,
   const ArticleRecord *target = engine_get_article_by_id(engine, article_id);
   if(!target || !out_articles || max_out == 0) return 0;
   size_t found = 0;
-  for(size_t i = 0; i < engine->article_count; ++i) {
-    const ArticleRecord *cand = &engine->articles[i];
-    if(cand->id == target->id) continue;
-    uint32_t dist = simhash64_distance(target->simhash64, cand->simhash64);
-    if(dist <= max_hamming) {
-      out_articles[found] = cand;
-      if(out_distances) out_distances[found] = dist;
-      found++;
-      if(found >= max_out) break;
+
+  /* Probe 4-band LSH buckets + 1-bit multi-probe neighbors first */
+  BitSet visited;
+  bitset_init(&visited);
+  bitset_set(&visited, target->slot);
+
+  for(int b = 0; b < 4 && found < max_out; ++b) {
+    if(!engine->lsh_bands[b]) continue;
+    uint16_t band_val = (uint16_t)((target->simhash64 >> (b * 16)) & 0xFFFFu);
+    for(int probe = -1; probe < 12 && found < max_out; ++probe) {
+      uint16_t pval = (probe < 0) ? band_val : (uint16_t)(band_val ^ (1u << probe));
+      const SimHashBucket *sb = &engine->lsh_bands[b][pval & 0x0FFFu];
+      for(uint32_t k = 0; k < sb->count && found < max_out; ++k) {
+        uint32_t slot = sb->slots[k];
+        if(bitset_test(&visited, slot)) continue;
+        bitset_set(&visited, slot);
+        const ArticleRecord *cand = &engine->articles[slot];
+        uint32_t dist = simhash64_distance(target->simhash64, cand->simhash64);
+        if(dist <= max_hamming) {
+          out_articles[found] = cand;
+          if(out_distances) out_distances[found] = dist;
+          found++;
+        }
+      }
     }
   }
+
+  /* Fallback linear scan if corpus is small and caller wants wider radius */
+  if(found < max_out && engine->article_count <= 2048u) {
+    for(size_t i = 0; i < engine->article_count && found < max_out; ++i) {
+      uint32_t slot = (uint32_t)i;
+      if(bitset_test(&visited, slot)) continue;
+      const ArticleRecord *cand = &engine->articles[i];
+      uint32_t dist = simhash64_distance(target->simhash64, cand->simhash64);
+      if(dist <= max_hamming) {
+        out_articles[found] = cand;
+        if(out_distances) out_distances[found] = dist;
+        found++;
+      }
+    }
+  }
+  bitset_free(&visited);
   return found;
+}
+
+size_t engine_story_clusters(const OyezEngine *engine,
+                             uint32_t max_hamming,
+                             StoryCluster *out_clusters,
+                             size_t max_clusters) {
+  if(!engine || !out_clusters || max_clusters == 0 || engine->article_count == 0) return 0;
+  BitSet assigned;
+  bitset_init(&assigned);
+  size_t ccount = 0;
+
+  for(size_t i = 0; i < engine->article_count && ccount < max_clusters; ++i) {
+    const ArticleRecord *lead = &engine->articles[i];
+    if(bitset_test(&assigned, lead->slot)) continue;
+
+    const ArticleRecord *dups[15];
+    uint32_t dists[15];
+    size_t nd = engine_find_near_duplicates(engine, lead->id, max_hamming, dups, dists, 15u);
+
+    StoryCluster cl;
+    memset(&cl, 0, sizeof(cl));
+    cl.cluster_id = (uint32_t)(ccount + 1u);
+    cl.lead_article = lead;
+    cl.members[cl.member_count++] = lead;
+    cl.region_mask = (1u << (uint32_t)lead->feed_region);
+    cl.ontology_mask = lead->direct_ontology_mask;
+    bitset_set(&assigned, lead->slot);
+
+    for(size_t k = 0; k < nd && cl.member_count < 16u; ++k) {
+      if(bitset_test(&assigned, dups[k]->slot)) continue;
+      bitset_set(&assigned, dups[k]->slot);
+      cl.members[cl.member_count++] = dups[k];
+      cl.region_mask |= (1u << (uint32_t)dups[k]->feed_region);
+      cl.ontology_mask |= dups[k]->direct_ontology_mask;
+    }
+
+    cl.cluster_score = (double)cl.member_count * 2.5 +
+                       (double)popcnt64((uint64_t)cl.region_mask) * 1.8;
+    out_clusters[ccount++] = cl;
+  }
+  bitset_free(&assigned);
+  return ccount;
 }
 
 size_t engine_formal_concepts(const OyezEngine *engine,

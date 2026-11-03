@@ -174,10 +174,12 @@ static void test_category_theory_and_ontology(void) {
     assert(ontology_has_morphism((OntologyNodeId)i, (OntologyNodeId)i) == 1);
     assert(ontology_has_morphism((OntologyNodeId)i, ONTO_ROOT) == 1);
   }
-  /* Transitivity: ai <= technology <= knowledge-economy <= all-news */
+  /* Transitivity: cryptography <= mathematics <= ai <= technology <= knowledge-economy <= all-news */
+  assert(ontology_has_morphism(ONTO_CRYPTOGRAPHY, ONTO_MATHEMATICS) == 1);
+  assert(ontology_has_morphism(ONTO_MATHEMATICS, ONTO_AI) == 1);
   assert(ontology_has_morphism(ONTO_AI, ONTO_TECHNOLOGY) == 1);
   assert(ontology_has_morphism(ONTO_TECHNOLOGY, ONTO_KNOWLEDGE_ECONOMY) == 1);
-  assert(ontology_has_morphism(ONTO_AI, ONTO_KNOWLEDGE_ECONOMY) == 1);
+  assert(ontology_has_morphism(ONTO_CRYPTOGRAPHY, ONTO_KNOWLEDGE_ECONOMY) == 1);
 
   /* Join & Meet: cyber <= security and cyber <= technology */
   uint32_t meet = ontology_meet_mask(ONTO_SECURITY, ONTO_TECHNOLOGY);
@@ -185,15 +187,32 @@ static void test_category_theory_and_ontology(void) {
   OntologyNodeId join = ontology_join(ONTO_AI, ONTO_SPACE);
   assert(join == ONTO_SCIENCE || join == ONTO_TECHNOLOGY || join == ONTO_KNOWLEDGE_ECONOMY);
 
-  /* Left Kan Extension */
+  /* Heyting Algebra Implication (A => B) & Intuitionistic Negation (~A) */
+  uint32_t h_imp = ontology_heyting_implication(1u << ONTO_AI, 1u << ONTO_TECHNOLOGY);
+  /* Since AI <= TECHNOLOGY, (AI => TECHNOLOGY) is the entire 32-node poset (0xFFFFFFFFu) */
+  assert(h_imp == 0xFFFFFFFFu);
+  uint32_t h_neg = ontology_heyting_negation(1u << ONTO_SPORTS);
+  /* AI is disjoint from SPORTS in upward closure, so AI is in ~SPORTS */
+  assert((h_neg & (1u << ONTO_AI)) != 0u);
+  assert((h_neg & (1u << ONTO_SPORTS)) == 0u);
+
+  /* Left & Right Kan Extensions + Sheaf Cohomology */
   double raw[ONTOLOGY_NODE_COUNT] = {0};
   double kan[ONTOLOGY_NODE_COUNT] = {0};
+  double ran[ONTOLOGY_NODE_COUNT] = {0};
   raw[ONTO_AI] = 10.0;
   raw[ONTO_CYBER] = 6.0;
+  raw[ONTO_QUANTUM] = 8.0;
   ontology_left_kan_extend(raw, kan);
-  assert(kan[ONTO_TECHNOLOGY] > 10.0);
-  assert(kan[ONTO_SECURITY] > 3.0);
+  ontology_right_kan_extend(kan, ran);
+  assert(kan[ONTO_TECHNOLOGY] >= 24.0);
+  assert(kan[ONTO_SECURITY] >= 6.0);
   assert(kan[ONTO_ROOT] >= kan[ONTO_TECHNOLOGY]);
+  assert(ran[ONTO_AI] > 0.0);
+
+  SheafCohomology sheaf;
+  ontology_sheaf_cohomology(raw, kan, &sheaf);
+  assert(sheaf.sheaf_section[ONTO_TECHNOLOGY] >= 24.0);
 
   /* Epistemic NewsType classification */
   assert(news_type_classify("BREAKING: Earthquake strikes Pacific trench", "", "", "climate") ==
@@ -310,6 +329,11 @@ static void test_engine_search_and_categorical_endpoints(void) {
   ScoredArticle top_a[8];
   size_t ne = engine_bipartite_pagerank(&eng, 12u, 0.85, ents, 16u, top_a, 8u);
   assert(ne >= 2u);
+
+  /* Multi-Probe LSH Story Clustering */
+  StoryCluster clusters[16];
+  size_t ncl = engine_story_clusters(&eng, 18u, clusters, 16u);
+  assert(ncl >= 1u);
 
   /* Snapshot persistence round-trip */
   const char *snap = "/tmp/test_oyez_snap.ix";

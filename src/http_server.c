@@ -336,13 +336,23 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "b", b_slug, sizeof(b_slug));
 
     double raw_scores[ONTOLOGY_NODE_COUNT] = {0};
+    double closure_scores[ONTOLOGY_NODE_COUNT] = {0};
     double kan_scores[ONTOLOGY_NODE_COUNT] = {0};
+    double ran_scores[ONTOLOGY_NODE_COUNT] = {0};
     for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
       raw_scores[i] = (double)bitset_popcount(&eng->by_direct_ontology[i]);
+      closure_scores[i] = (double)bitset_popcount(&eng->by_closure_ontology[i]);
     }
     ontology_left_kan_extend(raw_scores, kan_scores);
+    ontology_right_kan_extend(closure_scores, ran_scores);
 
-    buffer_text(out_json, "{\"terminal_object\":\"all-news\",\"node_count\":24");
+    SheafCohomology sheaf;
+    ontology_sheaf_cohomology(raw_scores, closure_scores, &sheaf);
+
+    buffer_format(out_json,
+                  "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f",
+                  ONTOLOGY_NODE_COUNT,
+                  sheaf.total_cohomology_norm);
     if(sub[0] && sup[0]) {
       OntologyNodeId u, v;
       int has = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0 &&
@@ -355,9 +365,15 @@ int http_handle_request(ServerContext *ctx,
       if(ontology_from_slug(a_slug, &na) == 0 && ontology_from_slug(b_slug, &nb) == 0) {
         OntologyNodeId j = ontology_join(na, nb);
         uint32_t m = ontology_meet_mask(na, nb);
+        uint32_t hey_imp = ontology_heyting_implication(1u << na, 1u << nb);
+        uint32_t hey_neg = ontology_heyting_negation(1u << na);
         buffer_format(out_json, ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\",\"meet\":",
                       a_slug, b_slug, ontology_node(j)->slug);
         serialize_ontology_mask_array(out_json, m);
+        buffer_text(out_json, ",\"heyting_implication\":");
+        serialize_ontology_mask_array(out_json, hey_imp);
+        buffer_text(out_json, ",\"heyting_negation_a\":");
+        serialize_ontology_mask_array(out_json, hey_neg);
         buffer_text(out_json, "}");
       }
     }
@@ -372,10 +388,33 @@ int http_handle_request(ServerContext *ctx,
       buffer_text(out_json, ",\"principal_ideal\":");
       serialize_ontology_mask_array(out_json, n->downward_mask);
       buffer_format(out_json,
-                    ",\"direct_fiber_size\":%u,\"presheaf_fiber_size\":%u,\"left_kan_score\":%.2f}",
+                    ",\"direct_fiber_size\":%u,\"presheaf_fiber_size\":%u,"
+                    "\"left_kan_score\":%.2f,\"right_kan_score\":%.2f,\"cohomology_defect\":%.2f}",
                     bitset_popcount(&eng->by_direct_ontology[i]),
                     bitset_popcount(&eng->by_closure_ontology[i]),
-                    kan_scores[i]);
+                    kan_scores[i],
+                    ran_scores[i],
+                    sheaf.cohomology_defect[i]);
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && (strcmp(path, "/api/v1/facets") == 0 || strcmp(path, "/api/v1/trending") == 0)) {
+    StoryCluster clusters[24];
+    size_t ccount = engine_story_clusters(eng, 18u, clusters, 24u);
+    buffer_format(out_json, "{\"total_clusters\":%zu,\"clusters\":[", ccount);
+    for(size_t i = 0; i < ccount; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_format(out_json,
+                    "{\"cluster_id\":%u,\"member_count\":%zu,\"cluster_score\":%.2f,\"topics\":",
+                    clusters[i].cluster_id,
+                    clusters[i].member_count,
+                    clusters[i].cluster_score);
+      serialize_ontology_mask_array(out_json, clusters[i].ontology_mask);
+      buffer_text(out_json, ",\"lead_article\":");
+      serialize_article(out_json, clusters[i].lead_article, clusters[i].cluster_score, 0);
+      buffer_text(out_json, "}");
     }
     buffer_text(out_json, "]}");
     return 0;

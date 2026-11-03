@@ -113,11 +113,41 @@ static int run_bench(void) {
          ecount > 0 ? ents[0].id : "none",
          ecount > 0 ? ents[0].score : 0.0);
 
+  uint64_t c0 = monotonic_ns();
+  StoryCluster clusters[32];
+  size_t cl_count = engine_story_clusters(&eng, 18u, clusters, 32u);
+  uint64_t c1 = monotonic_ns();
+  printf("4. 4-Band Multi-Probe SimHash64 LSH Story Clustering (%zu articles):\n", N);
+  printf("   Total Time:  %.2f ms (clusters formed=%zu)\n",
+         (double)(c1 - c0) / 1e6,
+         cl_count);
+
+  uint64_t s0 = monotonic_ns();
+  double raw_s[ONTOLOGY_NODE_COUNT] = {0};
+  double clo_s[ONTOLOGY_NODE_COUNT] = {0};
+  double kan_s[ONTOLOGY_NODE_COUNT] = {0};
+  double ran_s[ONTOLOGY_NODE_COUNT] = {0};
+  SheafCohomology sheaf;
+  for(size_t iter = 0; iter < 10000u; ++iter) {
+    for(uint32_t k = 0; k < ONTOLOGY_NODE_COUNT; ++k) {
+      raw_s[k] = (double)(k + 1u);
+      clo_s[k] = (double)((k + 1u) * 3u);
+    }
+    ontology_left_kan_extend(raw_s, kan_s);
+    ontology_right_kan_extend(clo_s, ran_s);
+    ontology_sheaf_cohomology(raw_s, clo_s, &sheaf);
+  }
+  uint64_t s1 = monotonic_ns();
+  printf("5. 32-Node Poset Left/Right Kan Extensions & Sheaf Cohomology (10,000 runs):\n");
+  printf("   Avg Latency: %.3f us/pass (L2 cohomology norm=%.2f)\n",
+         ((double)(s1 - s0) / 1e3) / 10000.0,
+         sheaf.total_cohomology_norm);
+
   M1Tokenizer m1;
   uint64_t m0 = monotonic_ns();
   train_default_m1(&m1);
   uint64_t m1_ns = monotonic_ns();
-  printf("4. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
+  printf("6. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
   printf("   Vocab Size:  %u (trained in %.2f ms)\n",
          m1_tokenizer_vocab_size(&m1),
          (double)(m1_ns - m0) / 1e6);

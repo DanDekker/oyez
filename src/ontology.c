@@ -49,7 +49,7 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
     {ONTO_ECONOMY, "economy", "Macroeconomics & Trade", BIT(ONTO_KNOWLEDGE_ECONOMY) | BIT(ONTO_PUBLIC_AFFAIRS), 0u, 0u},
     {ONTO_FINANCE, "finance", "Financial Markets & Central Banking", BIT(ONTO_ECONOMY) | BIT(ONTO_KNOWLEDGE_ECONOMY), 0u, 0u},
     {ONTO_TECHNOLOGY, "technology", "Computing & Engineering", BIT(ONTO_KNOWLEDGE_ECONOMY), 0u, 0u},
-    {ONTO_AI, "ai", "Artificial Intelligence & Robotics", BIT(ONTO_TECHNOLOGY) | BIT(ONTO_SCIENCE), 0u, 0u},
+    {ONTO_AI, "ai", "Artificial Intelligence & Foundation Models", BIT(ONTO_TECHNOLOGY) | BIT(ONTO_SCIENCE), 0u, 0u},
     {ONTO_SCIENCE, "science", "Fundamental & Applied Science", BIT(ONTO_KNOWLEDGE_ECONOMY) | BIT(ONTO_PLANETARY_SYSTEMS), 0u, 0u},
     {ONTO_SPACE, "space", "Aerospace & Astrophysics", BIT(ONTO_SCIENCE) | BIT(ONTO_TECHNOLOGY), 0u, 0u},
     {ONTO_HEALTH, "health", "Medicine, Biotech & Public Health", BIT(ONTO_PLANETARY_SYSTEMS) | BIT(ONTO_SCIENCE) | BIT(ONTO_SOCIETY), 0u, 0u},
@@ -59,6 +59,14 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
     {ONTO_LABOR, "labor", "Labor, Unions & Employment", BIT(ONTO_SOCIETY) | BIT(ONTO_ECONOMY), 0u, 0u},
     {ONTO_CULTURE, "culture", "Arts, Media & Culture", BIT(ONTO_SOCIETY), 0u, 0u},
     {ONTO_SPORTS, "sports", "Global Sports & Athletics", BIT(ONTO_SOCIETY), 0u, 0u},
+    {ONTO_QUANTUM, "quantum", "Quantum Physics & Quantum Computing", BIT(ONTO_SCIENCE) | BIT(ONTO_TECHNOLOGY), 0u, 0u},
+    {ONTO_SEMICONDUCTORS, "semiconductors", "Semiconductors, Foundry & Silicon Architecture", BIT(ONTO_TECHNOLOGY) | BIT(ONTO_ECONOMY) | BIT(ONTO_GEOPOLITICS), 0u, 0u},
+    {ONTO_BIOTECH, "biotech", "Genomics, Synthetic Biology & CRISPR", BIT(ONTO_HEALTH) | BIT(ONTO_SCIENCE), 0u, 0u},
+    {ONTO_ROBOTICS, "robotics", "Robotics, Autonomous Systems & Embodied AI", BIT(ONTO_AI) | BIT(ONTO_TECHNOLOGY), 0u, 0u},
+    {ONTO_MATHEMATICS, "mathematics", "Pure & Applied Mathematics, Category Theory & Logic", BIT(ONTO_SCIENCE) | BIT(ONTO_AI), 0u, 0u},
+    {ONTO_MATERIALS, "materials", "Condensed Matter, Superconductors & Metamaterials", BIT(ONTO_SCIENCE) | BIT(ONTO_SEMICONDUCTORS) | BIT(ONTO_ENERGY), 0u, 0u},
+    {ONTO_CRYPTOGRAPHY, "cryptography", "Zero-Knowledge Proofs, Lattice Crypto & Formal Security", BIT(ONTO_CYBER) | BIT(ONTO_MATHEMATICS), 0u, 0u},
+    {ONTO_NUCLEAR_FUSION, "nuclear-fusion", "Plasma Physics, Tokamaks & Advanced Fission", BIT(ONTO_ENERGY) | BIT(ONTO_SCIENCE), 0u, 0u},
 };
 
 static int g_ontology_ready = 0;
@@ -223,6 +231,78 @@ void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores) 
     }
     out_kan_scores[c] = sum;
   }
+}
+
+void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores) {
+  ontology_init();
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t filter = g_ontology[c].upward_mask;
+    double limit_val = 1e18;
+    int any = 0;
+    while(filter) {
+      uint32_t sup = ctz64((uint64_t)filter);
+      if(sup != ONTO_ROOT) {
+        double v = raw_scores[sup];
+        if(!any || v < limit_val) {
+          limit_val = v;
+          any = 1;
+        }
+      }
+      filter &= (filter - 1u);
+    }
+    out_ran_scores[c] = any ? limit_val : raw_scores[c];
+  }
+}
+
+uint32_t ontology_heyting_implication(uint32_t sub_mask_a, uint32_t sub_mask_b) {
+  ontology_init();
+  /* In the distributive lattice of downward-closed ideals (specialized sub-domains):
+   * da = downward closure of A, db = downward closure of B.
+   * Since AI <= TECHNOLOGY, da(AI) is a subset of db(TECHNOLOGY), so (da & ~db) == 0.
+   * For any node c, c is in (A => B) iff downward_mask[c] & da <= db. */
+  uint32_t da = ontology_downward_closure(sub_mask_a);
+  uint32_t db = ontology_downward_closure(sub_mask_b);
+  uint32_t imp = 0u;
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t down_c = g_ontology[c].downward_mask;
+    if(((down_c & da) & ~db) == 0u) {
+      imp |= BIT(c);
+    }
+  }
+  return imp;
+}
+
+uint32_t ontology_heyting_negation(uint32_t sub_mask_a) {
+  return ontology_heyting_implication(sub_mask_a, 0u);
+}
+
+void ontology_sheaf_cohomology(const double *raw_fiber_counts,
+                               const double *closure_fiber_counts,
+                               SheafCohomology *out) {
+  if(!out) return;
+  ontology_init();
+  memset(out, 0, sizeof(*out));
+  double total_norm = 0.0;
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t strict_sub = g_ontology[c].downward_mask & ~BIT(c);
+    out->grothendieck_sieve[c] = strict_sub;
+    double sub_sum = 0.0;
+    uint32_t scan = strict_sub;
+    while(scan) {
+      uint32_t u = ctz64((uint64_t)scan);
+      sub_sum += raw_fiber_counts ? raw_fiber_counts[u] : 0.0;
+      scan &= (scan - 1u);
+    }
+    double direct = raw_fiber_counts ? raw_fiber_counts[c] : 0.0;
+    double actual_closure = closure_fiber_counts ? closure_fiber_counts[c] : (direct + sub_sum);
+    double glued = direct + sub_sum;
+    /* Overlap defect: how much double-counting occurs across intersecting sub-fibers in the sieve */
+    double defect = glued > actual_closure ? (glued - actual_closure) : 0.0;
+    out->sheaf_section[c] = actual_closure;
+    out->cohomology_defect[c] = defect;
+    total_norm += defect * defect;
+  }
+  out->total_cohomology_norm = total_norm;
 }
 
 static int text_contains_word(const char *lower_text, size_t len, const char *needle) {
@@ -481,11 +561,19 @@ typedef struct {
 } TopicRule;
 
 static const TopicRule k_topic_rules[] = {
-    {ONTO_AI, {"artificial intelligence", "llm", "neural network", "openai", "deepmind", "anthropic", "generative ai", "machine learning", NULL}},
+    {ONTO_AI, {"artificial intelligence", "llm", "neural network", "openai", "deepmind", "anthropic", "generative ai", "machine learning", "transformer"}},
+    {ONTO_ROBOTICS, {"robotics", "humanoid", "autonomous vehicle", "drone", "actuator", "manipulator", "embodied ai", "quadruped", NULL}},
+    {ONTO_QUANTUM, {"quantum computing", "qubit", "superconducting qubit", "quantum error correction", "entanglement", "topological qubit", "quantum supremacy", "quantum photonics", NULL}},
+    {ONTO_SEMICONDUCTORS, {"semiconductor", "tsmc", "asml", "lithography", "wafer", "foundry", "euv", "risc-v", "hbm"}},
+    {ONTO_BIOTECH, {"crispr", "gene editing", "genomics", "mrna", "protein folding", "alphafold", "synthetic biology", "sequencing", "cell therapy"}},
+    {ONTO_MATHEMATICS, {"category theory", "theorem", "conjecture", "topos", "cohomology", "homotopy", "kan extension", "formal verification", "type theory"}},
+    {ONTO_MATERIALS, {"superconductor", "graphene", "perovskite", "metamaterial", "topological insulator", "condensed matter", "solid-state battery", "cathode", NULL}},
+    {ONTO_CRYPTOGRAPHY, {"zero-knowledge", "zk-snark", "post-quantum cryptography", "lattice cryptography", "homomorphic encryption", "cryptographic", "elliptic curve", "cipher", NULL}},
+    {ONTO_NUCLEAR_FUSION, {"nuclear fusion", "tokamak", "iter", "stellarator", "plasma confinement", "inertial confinement", "deuterium", "tritium", NULL}},
     {ONTO_CYBER, {"cybersecurity", "ransomware", "zero-day", "malware", "hacker", "data breach", "encryption", "phishing", NULL}},
-    {ONTO_TECHNOLOGY, {"semiconductor", "microchip", "software", "cloud computing", "open source", "linux", "silicon", "chipmaker", NULL}},
+    {ONTO_TECHNOLOGY, {"microchip", "software", "cloud computing", "open source", "linux", "silicon", "chipmaker", "compiler", "kernel"}},
     {ONTO_SPACE, {"nasa", "esa", "spacex", "satellite", "spacecraft", "astronaut", "lunar", "orbit", "telescope"}},
-    {ONTO_SCIENCE, {"physics", "quantum", "researchers", "scientists", "laboratory", "peer-reviewed", "chemistry", "genome", NULL}},
+    {ONTO_SCIENCE, {"physics", "quantum", "researchers", "scientists", "laboratory", "peer-reviewed", "chemistry", "genome", "synchrotron"}},
     {ONTO_FINANCE, {"central bank", "federal reserve", "ecb", "interest rate", "bond yield", "wall street", "stock market", "ipo", "venture capital"}},
     {ONTO_ECONOMY, {"inflation", "gdp", "recession", "tariff", "supply chain", "imf", "world bank", "trade deficit", "macroeconomic"}},
     {ONTO_ENERGY, {"crude oil", "opec", "natural gas", "solar power", "wind farm", "nuclear reactor", "power grid", "battery", "hydrogen"}},

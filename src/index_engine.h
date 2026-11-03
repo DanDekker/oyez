@@ -78,6 +78,23 @@ typedef struct {
 } InvertedBucket;
 
 typedef struct {
+  uint16_t band_key;
+  uint32_t *slots;
+  uint32_t count;
+  uint32_t cap;
+} SimHashBucket;
+
+typedef struct {
+  uint32_t cluster_id;
+  const ArticleRecord *lead_article;
+  const ArticleRecord *members[16];
+  size_t member_count;
+  uint32_t region_mask;
+  uint32_t ontology_mask;
+  double cluster_score;
+} StoryCluster;
+
+typedef struct {
   char key[8];
   BitSet bits;
   int occupied;
@@ -107,6 +124,9 @@ typedef struct {
   InvertedBucket *inv_table;
   size_t inv_cap;
   size_t inv_count;
+
+  /* 4-band x 16-bit Multi-Probe SimHash LSH index (4 * 4096 hash buckets) */
+  SimHashBucket *lsh_bands[4];
 } OyezEngine;
 
 typedef struct {
@@ -226,6 +246,11 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
                                  size_t max_entities,
                                  ScoredArticle *out_articles,
                                  size_t max_articles);
+
+size_t engine_story_clusters(const OyezEngine *engine,
+                             uint32_t max_hamming,
+                             StoryCluster *out_clusters,
+                             size_t max_clusters);
 
 int engine_save_snapshot(const OyezEngine *engine, const char *path);
 int engine_load_snapshot(OyezEngine *engine, const char *path);
