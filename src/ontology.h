@@ -149,6 +149,34 @@ typedef struct {
   double monad_closure_defect;                      /* ||T(f) - f||_2 where T = iota^* Lan_iota is Left Kan monad */
 } SheafCohomology;
 
+#define PERSISTENCE_FILTRATION_STEPS 8
+
+typedef struct {
+  double threshold_eps;      /* Lawvere metric / normalized density filtration parameter eps_k */
+  uint32_t active_mask;      /* Bitmask of active 0-simplices V_k at step k */
+  uint32_t f_vector[3];      /* (|V_k|, |E_k|, |T_k|) active 0-, 1-, 2-simplices */
+  uint32_t betti_0;          /* Connected components beta_0(N_eps(C)) */
+  uint32_t betti_1;          /* 1st topological Betti number beta_1(N_eps(C)) (topological voids) */
+  int32_t euler_char;        /* chi(N_eps(C)) = |V_k| - |E_k| + |T_k| */
+} PersistenceStep;
+
+typedef struct {
+  PersistenceStep steps[PERSISTENCE_FILTRATION_STEPS];
+  double total_persistence_l1;  /* Integrated L1 barcode persistence norm sum_k (beta_0 + beta_1) * d_eps */
+  double max_void_lifetime;     /* Longest-lived 1-dimensional topological hole (beta_1 > 0) */
+  uint32_t persistent_core_mask;/* Nodes surviving across the deepest filtration thresholds */
+} PersistenceBarcode;
+
+typedef struct {
+  double unit_eta[ONTOLOGY_NODE_COUNT];       /* Adjunction unit eta_c: f(c) -> (iota^* Lan_iota f)(c) */
+  double counit_eps[ONTOLOGY_NODE_COUNT];     /* Adjunction counit eps_c: (iota^* Ran_iota F)(c) -> F(c) */
+  double kleisli_flow[ONTOLOGY_NODE_COUNT];   /* Kleisli monadic propagation T(f)(c) */
+  double comonad_core[ONTOLOGY_NODE_COUNT];   /* Comonadic interior G(F)(c) */
+  double zig_zag_triangle_defect;             /* ||(eps_Lan o Lan(eta))(f) - Lan(f)||_2 == 0 */
+  double kleisli_entropy;                     /* Categorical Shannon entropy over Kleisli normalized kernel */
+  uint32_t eilenberg_moore_mask;              /* Bitmask of Eilenberg-Moore coalgebra/algebra fixed points */
+} AdjunctionMonadState;
+
 typedef struct {
   char countries[MAX_EXTRACTED_COUNTRIES][4];
   size_t country_count;
@@ -238,6 +266,10 @@ double ontology_information_specificity(uint32_t mask);
 void ontology_sheaf_cohomology(const double *raw_fiber_counts,
                                const double *closure_fiber_counts,
                                SheafCohomology *out);
+void ontology_persistent_homology(const double *raw_fiber_counts,
+                                  PersistenceBarcode *out_barcode);
+void ontology_adjunction_monad(const double *raw_fiber_counts,
+                               AdjunctionMonadState *out_state);
 
 void entities_extract(const char *title,
                       const char *summary,

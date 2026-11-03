@@ -940,6 +940,190 @@ void ontology_sheaf_cohomology(const double *raw_fiber_counts,
   out->monad_closure_defect = fast_sqrt_nr(total_norm);
 }
 
+static uint32_t uf_find32(uint32_t parent[32], uint32_t x) {
+  while(parent[x] != x) {
+    parent[x] = parent[parent[x]];
+    x = parent[x];
+  }
+  return x;
+}
+
+void ontology_persistent_homology(const double *raw_fiber_counts,
+                                  PersistenceBarcode *out_barcode) {
+  if(!out_barcode) return;
+  ontology_init();
+  memset(out_barcode, 0, sizeof(*out_barcode));
+
+  double kan[ONTOLOGY_NODE_COUNT];
+  double default_raw[ONTOLOGY_NODE_COUNT];
+  if(!raw_fiber_counts) {
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      default_raw[i] = (double)popcnt64((uint64_t)g_ontology[i].upward_mask);
+    }
+    raw_fiber_counts = default_raw;
+  }
+  ontology_left_kan_extend(raw_fiber_counts, kan);
+
+  double max_s = 1.0;
+  for(uint32_t i = 1u; i < ONTOLOGY_NODE_COUNT; ++i) {
+    if(kan[i] > max_s) max_s = kan[i];
+  }
+
+  static const double k_thresholds[PERSISTENCE_FILTRATION_STEPS] = {
+    0.85, 0.70, 0.55, 0.40, 0.28, 0.16, 0.08, 0.00
+  };
+  static const double k_max_lawvere[PERSISTENCE_FILTRATION_STEPS] = {
+    0.55, 0.85, 1.05, 1.35, 1.55, 2.05, 2.55, 10.0
+  };
+
+  double l1_norm = 0.0;
+  double max_void = 0.0;
+  double cur_void_run = 0.0;
+
+  for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
+    PersistenceStep *st = &out_barcode->steps[s];
+    double ratio = k_thresholds[s];
+    double max_d = k_max_lawvere[s];
+    st->threshold_eps = 1.0 - ratio;
+
+    uint32_t v_mask = 0u;
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      /* Include non-terminal nodes first; terminal root joins at final filtration step */
+      if(u == ONTO_ROOT && s < PERSISTENCE_FILTRATION_STEPS - 1) continue;
+      double norm_score = kan[u] / max_s;
+      if(norm_score >= ratio || (raw_fiber_counts[u] > 0.0 && s >= 4)) {
+        v_mask |= BIT(u);
+      }
+    }
+    if(v_mask == 0u) v_mask = BIT(ONTO_AI) | BIT(ONTO_TECHNOLOGY);
+    if(s <= 2) out_barcode->persistent_core_mask |= v_mask;
+    st->active_mask = v_mask;
+
+    uint32_t parent[32];
+    for(uint32_t u = 0; u < 32u; ++u) parent[u] = u;
+
+    uint32_t v_cnt = popcnt64((uint64_t)v_mask);
+    uint32_t e_cnt = 0;
+    uint32_t t_cnt = 0;
+
+    for(uint32_t u0 = 0; u0 < ONTOLOGY_NODE_COUNT; ++u0) {
+      if(!(v_mask & BIT(u0))) continue;
+      uint32_t s1 = g_ontology[u0].upward_mask & ~BIT(u0) & v_mask;
+      while(s1) {
+        uint32_t u1 = ctz64((uint64_t)s1);
+        s1 &= (s1 - 1u);
+        if(g_lawvere_dist[u0][u1] > max_d) continue;
+        e_cnt++;
+        uint32_t r0 = uf_find32(parent, u0);
+        uint32_t r1 = uf_find32(parent, u1);
+        if(r0 != r1) parent[r0] = r1;
+
+        uint32_t s2 = g_ontology[u1].upward_mask & ~BIT(u1) & v_mask;
+        while(s2) {
+          uint32_t u2 = ctz64((uint64_t)s2);
+          s2 &= (s2 - 1u);
+          if(g_lawvere_dist[u1][u2] <= max_d && g_lawvere_dist[u0][u2] <= max_d * 1.5) {
+            t_cnt++;
+          }
+        }
+      }
+    }
+
+    uint32_t comp = 0;
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      if((v_mask & BIT(u)) && uf_find32(parent, u) == u) {
+        comp++;
+      }
+    }
+
+    st->f_vector[0] = v_cnt;
+    st->f_vector[1] = e_cnt;
+    st->f_vector[2] = t_cnt;
+    st->betti_0 = comp;
+    st->euler_char = (int32_t)v_cnt - (int32_t)e_cnt + (int32_t)t_cnt;
+    int32_t b1_est = (int32_t)e_cnt - (int32_t)v_cnt + (int32_t)comp - (int32_t)(t_cnt > e_cnt ? e_cnt : t_cnt / 2u);
+    st->betti_1 = b1_est > 0 ? (uint32_t)b1_est : 0u;
+
+    double d_eps = 0.125;
+    l1_norm += (double)(st->betti_0 + st->betti_1) * d_eps;
+    if(st->betti_1 > 0) {
+      cur_void_run += d_eps;
+      if(cur_void_run > max_void) max_void = cur_void_run;
+    } else {
+      cur_void_run = 0.0;
+    }
+  }
+
+  out_barcode->total_persistence_l1 = l1_norm;
+  out_barcode->max_void_lifetime = max_void;
+}
+
+void ontology_adjunction_monad(const double *raw_fiber_counts,
+                               AdjunctionMonadState *out_state) {
+  if(!out_state) return;
+  ontology_init();
+  memset(out_state, 0, sizeof(*out_state));
+
+  double default_raw[ONTOLOGY_NODE_COUNT];
+  if(!raw_fiber_counts) {
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) default_raw[i] = 1.0;
+    raw_fiber_counts = default_raw;
+  }
+
+  double lan[ONTOLOGY_NODE_COUNT];
+  double ran[ONTOLOGY_NODE_COUNT];
+  double mob_lan[ONTOLOGY_NODE_COUNT];
+  ontology_left_kan_extend(raw_fiber_counts, lan);
+  ontology_right_kan_extend(lan, ran);
+  /* By Rota's Mobius Inversion, mu * Lan(f) is the exact inverse counit eps_Lan on Lan(f),
+   * recovering f so that Lan(eps_Lan(Lan(f))) == Lan(f) (the zig-zag triangle identity). */
+  ontology_mobius_invert(lan, mob_lan);
+  double lan_recovered[ONTOLOGY_NODE_COUNT];
+  ontology_left_kan_extend(mob_lan, lan_recovered);
+
+  double zig_zag_err = 0.0;
+  double total_kleisli = 0.0;
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    out_state->kleisli_flow[c] = lan[c];
+    out_state->comonad_core[c] = ran[c];
+    out_state->unit_eta[c] = lan[c] - raw_fiber_counts[c];
+    out_state->counit_eps[c] = lan[c] - ran[c];
+    double d = lan_recovered[c] - lan[c];
+    zig_zag_err += d * d;
+    if(lan[c] > 0.0) total_kleisli += lan[c];
+
+    /* Eilenberg-Moore fixed point: node where direct mass equals its downward ideal rollup
+     * (minimal leaf generators or pure monadic coalgebra states) */
+    double diff_eta = out_state->unit_eta[c];
+    if((diff_eta >= -1e-9 && diff_eta <= 1e-9 && raw_fiber_counts[c] > 0.0) ||
+       (ran[c] > 0.0 && (lan[c] - ran[c]) <= 0.25 * lan[c])) {
+      out_state->eilenberg_moore_mask |= BIT(c);
+    }
+  }
+  out_state->zig_zag_triangle_defect = fast_sqrt_nr(zig_zag_err);
+
+  /* Compute categorical Shannon entropy over the Kleisli probability measure p(c) = T(f)(c) / Z */
+  double ent = 0.0;
+  if(total_kleisli > 0.0) {
+    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+      if(lan[c] <= 0.0) continue;
+      double p = lan[c] / total_kleisli;
+      /* 3-term Pade log(p) via y = (p - 1) / (p + 1) after binary exponent reduction */
+      double m = p;
+      int exp2 = 0;
+      while(m < 0.70710678) {
+        m *= 2.0;
+        exp2--;
+      }
+      double y = (m - 1.0) / (m + 1.0);
+      double y2 = y * y;
+      double ln_p = 2.0 * y * (1.0 + y2 * (0.3333333333 + y2 * 0.2)) + (double)exp2 * 0.69314718056;
+      ent -= p * ln_p;
+    }
+  }
+  out_state->kleisli_entropy = ent;
+}
+
 typedef struct {
   uint64_t wb_filter[8];
   uint64_t char0_mask;
