@@ -190,6 +190,7 @@ typedef struct {
   } query_cache[64];
   uint64_t index_generation;
   pthread_rwlock_t rwlock;
+  pthread_mutex_t cache_lock;
 } OyezEngine;
 
 typedef struct {

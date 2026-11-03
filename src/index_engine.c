@@ -304,15 +304,23 @@ static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_
   }
 
   InvertedBucket *b = &engine->inv_table[idx];
+  uint32_t *slots = malloc(8u * sizeof(uint32_t));
+  float *weights = malloc(8u * sizeof(float));
+  uint32_t *pos_masks = malloc(8u * sizeof(uint32_t));
+  if(!slots || !weights || !pos_masks) {
+    free(slots);
+    free(weights);
+    free(pos_masks);
+    return -1;
+  }
   b->occupied = 1;
   strncpy(b->term, term, 31u);
   b->term[31] = '\0';
   b->hash = hash;
   b->cap = 8u;
-  b->slots = malloc(b->cap * sizeof(uint32_t));
-  b->weights = malloc(b->cap * sizeof(float));
-  b->pos_masks = malloc(b->cap * sizeof(uint32_t));
-  if(!b->slots || !b->weights || !b->pos_masks) return -1;
+  b->slots = slots;
+  b->weights = weights;
+  b->pos_masks = pos_masks;
   b->slots[0] = slot;
   b->weights[0] = weight;
   b->pos_masks[0] = pos_mask;
@@ -337,6 +345,7 @@ void engine_init(OyezEngine *engine) {
   ontology_init();
   memset(engine, 0, sizeof(*engine));
   pthread_rwlock_init(&engine->rwlock, NULL);
+  pthread_mutex_init(&engine->cache_lock, NULL);
   engine->next_feed_id = 1u;
   engine->next_article_id = 1u;
   inv_table_grow(engine);
@@ -442,6 +451,7 @@ void engine_free(OyezEngine *engine) {
       free(engine->lsh_bands[b]);
     }
   }
+  pthread_mutex_destroy(&engine->cache_lock);
   pthread_rwlock_destroy(&engine->rwlock);
   memset(engine, 0, sizeof(*engine));
 }
@@ -861,23 +871,30 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   memset(out, 0, sizeof(*out));
   uint64_t t0 = monotonic_ns();
 
+  OyezEngine *mut_eng = (OyezEngine *)engine;
   uint64_t qhash = hash_article_query(q, engine->index_generation);
   size_t cslot = (size_t)(qhash & 63ULL);
+  pthread_mutex_lock(&mut_eng->cache_lock);
   if(engine->query_cache[cslot].valid && engine->query_cache[cslot].key_hash == qhash) {
     size_t take = engine->query_cache[cslot].count;
     out->total = engine->query_cache[cslot].total;
     out->count = take;
     if(take > 0) {
       out->hits = malloc(take * sizeof(ScoredArticle));
-      if(!out->hits) return -1;
+      if(!out->hits) {
+        pthread_mutex_unlock(&mut_eng->cache_lock);
+        return -1;
+      }
       for(size_t i = 0; i < take; ++i) {
         out->hits[i].article = &engine->articles[engine->query_cache[cslot].slots[i]];
         out->hits[i].score = (double)engine->query_cache[cslot].scores[i];
       }
     }
+    pthread_mutex_unlock(&mut_eng->cache_lock);
     out->query_time_ms = (double)(monotonic_ns() - t0) / 1e6;
     return 0;
   }
+  pthread_mutex_unlock(&mut_eng->cache_lock);
 
   BitSet candidates;
   if(bitset_clone(&engine->all_articles, &candidates) != 0) return -1;
@@ -1203,11 +1220,14 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   memcpy(out->hits, pool + offset, take * sizeof(ScoredArticle));
   out->count = take;
 
-  /* Populate 64-entry query response cache */
-  OyezEngine *mut_eng = (OyezEngine *)engine;
+  /* Populate 64-entry query response cache under cache_lock */
+  pthread_mutex_lock(&mut_eng->cache_lock);
   if(mut_eng->query_cache[cslot].valid) {
     free(mut_eng->query_cache[cslot].slots);
     free(mut_eng->query_cache[cslot].scores);
+    mut_eng->query_cache[cslot].slots = NULL;
+    mut_eng->query_cache[cslot].scores = NULL;
+    mut_eng->query_cache[cslot].valid = 0;
   }
   mut_eng->query_cache[cslot].slots = malloc((take ? take : 1u) * sizeof(uint32_t));
   mut_eng->query_cache[cslot].scores = malloc((take ? take : 1u) * sizeof(float));
@@ -1220,7 +1240,13 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     mut_eng->query_cache[cslot].count = take;
     mut_eng->query_cache[cslot].total = pool_count;
     mut_eng->query_cache[cslot].valid = 1;
+  } else {
+    free(mut_eng->query_cache[cslot].slots);
+    free(mut_eng->query_cache[cslot].scores);
+    mut_eng->query_cache[cslot].slots = NULL;
+    mut_eng->query_cache[cslot].scores = NULL;
   }
+  pthread_mutex_unlock(&mut_eng->cache_lock);
 
   free(pool);
   out->query_time_ms = (double)(monotonic_ns() - t0) / 1e6;
@@ -2395,6 +2421,7 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
       free(country); free(subreg); free(lang); free(tier); free(focus);
       goto fail;
     }
+    if(reg >= WORLD_REGION_COUNT) reg = (uint32_t)REGION_GLOBAL;
     CatalogEntry ce = {title, furl, surl, cat, (WorldRegion)reg, country, subreg, lang, tier, focus};
     uint32_t actual_id = 0;
     engine_upsert_feed(engine, &ce, &actual_id);
