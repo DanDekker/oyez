@@ -73,6 +73,8 @@ typedef struct {
   size_t mentioned_ai_infra_count;
   char mentioned_hf_repos[MAX_EXTRACTED_HF_REPOS][64];
   size_t mentioned_hf_repo_count;
+  char mentioned_sports[MAX_EXTRACTED_SPORTS][24];
+  size_t mentioned_sport_count;
   ClearanceLevel clearance;
   double opsec_score;
   FiscalStance fiscal_stance;
@@ -81,6 +83,7 @@ typedef struct {
   double ai_compute_score;
   AiWeightLicense ai_license;
   double openness_score;
+  double sports_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -151,6 +154,7 @@ typedef struct {
   CountryFiber by_ai_model[128];
   CountryFiber by_ai_infra[128];
   CountryFiber by_hf_repo[128];
+  CountryFiber by_sport[128];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -158,6 +162,18 @@ typedef struct {
 
   /* 4-band x 16-bit Multi-Probe SimHash LSH index (4 * 4096 hash buckets) */
   SimHashBucket *lsh_bands[4];
+
+  /* Open-addressed O(1) Article Deduplication Hash Table */
+  struct {
+    uint64_t key_hash;
+    uint32_t article_id;
+    int occupied;
+  } *dedup_table;
+  size_t dedup_cap;
+  size_t dedup_count;
+
+  /* Contiguous 64 KB Block String Arena for O(1) Cache-Local Article String Allocation */
+  struct StringArenaBlock *arena_head;
 
   /* 64-entry FNV-1a Open-Addressed Query Response Cache */
   struct {
@@ -174,6 +190,7 @@ typedef struct {
 typedef struct {
   const char *query;
   const char *category;
+  const char *exclude_category;
   int use_category_morphism;
   const char *news_type;
   const char *clearance;
@@ -187,6 +204,7 @@ typedef struct {
   const char *ai_infra;
   const char *ai_license;
   const char *hf_repo;
+  const char *sport;
   const char *region;
   const char *country;
   const char *mentioned_country;
@@ -212,12 +230,17 @@ typedef struct {
 } SearchResponse;
 
 typedef struct {
+  uint32_t concept_id;
   uint32_t extent_slots[64];
   size_t extent_count;
   uint32_t intent_ontology_mask;
+  uint32_t lawvere_tierney_mask;
   uint32_t intent_region_mask;
   uint32_t intent_news_type_mask;
+  uint32_t subconcept_mask;
+  uint32_t superconcept_mask;
   double stability_score;
+  double intensional_entropy;
 } FormalConcept;
 
 typedef struct {
@@ -227,6 +250,47 @@ typedef struct {
   uint32_t hamming_distance;
   double coherence_score;
 } PullbackPair;
+
+typedef struct {
+  uint32_t amalgam_id;
+  char shared_witness[32];
+  uint32_t member_ids[16];
+  size_t member_count;
+  uint32_t left_count;
+  uint32_t right_count;
+  uint32_t coproduct_ontology_mask;
+  uint32_t sheafified_ontology_mask;
+  uint32_t shared_closure_mask;
+  uint32_t region_mask;
+  double colimit_cocone_score;
+} PushoutAmalgam;
+
+typedef struct {
+  WorldRegion source_region;
+  WorldRegion target_region;
+  uint32_t source_fiber_counts[ONTOLOGY_NODE_COUNT];
+  uint32_t target_fiber_counts[ONTOLOGY_NODE_COUNT];
+  double component_ratios[ONTOLOGY_NODE_COUNT];
+  uint32_t source_support_mask;
+  uint32_t target_support_mask;
+  uint32_t heyting_truth_mask;
+  uint32_t dense_sieve_mask;
+  double naturality_defect;
+  double coend_pairing;
+  double lawvere_transport_cost;
+  double reverse_transport_cost;
+} PresheafMorphism;
+
+typedef struct {
+  OntologyNodeId sub_node;
+  OntologyNodeId sup_node;
+  const ArticleRecord *sub_article;
+  const ArticleRecord *sup_article;
+  char transport_witness[32];
+  uint32_t hamming_distance;
+  double lawvere_geodesic;
+  double cartesian_fidelity;
+} CartesianLift;
 
 typedef struct {
   char id[80];
@@ -243,7 +307,10 @@ int bitset_test(const BitSet *bs, uint32_t bit);
 uint32_t bitset_popcount(const BitSet *bs);
 int bitset_clone(const BitSet *src, BitSet *dst);
 void bitset_and_inplace(BitSet *dst, const BitSet *other);
+void bitset_andnot_inplace(BitSet *dst, const BitSet *other);
 int bitset_or_inplace(BitSet *dst, const BitSet *other);
+uint32_t bitset_intersect_count(const BitSet *a, const BitSet *b);
+double bitset_jaccard(const BitSet *a, const BitSet *b);
 
 void engine_init(OyezEngine *engine);
 void engine_free(OyezEngine *engine);
@@ -291,6 +358,23 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
                                    const char *pivot_dimension,
                                    PullbackPair *out_pairs,
                                    size_t max_pairs);
+
+size_t engine_categorical_pushout(const OyezEngine *engine,
+                                  const char *left_region,
+                                  const char *right_region,
+                                  const char *pivot_dimension,
+                                  PushoutAmalgam *out_amalgams,
+                                  size_t max_amalgams);
+
+void engine_natural_transformation(const OyezEngine *engine,
+                                   WorldRegion source_region,
+                                   WorldRegion target_region,
+                                   PresheafMorphism *out_morphism);
+
+size_t engine_grothendieck_fibration(const OyezEngine *engine,
+                                     const char *base_category,
+                                     CartesianLift *out_lifts,
+                                     size_t max_lifts);
 
 size_t engine_bipartite_pagerank(const OyezEngine *engine,
                                  uint32_t iterations,

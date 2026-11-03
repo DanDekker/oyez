@@ -85,7 +85,7 @@ static void test_bpe_and_m1_tokenizer(void) {
 
   M1Tokenizer m1;
   m1_tokenizer_init(&m1);
-  assert(m1_tokenizer_train(&m1, (const uint8_t *)corpus, strlen(corpus), 640u) == 0);
+  assert(m1_tokenizer_train(&m1, (const uint8_t *)corpus, strlen(corpus), M1_FIXED_VOCAB_SIZE + 32u) == 0);
   assert(m1_tokenizer_vocab_size(&m1) > M1_FIXED_VOCAB_SIZE);
 
   uint32_t *m1_ids = NULL;
@@ -238,9 +238,71 @@ static void test_category_theory_and_ontology(void) {
   assert(sheaf.nerve_f_vector[0] == 32u);
   assert(sheaf.nerve_f_vector[1] > 60u);
   assert(sheaf.euler_characteristic == 1);
+  assert(sheaf.betti_numbers[0] == 1u && sheaf.betti_numbers[1] == 0u);
+  assert(sheaf.mobius_total_variation > 60u);
   assert(sheaf.laplacian_trace > 40.0);
   assert(sheaf.spectral_radius > 4.0);
+  assert(sheaf.fiedler_eigenvalue > 0.2);
   assert(sheaf.dirichlet_energy > 0.0);
+  /* Cochain complex exactness: \delta_1(\delta_0 f) = 0 on every 2-simplex */
+  assert(sheaf.cochain_exactness_norm < 1e-12);
+  assert(sheaf.hodge_1_curl_norm >= 0.0);
+
+  /* Lawvere Enriched Quasimetric Space:
+   * 1. Zero self-distance d_L(A, A) = 0
+   * 2. Directed asymmetry: since AI -> TECHNOLOGY is an upward morphism (cost 0.5)
+   *    and TECHNOLOGY -> AI is a downward specialization (cost 1.5),
+   *    d_L(AI, TECHNOLOGY) < d_L(TECHNOLOGY, AI).
+   * 3. Directed Triangle Inequality: d_L(A, C) <= d_L(A, B) + d_L(B, C). */
+  assert(ontology_lawvere_distance(1u << ONTO_AI, 1u << ONTO_AI) < 1e-9);
+  double dl_up = ontology_lawvere_distance(1u << ONTO_AI, 1u << ONTO_TECHNOLOGY);
+  double dl_down = ontology_lawvere_distance(1u << ONTO_TECHNOLOGY, 1u << ONTO_AI);
+  assert(dl_up < dl_down);
+  double dl_ac = ontology_lawvere_distance(1u << ONTO_CRYPTOGRAPHY, 1u << ONTO_SPORTS);
+  double dl_ab = ontology_lawvere_distance(1u << ONTO_CRYPTOGRAPHY, 1u << ONTO_TECHNOLOGY);
+  double dl_bc = ontology_lawvere_distance(1u << ONTO_TECHNOLOGY, 1u << ONTO_SPORTS);
+  assert(dl_ac <= dl_ab + dl_bc + 1e-9);
+
+  /* Lawvere-Tierney Double-Negation Topology j(A) = ~~A on Heyting ideals:
+   * 1. Inflationary: A is a subset of j(A)
+   * 2. Idempotent: j(j(A)) == j(A)
+   * 3. Meet-preserving on ideals: j(A & B) == j(A) & j(B) */
+  uint32_t sub_a = ontology_downward_closure((1u << ONTO_AI) | (1u << ONTO_QUANTUM));
+  uint32_t sub_b = ontology_downward_closure((1u << ONTO_AI) | (1u << ONTO_CYBER));
+  uint32_t ja = ontology_lawvere_tierney_sheafify(sub_a);
+  uint32_t jb = ontology_lawvere_tierney_sheafify(sub_b);
+  uint32_t j_ja = ontology_lawvere_tierney_sheafify(ja);
+  uint32_t j_ab = ontology_lawvere_tierney_sheafify(sub_a & sub_b);
+  assert((ja & sub_a) == sub_a);
+  assert(j_ja == ja);
+  assert(j_ab == (ja & jb));
+  assert(ontology_is_grothendieck_dense(0xFFFFFFFFu) == 1);
+
+  /* Profunctor Coend \int^{c \in C} F(c) G(c) via Rota Mobius kernel */
+  double coend_val = ontology_profunctor_coend(kan, kan);
+  assert(coend_val > 0.0);
+  assert(ontology_mobius_value(ONTO_AI, ONTO_AI) == 1);
+  assert(ontology_mobius_value(ONTO_AI, ONTO_TECHNOLOGY) == -1);
+  assert(ontology_information_specificity(1u << ONTO_CRYPTOGRAPHY) >
+         ontology_information_specificity(1u << ONTO_TECHNOLOGY));
+
+  /* Leinster Magnitude |C|_L, Constructive Yoneda Lemma Nat(Y(c), F) ~= F(c),
+   * Enriched Lawvere-Yoneda Kan Transform, and Helmholtz-Hodge Decomposition */
+  double mag = ontology_leinster_magnitude();
+  assert(mag > 5.0 && mag < 32.0);
+  assert(ontology_node_magnitude_weight(ONTO_AI) > 0.0);
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    double yon = ontology_yoneda_lemma_eval((OntologyNodeId)c, kan);
+    double ydiff = yon > kan[c] ? (yon - kan[c]) : (kan[c] - yon);
+    assert(ydiff < 1e-9);
+  }
+  double ykan[ONTOLOGY_NODE_COUNT] = {0};
+  ontology_yoneda_kan_transform(raw, ykan);
+  assert(ykan[ONTO_AI] >= 10.0 - 1e-9);
+  assert(ykan[ONTO_TECHNOLOGY] > 0.0);
+  assert(sheaf.leinster_magnitude > 5.0);
+  assert(sheaf.hodge_gradient_norm > 0.0);
+  assert(sheaf.hodge_solenoidal_norm >= 0.0);
 
   /* Epistemic NewsType classification */
   assert(news_type_classify("BREAKING: Earthquake strikes Pacific trench", "", "", "climate") ==
@@ -312,6 +374,23 @@ static void test_category_theory_and_ontology(void) {
   assert(strcmp(hf_ent.hf_repos[3], "allenai/olmo-2-1124-13b") == 0);
   assert(hf_ent.ai_license == AI_LICENSE_OPEN_SCIENCE_OSI);
   assert(hf_ent.openness_score > 15.0);
+
+  /* Google DeepMind Research, Politics/Law & Global Sports extraction */
+  ExtractedEntities dm_sp_ent;
+  entities_extract("Google DeepMind unveils AlphaFold 3, AlphaProof and AlphaGeometry 2 trained with JAX on Trillium TPU",
+                   "Supreme Court antitrust ruling and general election referendum shape Champions League and Formula 1 broadcast rights.",
+                   "Isomorphic Labs and MuZero researchers analyze Premier League and NBA telemetry.",
+                   "science",
+                   NULL,
+                   0,
+                   &dm_sp_ent);
+  assert(dm_sp_ent.ai_tier == AI_TIER_FRONTIER_PRETRAINING);
+  assert(dm_sp_ent.ai_model_count >= 3u);
+  assert(dm_sp_ent.ai_infra_count >= 2u);
+  assert(dm_sp_ent.fiscal_event_count >= 2u);
+  assert(dm_sp_ent.sport_count >= 4u);
+  assert(dm_sp_ent.sports_score > 10.0);
+  assert((dm_sp_ent.direct_ontology_mask & (1u << ONTO_SPORTS)) != 0u);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
@@ -319,7 +398,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 585u);
+  assert(seeded >= 640u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",
@@ -421,10 +500,38 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(np >= 1u);
   assert(strcmp(pairs[0].shared_witness, "TW") == 0);
 
-  /* Formal Concept Analysis */
+  /* Categorical pushout colimit X \sqcup_Z Y & Presheaf Natural Transformation \eta: F => G */
+  PushoutAmalgam amalgams[16];
+  size_t nam = engine_categorical_pushout(&eng, "east-asia", "europe", "mentioned_country", amalgams, 16u);
+  assert(nam >= 1u);
+  assert(strcmp(amalgams[0].shared_witness, "TW") == 0);
+  assert(amalgams[0].member_count >= 2u);
+  assert(amalgams[0].left_count >= 1u && amalgams[0].right_count >= 1u);
+  assert(amalgams[0].colimit_cocone_score > 0.0);
+
+  PresheafMorphism nat_morph;
+  engine_natural_transformation(&eng, REGION_EAST_ASIA, REGION_EUROPE, &nat_morph);
+  assert(nat_morph.coend_pairing > 0.0);
+  assert(nat_morph.naturality_defect >= 0.0);
+  assert(nat_morph.heyting_truth_mask != 0u);
+
+  /* Formal Concept Analysis + Galois Hasse Diagram */
   FormalConcept concepts[16];
   size_t nc = engine_formal_concepts(&eng, 1u, concepts, 16u);
   assert(nc >= 2u);
+  assert(concepts[0].lawvere_tierney_mask != 0u);
+  assert(concepts[0].intensional_entropy > 0.0);
+
+  /* Heyting / BitSet Difference Filtering (?exclude_category=politics) */
+  ArticleQuery ex_q;
+  memset(&ex_q, 0, sizeof(ex_q));
+  ex_q.category = "all-news";
+  ex_q.exclude_category = "politics";
+  ex_q.use_category_morphism = 1;
+  ex_q.limit = 10u;
+  assert(engine_search(&eng, &ex_q, &res) == 0);
+  assert(res.total == 2u);
+  search_response_free(&res);
 
   /* Bipartite PageRank */
   RankedEntity ents[16];
@@ -457,6 +564,36 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(status == 200);
   assert(strstr(json.data, "\"exists\":true") != NULL);
   assert(strstr(json.data, "\"euler_characteristic\":1") != NULL);
+  assert(strstr(json.data, "\"fiedler_eigenvalue\":") != NULL);
+  assert(strstr(json.data, "\"leinster_magnitude\":") != NULL);
+  assert(strstr(json.data, "\"hodge_gradient_norm\":") != NULL);
+  assert(strstr(json.data, "\"yoneda_kan_score\":") != NULL);
+  assert(strstr(json.data, "\"lawvere_distance_ab\":") != NULL);
+  assert(strstr(json.data, "\"lawvere_tierney_sheaf_a\":") != NULL);
+  buffer_free(&json);
+
+  CartesianLift lifts[16];
+  size_t n_lifts = engine_grothendieck_fibration(&eng, "all-news", lifts, 16u);
+  assert(n_lifts >= 1u);
+  assert(lifts[0].cartesian_fidelity > 0.0);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/fibration?category=all-news", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"cartesian_lifts\":") != NULL);
+  assert(strstr(json.data, "\"leinster_magnitude\":") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/pushout?left_region=east-asia&right_region=europe&over=mentioned_country", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"natural_transformation\":") != NULL);
+  assert(strstr(json.data, "\"amalgams\":") != NULL);
+  assert(strstr(json.data, "\"shared_witness\":\"TW\"") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/concepts?min_support=1", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"lawvere_tierney_closure\":") != NULL);
+  assert(strstr(json.data, "\"subconcept_ids\":") != NULL);
   buffer_free(&json);
 
   assert(http_handle_request(&ctx, "GET", "/api/v1/security", "", 0, &status, &json) == 0);
@@ -504,6 +641,41 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(strstr(json.data, "\"DEEPSEEK-R1/V3\":1") != NULL);
   assert(strstr(json.data, "\"COREWEAVE\":1") != NULL);
   assert(strstr(json.data, "\"DEEPSEEK-AI/DEEPSEEK-R1-DISTILL-QWEN-32B\":1") != NULL);
+  buffer_free(&json);
+
+  /* Ingest a Sports / Champions League / Formula 1 article and test ?sport= and /api/v1/sports */
+  uint32_t a5 = 0;
+  engine_ingest_article(&eng,
+                        f_eu,
+                        "eu-sp-5",
+                        "Real Madrid faces Bayern Munich in UEFA Champions League knockout as Formula 1 Grand Prix arrives in Monaco",
+                        "https://euobserver.com/5",
+                        "Sports Desk",
+                        "Premier League and LaLiga clubs prepare for Champions League final alongside Scuderia Ferrari F1 upgrades.",
+                        "<p>UEFA Champions League and Formula 1 headline European sports calendar.</p>",
+                        "2026-11-03T04:00:00Z",
+                        1762130900000ULL,
+                        "",
+                        NULL,
+                        0,
+                        &a5,
+                        &ins);
+  assert(ins == 1);
+
+  ArticleQuery sp_q;
+  memset(&sp_q, 0, sizeof(sp_q));
+  sp_q.sport = "UEFA-Champions-League";
+  sp_q.limit = 10u;
+  assert(engine_search(&eng, &sp_q, &res) == 0);
+  assert(res.total == 1u);
+  assert(res.hits[0].article->id == a5);
+  search_response_free(&res);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/sports", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"sports_articles_count\":1") != NULL);
+  assert(strstr(json.data, "\"UEFA-CHAMPIONS-LEAGUE\":1") != NULL);
+  assert(strstr(json.data, "\"FORMULA-1\":1") != NULL);
   buffer_free(&json);
 
   m1_tokenizer_free(&tok);

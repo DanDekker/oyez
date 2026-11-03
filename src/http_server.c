@@ -327,8 +327,13 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_text(buf, "\"ai_tier\":"); json_cstr(buf, ai_compute_tier_slug(a->ai_tier)); buffer_text(buf, ",");
   buffer_format(buf, "\"ai_compute_score\":%.2f,", a->ai_compute_score);
   buffer_text(buf, "\"ai_license\":"); json_cstr(buf, ai_weight_license_slug(a->ai_license)); buffer_text(buf, ",");
-  buffer_format(buf, "\"openness_score\":%.2f,", a->openness_score);
-  buffer_text(buf, "\"mentioned_ai_models\":[");
+  buffer_format(buf, "\"openness_score\":%.2f,\"sports_score\":%.2f,", a->openness_score, a->sports_score);
+  buffer_text(buf, "\"mentioned_sports\":[");
+  for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_sports[i]);
+  }
+  buffer_text(buf, "],\"mentioned_ai_models\":[");
   for(size_t i = 0; i < a->mentioned_ai_model_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
     json_cstr(buf, a->mentioned_ai_models[i]);
@@ -497,14 +502,22 @@ int http_handle_request(ServerContext *ctx,
     ontology_left_kan_extend(raw_scores, kan_scores);
     ontology_right_kan_extend(closure_scores, ran_scores);
     ontology_mobius_invert(kan_scores, mobius_recovered);
+    double yoneda_kan[ONTOLOGY_NODE_COUNT];
+    ontology_yoneda_kan_transform(raw_scores, yoneda_kan);
 
     SheafCohomology sheaf;
     ontology_sheaf_cohomology(raw_scores, closure_scores, &sheaf);
+    double coend_self = ontology_profunctor_coend(closure_scores, closure_scores);
 
     buffer_format(out_json,
                   "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f,"
                   "\"nerve_f_vector\":[%u,%u,%u,%u,%u,%u],\"euler_characteristic\":%d,"
-                  "\"laplacian_trace\":%.2f,\"spectral_radius\":%.4f,\"dirichlet_energy\":%.2f",
+                  "\"betti_numbers\":[%u,%u],\"mobius_total_variation\":%u,"
+                  "\"laplacian_trace\":%.2f,\"spectral_radius\":%.4f,\"fiedler_eigenvalue\":%.4f,"
+                  "\"dirichlet_energy\":%.2f,\"cochain_exactness_norm\":%.6e,"
+                  "\"hodge_1_curl_norm\":%.4f,\"hodge_gradient_norm\":%.4f,\"hodge_solenoidal_norm\":%.4f,"
+                  "\"leinster_magnitude\":%.4f,\"monad_closure_defect\":%.4f,"
+                  "\"profunctor_coend_self\":%.2f",
                   ONTOLOGY_NODE_COUNT,
                   sheaf.total_cohomology_norm,
                   sheaf.nerve_f_vector[0],
@@ -514,15 +527,28 @@ int http_handle_request(ServerContext *ctx,
                   sheaf.nerve_f_vector[4],
                   sheaf.nerve_f_vector[5],
                   sheaf.euler_characteristic,
+                  sheaf.betti_numbers[0],
+                  sheaf.betti_numbers[1],
+                  sheaf.mobius_total_variation,
                   sheaf.laplacian_trace,
                   sheaf.spectral_radius,
-                  sheaf.dirichlet_energy);
+                  sheaf.fiedler_eigenvalue,
+                  sheaf.dirichlet_energy,
+                  sheaf.cochain_exactness_norm,
+                  sheaf.hodge_1_curl_norm,
+                  sheaf.hodge_gradient_norm,
+                  sheaf.hodge_solenoidal_norm,
+                  sheaf.leinster_magnitude,
+                  sheaf.monad_closure_defect,
+                  coend_self);
     if(sub[0] && sup[0]) {
       OntologyNodeId u, v;
       int has = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0 &&
                  ontology_has_morphism(u, v));
-      buffer_format(out_json, ",\"morphism\":{\"sub\":\"%s\",\"sup\":\"%s\",\"exists\":%s}",
-                    sub, sup, has ? "true" : "false");
+      int32_t mu = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0)
+                   ? ontology_mobius_value(u, v) : 0;
+      buffer_format(out_json, ",\"morphism\":{\"sub\":\"%s\",\"sup\":\"%s\",\"exists\":%s,\"mobius_mu\":%d}",
+                    sub, sup, has ? "true" : "false", mu);
     }
     if(a_slug[0] && b_slug[0]) {
       OntologyNodeId na, nb;
@@ -531,15 +557,24 @@ int http_handle_request(ServerContext *ctx,
         uint32_t m = ontology_meet_mask(na, nb);
         uint32_t hey_imp = ontology_heyting_implication(1u << na, 1u << nb);
         uint32_t hey_neg = ontology_heyting_negation(1u << na);
+        uint32_t lt_sheaf = ontology_lawvere_tierney_sheafify(1u << na);
+        int dense_a = ontology_is_grothendieck_dense(1u << na);
         double w_dist = ontology_wasserstein_distance(1u << na, 1u << nb);
+        double l_ab = ontology_lawvere_distance(1u << na, 1u << nb);
+        double l_ba = ontology_lawvere_distance(1u << nb, 1u << na);
         buffer_format(out_json,
-                      ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\",\"wasserstein_distance\":%.4f,\"meet\":",
-                      a_slug, b_slug, ontology_node(j)->slug, w_dist);
+                      ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\","
+                      "\"wasserstein_distance\":%.4f,\"lawvere_distance_ab\":%.4f,"
+                      "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s,\"meet\":",
+                      a_slug, b_slug, ontology_node(j)->slug, w_dist, l_ab, l_ba,
+                      dense_a ? "true" : "false");
         serialize_ontology_mask_array(out_json, m);
         buffer_text(out_json, ",\"heyting_implication\":");
         serialize_ontology_mask_array(out_json, hey_imp);
         buffer_text(out_json, ",\"heyting_negation_a\":");
         serialize_ontology_mask_array(out_json, hey_neg);
+        buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
+        serialize_ontology_mask_array(out_json, lt_sheaf);
         buffer_text(out_json, "}");
       }
     }
@@ -556,13 +591,18 @@ int http_handle_request(ServerContext *ctx,
       buffer_format(out_json,
                     ",\"direct_fiber_size\":%u,\"presheaf_fiber_size\":%u,"
                     "\"left_kan_score\":%.2f,\"right_kan_score\":%.2f,"
-                    "\"mobius_fundamental\":%.2f,\"cohomology_defect\":%.2f}",
+                    "\"yoneda_kan_score\":%.2f,\"leinster_weight\":%.4f,"
+                    "\"mobius_fundamental\":%.2f,\"cohomology_defect\":%.2f,"
+                    "\"information_specificity\":%.4f}",
                     bitset_popcount(&eng->by_direct_ontology[i]),
                     bitset_popcount(&eng->by_closure_ontology[i]),
                     kan_scores[i],
                     ran_scores[i],
+                    yoneda_kan[i],
+                    ontology_node_magnitude_weight((OntologyNodeId)i),
                     mobius_recovered[i],
-                    sheaf.cohomology_defect[i]);
+                    sheaf.cohomology_defect[i],
+                    ontology_information_specificity(1u << i));
     }
     buffer_text(out_json, "]}");
     return 0;
@@ -597,10 +637,35 @@ int http_handle_request(ServerContext *ctx,
     buffer_format(out_json, "{\"total\":%zu,\"concepts\":[", count);
     for(size_t i = 0; i < count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json, "{\"support\":%zu,\"stability_score\":%.2f,\"intent_categories\":",
-                    concepts[i].extent_count, concepts[i].stability_score);
+      buffer_format(out_json,
+                    "{\"concept_id\":%u,\"support\":%zu,\"stability_score\":%.2f,"
+                    "\"intensional_entropy\":%.4f,\"intent_categories\":",
+                    concepts[i].concept_id,
+                    concepts[i].extent_count,
+                    concepts[i].stability_score,
+                    concepts[i].intensional_entropy);
       serialize_ontology_mask_array(out_json, concepts[i].intent_ontology_mask);
-      buffer_text(out_json, ",\"extent_article_ids\":[");
+      buffer_text(out_json, ",\"lawvere_tierney_closure\":");
+      serialize_ontology_mask_array(out_json, concepts[i].lawvere_tierney_mask);
+      buffer_text(out_json, ",\"subconcept_ids\":[");
+      int first_sub = 1;
+      for(uint32_t b = 0; b < 32u; ++b) {
+        if(concepts[i].subconcept_mask & (1u << b)) {
+          if(!first_sub) buffer_text(out_json, ",");
+          buffer_format(out_json, "%u", b);
+          first_sub = 0;
+        }
+      }
+      buffer_text(out_json, "],\"superconcept_ids\":[");
+      int first_sup = 1;
+      for(uint32_t b = 0; b < 32u; ++b) {
+        if(concepts[i].superconcept_mask & (1u << b)) {
+          if(!first_sup) buffer_text(out_json, ",");
+          buffer_format(out_json, "%u", b);
+          first_sup = 0;
+        }
+      }
+      buffer_text(out_json, "],\"extent_article_ids\":[");
       for(size_t k = 0; k < concepts[i].extent_count; ++k) {
         if(k > 0) buffer_text(out_json, ",");
         buffer_format(out_json, "%u", concepts[i].extent_slots[k]);
@@ -631,6 +696,94 @@ int http_handle_request(ServerContext *ctx,
       serialize_article(out_json, pairs[i].left, 1.0, 0);
       buffer_text(out_json, ",\"right_article\":");
       serialize_article(out_json, pairs[i].right, 1.0, 0);
+      buffer_text(out_json, "}");
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/pushout") == 0) {
+    char left[64], right[64], over[64];
+    if(!query_param(qs, "left_region", left, sizeof(left)) || !left[0]) strcpy(left, "east-asia");
+    if(!query_param(qs, "right_region", right, sizeof(right)) || !right[0]) strcpy(right, "europe");
+    if(!query_param(qs, "over", over, sizeof(over)) || !over[0]) strcpy(over, "topic");
+
+    PushoutAmalgam amalgams[32];
+    size_t count = engine_categorical_pushout(eng, left, right, over, amalgams, 32u);
+
+    WorldRegion lr = REGION_GLOBAL, rr = REGION_GLOBAL;
+    world_region_from_slug(left, &lr);
+    world_region_from_slug(right, &rr);
+    PresheafMorphism morph;
+    engine_natural_transformation(eng, lr, rr, &morph);
+
+    buffer_format(out_json,
+                  "{\"left_region\":\"%s\",\"right_region\":\"%s\",\"over\":\"%s\",\"total\":%zu,"
+                  "\"natural_transformation\":{\"naturality_defect\":%.4f,\"coend_pairing\":%.2f,"
+                  "\"lawvere_transport_cost\":%.4f,\"reverse_transport_cost\":%.4f,\"heyting_truth_sieve\":",
+                  left, right, over, count,
+                  morph.naturality_defect,
+                  morph.coend_pairing,
+                  morph.lawvere_transport_cost,
+                  morph.reverse_transport_cost);
+    serialize_ontology_mask_array(out_json, morph.heyting_truth_mask);
+    buffer_text(out_json, ",\"dense_sieve_closure\":");
+    serialize_ontology_mask_array(out_json, morph.dense_sieve_mask);
+    buffer_text(out_json, "},\"amalgams\":[");
+    for(size_t i = 0; i < count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_text(out_json, "{\"shared_witness\":");
+      json_cstr(out_json, amalgams[i].shared_witness);
+      buffer_format(out_json,
+                    ",\"member_count\":%zu,\"left_count\":%u,\"right_count\":%u,"
+                    "\"colimit_cocone_score\":%.4f,\"coproduct_topics\":",
+                    amalgams[i].member_count,
+                    amalgams[i].left_count,
+                    amalgams[i].right_count,
+                    amalgams[i].colimit_cocone_score);
+      serialize_ontology_mask_array(out_json, amalgams[i].coproduct_ontology_mask);
+      buffer_text(out_json, ",\"sheafified_topics\":");
+      serialize_ontology_mask_array(out_json, amalgams[i].sheafified_ontology_mask);
+      buffer_text(out_json, ",\"shared_closure\":");
+      serialize_ontology_mask_array(out_json, amalgams[i].shared_closure_mask);
+      buffer_text(out_json, ",\"member_article_ids\":[");
+      for(size_t m = 0; m < amalgams[i].member_count; ++m) {
+        if(m > 0) buffer_text(out_json, ",");
+        buffer_format(out_json, "%u", amalgams[i].member_ids[m]);
+      }
+      buffer_text(out_json, "]}");
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/fibration") == 0) {
+    char cat[64];
+    if(!query_param(qs, "category", cat, sizeof(cat)) || !cat[0]) strcpy(cat, "all-news");
+    CartesianLift lifts[32];
+    size_t count = engine_grothendieck_fibration(eng, cat, lifts, 32u);
+    buffer_format(out_json,
+                  "{\"base_category\":\"%s\",\"leinster_magnitude\":%.4f,\"total\":%zu,\"cartesian_lifts\":[",
+                  cat,
+                  ontology_leinster_magnitude(),
+                  count);
+    for(size_t i = 0; i < count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_text(out_json, "{\"sub_category\":");
+      json_cstr(out_json, ontology_node(lifts[i].sub_node)->slug);
+      buffer_text(out_json, ",\"sup_category\":");
+      json_cstr(out_json, ontology_node(lifts[i].sup_node)->slug);
+      buffer_text(out_json, ",\"transport_witness\":");
+      json_cstr(out_json, lifts[i].transport_witness);
+      buffer_format(out_json,
+                    ",\"hamming_distance\":%u,\"lawvere_geodesic\":%.4f,\"cartesian_fidelity\":%.4f,"
+                    "\"sub_article\":",
+                    lifts[i].hamming_distance,
+                    lifts[i].lawvere_geodesic,
+                    lifts[i].cartesian_fidelity);
+      serialize_article(out_json, lifts[i].sub_article, lifts[i].cartesian_fidelity, 0);
+      buffer_text(out_json, ",\"sup_article\":");
+      serialize_article(out_json, lifts[i].sup_article, lifts[i].cartesian_fidelity, 0);
       buffer_text(out_json, "}");
     }
     buffer_text(out_json, "]}");
@@ -868,13 +1021,61 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/sports") == 0) {
+    uint32_t sp_total = bitset_popcount(&eng->by_closure_ontology[ONTO_SPORTS]);
+    buffer_format(out_json, "{\"sports_articles_count\":%u,\"sports_leagues\":{", sp_total);
+    int first_s = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_sport[i].occupied) {
+        if(!first_s) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_sport[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_sport[i].bits));
+        first_s = 0;
+      }
+    }
+    buffer_text(out_json, "},\"top_sports_articles\":[");
+    const ArticleRecord *top_sp[12];
+    size_t top_count = 0;
+    for(size_t i = 0; i < eng->article_count; ++i) {
+      const ArticleRecord *a = &eng->articles[i];
+      if(a->sports_score <= 0.0) continue;
+      if(top_count < 12u) {
+        top_sp[top_count++] = a;
+      } else {
+        size_t min_idx = 0;
+        for(size_t k = 1u; k < 12u; ++k) {
+          if(top_sp[k]->sports_score < top_sp[min_idx]->sports_score) min_idx = k;
+        }
+        if(a->sports_score > top_sp[min_idx]->sports_score) {
+          top_sp[min_idx] = a;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      for(size_t j = i + 1u; j < top_count; ++j) {
+        if(top_sp[j]->sports_score > top_sp[i]->sports_score) {
+          const ArticleRecord *tmp = top_sp[i];
+          top_sp[i] = top_sp[j];
+          top_sp[j] = tmp;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      serialize_article(out_json, top_sp[i], top_sp[i]->sports_score, 0);
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
-    char q_str[256], cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
-    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[48];
+    char q_str[256], cat[64], ex_cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
+    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[64], sp_str[32];
     char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
     query_param(qs, "category", cat, sizeof(cat));
+    query_param(qs, "exclude_category", ex_cat, sizeof(ex_cat));
     query_param(qs, "category_morphism", morph, sizeof(morph));
     query_param(qs, "news_type", ntype, sizeof(ntype));
     query_param(qs, "clearance", clr, sizeof(clr));
@@ -888,6 +1089,7 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "ai_infra", aii_str, sizeof(aii_str));
     query_param(qs, "ai_license", ail_str, sizeof(ail_str));
     query_param(qs, "hf_repo", hfr_str, sizeof(hfr_str));
+    query_param(qs, "sport", sp_str, sizeof(sp_str));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -903,6 +1105,7 @@ int http_handle_request(ServerContext *ctx,
     memset(&aq, 0, sizeof(aq));
     aq.query = q_str[0] ? q_str : NULL;
     aq.category = cat[0] ? cat : NULL;
+    aq.exclude_category = ex_cat[0] ? ex_cat : NULL;
     aq.use_category_morphism = (strcmp(morph, "0") != 0 && strcmp(morph, "false") != 0);
     aq.news_type = ntype[0] ? ntype : NULL;
     aq.clearance = clr[0] ? clr : NULL;
@@ -916,6 +1119,7 @@ int http_handle_request(ServerContext *ctx,
     aq.ai_infra = aii_str[0] ? aii_str : NULL;
     aq.ai_license = ail_str[0] ? ail_str : NULL;
     aq.hf_repo = hfr_str[0] ? hfr_str : NULL;
+    aq.sport = sp_str[0] ? sp_str : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;
@@ -1058,6 +1262,11 @@ int http_handle_request(ServerContext *ctx,
     for(size_t i = 0; i < ent.hf_repo_count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       json_cstr(out_json, ent.hf_repos[i]);
+    }
+    buffer_format(out_json, "],\"sports_score\":%.2f,\"sports\":[", ent.sports_score);
+    for(size_t i = 0; i < ent.sport_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.sports[i]);
     }
     buffer_text(out_json, "]}}");
 

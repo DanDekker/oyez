@@ -19,6 +19,48 @@ static char *dup_str(const char *s) {
   return out;
 }
 
+/* ============================================================================
+ * Contiguous 64 KB Block String Arena (O(1) Bump Allocator for Article Strings)
+ * ============================================================================
+ */
+#define ARENA_BLOCK_DEFAULT_CAP 65536u
+
+struct StringArenaBlock {
+  struct StringArenaBlock *next;
+  size_t used;
+  size_t cap;
+  char data[];
+};
+
+static char *arena_strdup(OyezEngine *engine, const char *s) {
+  if(!s) s = "";
+  size_t need = strlen(s) + 1u;
+  struct StringArenaBlock *blk = engine->arena_head;
+  if(!blk || blk->cap - blk->used < need) {
+    size_t bcap = need > (ARENA_BLOCK_DEFAULT_CAP / 2u) ? (need * 2u) : ARENA_BLOCK_DEFAULT_CAP;
+    blk = malloc(sizeof(struct StringArenaBlock) + bcap);
+    if(!blk) return dup_str(s);
+    blk->next = engine->arena_head;
+    blk->used = 0;
+    blk->cap = bcap;
+    engine->arena_head = blk;
+  }
+  char *dst = blk->data + blk->used;
+  memcpy(dst, s, need);
+  blk->used += need;
+  return dst;
+}
+
+static void arena_free_all(OyezEngine *engine) {
+  struct StringArenaBlock *blk = engine->arena_head;
+  while(blk) {
+    struct StringArenaBlock *next = blk->next;
+    free(blk);
+    blk = next;
+  }
+  engine->arena_head = NULL;
+}
+
 void bitset_init(BitSet *bs) {
   memset(bs, 0, sizeof(*bs));
 }
@@ -88,6 +130,14 @@ void bitset_and_inplace(BitSet *dst, const BitSet *other) {
   }
 }
 
+void bitset_andnot_inplace(BitSet *dst, const BitSet *other) {
+  if(!dst || !dst->words || !other || !other->words) return;
+  size_t min_w = dst->word_cap < other->word_cap ? dst->word_cap : other->word_cap;
+  for(size_t i = 0; i < min_w; ++i) {
+    dst->words[i] &= ~other->words[i];
+  }
+}
+
 int bitset_or_inplace(BitSet *dst, const BitSet *other) {
   if(!dst || !other || other->word_cap == 0) return 0;
   if(bitset_ensure(dst, other->word_cap) != 0) return -1;
@@ -96,6 +146,79 @@ int bitset_or_inplace(BitSet *dst, const BitSet *other) {
   }
   if(other->max_slot > dst->max_slot) dst->max_slot = other->max_slot;
   return 0;
+}
+
+uint32_t bitset_intersect_count(const BitSet *a, const BitSet *b) {
+  if(!a || !b || !a->words || !b->words) return 0u;
+  size_t min_w = a->word_cap < b->word_cap ? a->word_cap : b->word_cap;
+  uint32_t total = 0u;
+  for(size_t i = 0; i < min_w; ++i) {
+    total += popcnt64(a->words[i] & b->words[i]);
+  }
+  return total;
+}
+
+double bitset_jaccard(const BitSet *a, const BitSet *b) {
+  if(!a || !b || !a->words || !b->words) return 0.0;
+  size_t max_w = a->word_cap > b->word_cap ? a->word_cap : b->word_cap;
+  uint32_t inter = 0u;
+  uint32_t uni = 0u;
+  for(size_t i = 0; i < max_w; ++i) {
+    uint64_t wa = (i < a->word_cap) ? a->words[i] : 0ULL;
+    uint64_t wb = (i < b->word_cap) ? b->words[i] : 0ULL;
+    inter += popcnt64(wa & wb);
+    uni += popcnt64(wa | wb);
+  }
+  return uni > 0u ? ((double)inter / (double)uni) : 0.0;
+}
+
+static int dedup_table_grow(OyezEngine *engine) {
+  size_t next_cap = engine->dedup_cap ? (engine->dedup_cap * 2u) : 1024u;
+  void *raw = calloc(next_cap, sizeof(*engine->dedup_table));
+  if(!raw) return -1;
+  typeof(engine->dedup_table) next = raw;
+  size_t mask = next_cap - 1u;
+  for(size_t i = 0; i < engine->dedup_cap; ++i) {
+    if(engine->dedup_table[i].occupied) {
+      size_t idx = (size_t)engine->dedup_table[i].key_hash & mask;
+      while(next[idx].occupied) idx = (idx + 1u) & mask;
+      next[idx] = engine->dedup_table[i];
+    }
+  }
+  free(engine->dedup_table);
+  engine->dedup_table = next;
+  engine->dedup_cap = next_cap;
+  return 0;
+}
+
+static uint32_t dedup_lookup(const OyezEngine *engine, uint64_t key_hash) {
+  if(!engine->dedup_table || engine->dedup_cap == 0) return 0u;
+  size_t mask = engine->dedup_cap - 1u;
+  size_t idx = (size_t)key_hash & mask;
+  for(size_t step = 0; step < engine->dedup_cap; ++step) {
+    size_t pos = (idx + step) & mask;
+    if(!engine->dedup_table[pos].occupied) return 0u;
+    if(engine->dedup_table[pos].key_hash == key_hash) {
+      return engine->dedup_table[pos].article_id;
+    }
+  }
+  return 0u;
+}
+
+static void dedup_insert(OyezEngine *engine, uint64_t key_hash, uint32_t article_id) {
+  if((engine->dedup_count + 2u) * 10u >= engine->dedup_cap * 7u) {
+    if(dedup_table_grow(engine) != 0) return;
+  }
+  size_t mask = engine->dedup_cap - 1u;
+  size_t idx = (size_t)key_hash & mask;
+  while(engine->dedup_table[idx].occupied) {
+    if(engine->dedup_table[idx].key_hash == key_hash) return;
+    idx = (idx + 1u) & mask;
+  }
+  engine->dedup_table[idx].key_hash = key_hash;
+  engine->dedup_table[idx].article_id = article_id;
+  engine->dedup_table[idx].occupied = 1;
+  engine->dedup_count++;
 }
 
 static BitSet *country_fiber_get(CountryFiber *table, size_t cap, const char *code, int create) {
@@ -209,6 +332,7 @@ void engine_init(OyezEngine *engine) {
   engine->next_feed_id = 1u;
   engine->next_article_id = 1u;
   inv_table_grow(engine);
+  dedup_table_grow(engine);
   for(int b = 0; b < 4; ++b) {
     engine->lsh_bands[b] = calloc(4096u, sizeof(SimHashBucket));
   }
@@ -228,19 +352,8 @@ static void free_feed_record(FeedRecord *f) {
 }
 
 static void free_article_record(ArticleRecord *a) {
-  free(a->guid);
-  free(a->title);
-  free(a->url);
-  free(a->author);
-  free(a->summary);
+  /* Strings allocated via engine->arena_head are released in bulk by arena_free_all */
   free(a->content_text);
-  free(a->content_html);
-  free(a->published_at);
-  free(a->image_url);
-  free(a->feed_title);
-  free(a->feed_category);
-  free(a->feed_language);
-  free(a->feed_source_tier);
 }
 
 void engine_free(OyezEngine *engine) {
@@ -260,6 +373,7 @@ void engine_free(OyezEngine *engine) {
     free_article_record(&engine->articles[i]);
   }
   free(engine->articles);
+  arena_free_all(engine);
 
   bitset_free(&engine->all_articles);
   for(size_t i = 0; i < WORLD_REGION_COUNT; ++i) bitset_free(&engine->by_region[i]);
@@ -283,6 +397,7 @@ void engine_free(OyezEngine *engine) {
     if(engine->by_ai_model[i].occupied) bitset_free(&engine->by_ai_model[i].bits);
     if(engine->by_ai_infra[i].occupied) bitset_free(&engine->by_ai_infra[i].bits);
     if(engine->by_hf_repo[i].occupied) bitset_free(&engine->by_hf_repo[i].bits);
+    if(engine->by_sport[i].occupied) bitset_free(&engine->by_sport[i].bits);
   }
   for(size_t i = 0; i < 64u; ++i) {
     if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
@@ -294,6 +409,7 @@ void engine_free(OyezEngine *engine) {
     }
   }
   free(engine->inv_table);
+  free(engine->dedup_table);
   for(int b = 0; b < 4; ++b) {
     if(engine->lsh_bands[b]) {
       for(size_t k = 0; k < 4096u; ++k) {
@@ -343,7 +459,10 @@ int engine_upsert_feed(OyezEngine *engine, const CatalogEntry *entry, uint32_t *
 }
 
 const FeedRecord *engine_find_feed(const OyezEngine *engine, uint32_t feed_id) {
-  if(!engine) return NULL;
+  if(!engine || feed_id == 0) return NULL;
+  if((size_t)(feed_id - 1u) < engine->feed_count && engine->feeds[feed_id - 1u].id == feed_id) {
+    return &engine->feeds[feed_id - 1u];
+  }
   for(size_t i = 0; i < engine->feed_count; ++i) {
     if(engine->feeds[i].id == feed_id) return &engine->feeds[i];
   }
@@ -441,6 +560,10 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
     BitSet *h_cb = country_fiber_get(engine->by_hf_repo, 128u, a->mentioned_hf_repos[i], 1);
     if(h_cb) bitset_set(h_cb, slot);
   }
+  for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
+    BitSet *sp_cb = country_fiber_get(engine->by_sport, 128u, a->mentioned_sports[i], 1);
+    if(sp_cb) bitset_set(sp_cb, slot);
+  }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
   size_t term_count = 0;
@@ -497,22 +620,31 @@ int engine_ingest_article(OyezEngine *engine,
   if(out_inserted) *out_inserted = 0;
 
   FeedRecord *feed = NULL;
-  for(size_t i = 0; i < engine->feed_count; ++i) {
-    if(engine->feeds[i].id == feed_id) {
-      feed = &engine->feeds[i];
-      break;
+  if(feed_id > 0 && (size_t)(feed_id - 1u) < engine->feed_count && engine->feeds[feed_id - 1u].id == feed_id) {
+    feed = &engine->feeds[feed_id - 1u];
+  } else {
+    for(size_t i = 0; i < engine->feed_count; ++i) {
+      if(engine->feeds[i].id == feed_id) {
+        feed = &engine->feeds[i];
+        break;
+      }
     }
   }
   if(!feed) return -1;
 
   const char *eff_guid = (guid && guid[0]) ? guid : ((url && url[0]) ? url : title);
-  for(size_t i = 0; i < engine->article_count; ++i) {
-    if(engine->articles[i].feed_id == feed_id && strcmp(engine->articles[i].guid, eff_guid) == 0) {
-      if(out_article_id) *out_article_id = engine->articles[i].id;
-      return 0;
-    }
-    if(url && url[0] && strcmp(engine->articles[i].url, url) == 0) {
-      if(out_article_id) *out_article_id = engine->articles[i].id;
+  uint64_t guid_h = wyhash64((uint64_t)feed_id, fnv1a64(eff_guid, strlen(eff_guid)));
+  uint32_t existing_id = dedup_lookup(engine, guid_h);
+  if(existing_id != 0u) {
+    if(out_article_id) *out_article_id = existing_id;
+    return 0;
+  }
+  uint64_t url_h = 0ULL;
+  if(url && url[0]) {
+    url_h = wyhash64(0x9E3779B97F4A7C15ULL, fnv1a64(url, strlen(url)));
+    existing_id = dedup_lookup(engine, url_h);
+    if(existing_id != 0u) {
+      if(out_article_id) *out_article_id = existing_id;
       return 0;
     }
   }
@@ -531,22 +663,24 @@ int engine_ingest_article(OyezEngine *engine,
   a->id = engine->next_article_id++;
   a->slot = slot;
   a->feed_id = feed_id;
-  a->guid = dup_str(eff_guid);
-  a->title = dup_str(title);
-  a->url = dup_str(url ? url : "");
-  a->author = dup_str(author ? author : "");
-  a->summary = dup_str(summary ? summary : "");
-  a->content_html = dup_str(content_html ? content_html : "");
+  dedup_insert(engine, guid_h, a->id);
+  if(url_h != 0ULL) dedup_insert(engine, url_h, a->id);
+  a->guid = arena_strdup(engine, eff_guid);
+  a->title = arena_strdup(engine, title);
+  a->url = arena_strdup(engine, url ? url : "");
+  a->author = arena_strdup(engine, author ? author : "");
+  a->summary = arena_strdup(engine, summary ? summary : "");
+  a->content_html = arena_strdup(engine, content_html ? content_html : "");
   a->content_text = markup_clean_cstr((content_html && content_html[0]) ? content_html : summary);
-  a->published_at = dup_str(published_at ? published_at : "2026-11-03T00:00:00Z");
+  a->published_at = arena_strdup(engine, published_at ? published_at : "2026-11-03T00:00:00Z");
   a->published_ms = published_ms > 0 ? published_ms : wall_time_ms();
-  a->image_url = dup_str(image_url ? image_url : "");
-  a->feed_title = dup_str(feed->title);
-  a->feed_category = dup_str(feed->category);
+  a->image_url = arena_strdup(engine, image_url ? image_url : "");
+  a->feed_title = arena_strdup(engine, feed->title);
+  a->feed_category = arena_strdup(engine, feed->category);
   a->feed_region = feed->region;
   strcpy(a->feed_country, feed->country);
-  a->feed_language = dup_str(feed->language);
-  a->feed_source_tier = dup_str(feed->source_tier);
+  a->feed_language = arena_strdup(engine, feed->language);
+  a->feed_source_tier = arena_strdup(engine, feed->source_tier);
 
   ExtractedEntities ent;
   entities_extract(a->title, a->summary, a->content_text, a->feed_category, tags, tag_count, &ent);
@@ -559,6 +693,7 @@ int engine_ingest_article(OyezEngine *engine,
   a->ai_compute_score = ent.ai_compute_score;
   a->ai_license = ent.ai_license;
   a->openness_score = ent.openness_score;
+  a->sports_score = ent.sports_score;
   a->direct_ontology_mask = ent.direct_ontology_mask;
   a->closure_ontology_mask = ent.closure_ontology_mask;
 
@@ -579,6 +714,9 @@ int engine_ingest_article(OyezEngine *engine,
   }
   for(size_t i = 0; i < ent.hf_repo_count && a->mentioned_hf_repo_count < MAX_EXTRACTED_HF_REPOS; ++i) {
     strcpy(a->mentioned_hf_repos[a->mentioned_hf_repo_count++], ent.hf_repos[i]);
+  }
+  for(size_t i = 0; i < ent.sport_count && a->mentioned_sport_count < MAX_EXTRACTED_SPORTS; ++i) {
+    strcpy(a->mentioned_sports[a->mentioned_sport_count++], ent.sports[i]);
   }
 
   /* Always include feed country if valid 2-letter ISO code */
@@ -633,7 +771,10 @@ int engine_ingest_article(OyezEngine *engine,
 }
 
 const ArticleRecord *engine_get_article_by_id(const OyezEngine *engine, uint32_t id) {
-  if(!engine) return NULL;
+  if(!engine || id == 0) return NULL;
+  if((size_t)(id - 1u) < engine->article_count && engine->articles[id - 1u].id == id) {
+    return &engine->articles[id - 1u];
+  }
   for(size_t i = 0; i < engine->article_count; ++i) {
     if(engine->articles[i].id == id) return &engine->articles[i];
   }
@@ -662,6 +803,7 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   uint64_t h = mix64(gen ^ 0x9E3779B97F4A7C15ULL);
   h ^= mix64(fnv1a64_cstr(q->query ? q->query : "") + 1u);
   h ^= mix64(fnv1a64_cstr(q->category ? q->category : "") + 2u);
+  h ^= mix64(fnv1a64_cstr(q->exclude_category ? q->exclude_category : "") + 21u);
   h ^= mix64(fnv1a64_cstr(q->news_type ? q->news_type : "") + 3u);
   h ^= mix64(fnv1a64_cstr(q->clearance ? q->clearance : "") + 4u);
   h ^= mix64(fnv1a64_cstr(q->fiscal_stance ? q->fiscal_stance : "") + 5u);
@@ -674,6 +816,7 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   h ^= mix64(fnv1a64_cstr(q->ai_infra ? q->ai_infra : "") + 17u);
   h ^= mix64(fnv1a64_cstr(q->ai_license ? q->ai_license : "") + 18u);
   h ^= mix64(fnv1a64_cstr(q->hf_repo ? q->hf_repo : "") + 19u);
+  h ^= mix64(fnv1a64_cstr(q->sport ? q->sport : "") + 20u);
   h ^= mix64(fnv1a64_cstr(q->region ? q->region : "") + 8u);
   h ^= mix64(fnv1a64_cstr(q->country ? q->country : "") + 9u);
   h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
@@ -834,6 +977,15 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
+  if(q->sport && q->sport[0]) {
+    const BitSet *spb = country_fiber_get((CountryFiber *)engine->by_sport, 128u, q->sport, 0);
+    if(spb) bitset_and_inplace(&candidates, spb);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
   if(q->category && q->category[0]) {
     OntologyNodeId node;
     if(ontology_from_slug(q->category, &node) == 0) {
@@ -845,6 +997,13 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     } else {
       bitset_free(&candidates);
       return 0;
+    }
+  }
+
+  if(q->exclude_category && q->exclude_category[0]) {
+    OntologyNodeId ex_node;
+    if(ontology_from_slug(q->exclude_category, &ex_node) == 0) {
+      bitset_andnot_inplace(&candidates, &engine->by_closure_ontology[ex_node]);
     }
   }
 
@@ -885,6 +1044,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     double avgdl = engine->total_doc_len > 0 ? ((double)engine->total_doc_len / N) : 100.0;
     const double k1 = 1.2;
     const double b_param = 0.75;
+    const double delta_plus = 1.0; /* BM25+ lower-bound TF normalization */
 
     for(size_t t = 0; t < qterm_count; ++t) {
       const InvertedBucket *bucket = inv_lookup(engine, qterms[t].term, qterms[t].hash);
@@ -897,7 +1057,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
         double tf = (double)bucket->weights[p];
         double dl = (double)engine->articles[slot].doc_len;
         double denom = tf + k1 * (1.0 - b_param + b_param * (dl / avgdl));
-        bm25_scores[slot] += idf * ((tf * (k1 + 1.0)) / denom);
+        bm25_scores[slot] += idf * (((tf * (k1 + 1.0)) / denom) + delta_plus);
         bitset_set(&query_union, slot);
       }
     }
@@ -933,7 +1093,9 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
       if(q->language && q->language[0] && strcmp(art->feed_language, q->language) != 0) continue;
       if(q->source_tier && q->source_tier[0] && strcmp(art->feed_source_tier, q->source_tier) != 0) continue;
 
-      double sc = bm25_scores ? bm25_scores[slot] : (double)(art->published_ms % 100000000ULL) * 1e-6 + 1.0;
+      double spec_boost = 1.0 + 0.05 * (ontology_information_specificity(art->direct_ontology_mask) - 1.0);
+      double sc = bm25_scores ? (bm25_scores[slot] * spec_boost)
+                              : (double)(art->published_ms % 100000000ULL) * 1e-6 + spec_boost;
       pool[pool_count].article = art;
       pool[pool_count].score = sc;
       pool_count++;
@@ -1165,10 +1327,13 @@ static void maybe_add_formal_concept(const OyezEngine *engine,
     }
   }
 
+  fc.concept_id = (uint32_t)(*count);
   fc.intent_ontology_mask = intent_onto;
+  fc.lawvere_tierney_mask = ontology_lawvere_tierney_sheafify(intent_onto);
   fc.intent_region_mask = intent_reg;
   fc.intent_news_type_mask = intent_nt;
-  fc.stability_score = (double)supp * (double)popcnt64((uint64_t)intent_onto);
+  fc.intensional_entropy = ontology_information_specificity(intent_onto);
+  fc.stability_score = (double)supp * (double)popcnt64((uint64_t)intent_onto) * (1.0 + 0.1 * fc.intensional_entropy);
   out_concepts[(*count)++] = fc;
 }
 
@@ -1201,7 +1366,140 @@ size_t engine_formal_concepts(const OyezEngine *engine,
     }
   }
   bitset_free(&inter);
+
+  /* 3. Compute Galois Concept Lattice Hasse Diagram covering morphisms:
+   * Concept i <= Concept j iff Intent(j) is a strict subset of Intent(i)
+   * (equivalently Extent(i) is a subset of Extent(j)), with no intermediate Concept k. */
+  size_t hasse_cap = count < 32u ? count : 32u;
+  for(size_t i = 0; i < hasse_cap; ++i) {
+    uint32_t mi = out_concepts[i].intent_ontology_mask;
+    for(size_t j = 0; j < hasse_cap; ++j) {
+      if(i == j) continue;
+      uint32_t mj = out_concepts[j].intent_ontology_mask;
+      /* Check if i is strictly more specific than j (mj is a strict subset of mi) */
+      if(mi != mj && (mi & mj) == mj) {
+        int has_intermediate = 0;
+        for(size_t k = 0; k < hasse_cap; ++k) {
+          if(k == i || k == j) continue;
+          uint32_t mk = out_concepts[k].intent_ontology_mask;
+          if(mk != mi && mk != mj && (mi & mk) == mk && (mk & mj) == mj) {
+            has_intermediate = 1;
+            break;
+          }
+        }
+        if(!has_intermediate) {
+          out_concepts[i].superconcept_mask |= (1u << (uint32_t)j);
+          out_concepts[j].subconcept_mask |= (1u << (uint32_t)i);
+        }
+      }
+    }
+  }
   return count;
+}
+
+static const char *match_article_witness(const ArticleRecord *a,
+                                         const ArticleRecord *b,
+                                         const char *pivot_dimension) {
+  int by_country = (pivot_dimension && strcmp(pivot_dimension, "mentioned_country") == 0);
+  int by_type = (pivot_dimension && strcmp(pivot_dimension, "news_type") == 0);
+  int by_asset = (pivot_dimension && strcmp(pivot_dimension, "asset") == 0);
+  int by_org = (pivot_dimension && strcmp(pivot_dimension, "organization") == 0);
+  int by_cve = (pivot_dimension && strcmp(pivot_dimension, "cve") == 0);
+  int by_event = (pivot_dimension && strcmp(pivot_dimension, "fiscal_event") == 0);
+  int by_ai_model = (pivot_dimension && strcmp(pivot_dimension, "ai_model") == 0);
+  int by_ai_infra = (pivot_dimension && strcmp(pivot_dimension, "ai_infra") == 0);
+  int by_hf_repo = (pivot_dimension && strcmp(pivot_dimension, "hf_repo") == 0);
+  int by_ai_license = (pivot_dimension && strcmp(pivot_dimension, "ai_license") == 0);
+  int by_sport = (pivot_dimension && strcmp(pivot_dimension, "sport") == 0);
+
+  if(by_country) {
+    for(size_t ca = 0; ca < a->mentioned_country_count; ++ca) {
+      for(size_t cb = 0; cb < b->mentioned_country_count; ++cb) {
+        if(strcmp(a->mentioned_countries[ca], b->mentioned_countries[cb]) == 0) {
+          return a->mentioned_countries[ca];
+        }
+      }
+    }
+  } else if(by_asset) {
+    for(size_t aa = 0; aa < a->mentioned_asset_count; ++aa) {
+      for(size_t ab = 0; ab < b->mentioned_asset_count; ++ab) {
+        if(strcmp(a->mentioned_assets[aa], b->mentioned_assets[ab]) == 0) {
+          return a->mentioned_assets[aa];
+        }
+      }
+    }
+  } else if(by_org) {
+    for(size_t oa = 0; oa < a->mentioned_org_count; ++oa) {
+      for(size_t ob = 0; ob < b->mentioned_org_count; ++ob) {
+        if(strcmp(a->mentioned_orgs[oa], b->mentioned_orgs[ob]) == 0) {
+          return a->mentioned_orgs[oa];
+        }
+      }
+    }
+  } else if(by_cve) {
+    for(size_t ca = 0; ca < a->mentioned_cve_count; ++ca) {
+      for(size_t cb = 0; cb < b->mentioned_cve_count; ++cb) {
+        if(strcmp(a->mentioned_cves[ca], b->mentioned_cves[cb]) == 0) {
+          return a->mentioned_cves[ca];
+        }
+      }
+    }
+  } else if(by_event) {
+    for(size_t ea = 0; ea < a->mentioned_fiscal_event_count; ++ea) {
+      for(size_t eb = 0; eb < b->mentioned_fiscal_event_count; ++eb) {
+        if(strcmp(a->mentioned_fiscal_events[ea], b->mentioned_fiscal_events[eb]) == 0) {
+          return a->mentioned_fiscal_events[ea];
+        }
+      }
+    }
+  } else if(by_ai_model) {
+    for(size_t ma = 0; ma < a->mentioned_ai_model_count; ++ma) {
+      for(size_t mb = 0; mb < b->mentioned_ai_model_count; ++mb) {
+        if(strcmp(a->mentioned_ai_models[ma], b->mentioned_ai_models[mb]) == 0) {
+          return a->mentioned_ai_models[ma];
+        }
+      }
+    }
+  } else if(by_ai_infra) {
+    for(size_t ia = 0; ia < a->mentioned_ai_infra_count; ++ia) {
+      for(size_t ib = 0; ib < b->mentioned_ai_infra_count; ++ib) {
+        if(strcmp(a->mentioned_ai_infra[ia], b->mentioned_ai_infra[ib]) == 0) {
+          return a->mentioned_ai_infra[ia];
+        }
+      }
+    }
+  } else if(by_hf_repo) {
+    for(size_t ha = 0; ha < a->mentioned_hf_repo_count; ++ha) {
+      for(size_t hb = 0; hb < b->mentioned_hf_repo_count; ++hb) {
+        if(strcmp(a->mentioned_hf_repos[ha], b->mentioned_hf_repos[hb]) == 0) {
+          return a->mentioned_hf_repos[ha];
+        }
+      }
+    }
+  } else if(by_ai_license) {
+    if(a->ai_license != AI_LICENSE_UNSPECIFIED && a->ai_license == b->ai_license) {
+      return ai_weight_license_slug(a->ai_license);
+    }
+  } else if(by_sport) {
+    for(size_t sa = 0; sa < a->mentioned_sport_count; ++sa) {
+      for(size_t sb = 0; sb < b->mentioned_sport_count; ++sb) {
+        if(strcmp(a->mentioned_sports[sa], b->mentioned_sports[sb]) == 0) {
+          return a->mentioned_sports[sa];
+        }
+      }
+    }
+  } else if(by_type) {
+    if(a->news_type == b->news_type) {
+      return news_type_slug(a->news_type);
+    }
+  } else {
+    uint32_t shared = (a->direct_ontology_mask & b->direct_ontology_mask) & ~1u;
+    if(shared) {
+      uint32_t node = ctz64((uint64_t)shared);
+      return ontology_node((OntologyNodeId)node)->slug;
+    }
+  }
+  return NULL;
 }
 
 size_t engine_categorical_pullback(const OyezEngine *engine,
@@ -1218,122 +1516,299 @@ size_t engine_categorical_pullback(const OyezEngine *engine,
   }
 
   size_t found = 0;
-  int by_country = (pivot_dimension && strcmp(pivot_dimension, "mentioned_country") == 0);
-  int by_type = (pivot_dimension && strcmp(pivot_dimension, "news_type") == 0);
-  int by_asset = (pivot_dimension && strcmp(pivot_dimension, "asset") == 0);
-  int by_org = (pivot_dimension && strcmp(pivot_dimension, "organization") == 0);
-  int by_cve = (pivot_dimension && strcmp(pivot_dimension, "cve") == 0);
-  int by_event = (pivot_dimension && strcmp(pivot_dimension, "fiscal_event") == 0);
-  int by_ai_model = (pivot_dimension && strcmp(pivot_dimension, "ai_model") == 0);
-  int by_ai_infra = (pivot_dimension && strcmp(pivot_dimension, "ai_infra") == 0);
-  int by_hf_repo = (pivot_dimension && strcmp(pivot_dimension, "hf_repo") == 0);
-  int by_ai_license = (pivot_dimension && strcmp(pivot_dimension, "ai_license") == 0);
+  const BitSet *bs_l = &engine->by_region[lr];
+  const BitSet *bs_r = &engine->by_region[rr];
 
-  for(size_t i = 0; i < engine->article_count && found < max_pairs; ++i) {
-    const ArticleRecord *a = &engine->articles[i];
-    if(a->feed_region != lr) continue;
-    for(size_t j = 0; j < engine->article_count && found < max_pairs; ++j) {
-      const ArticleRecord *b = &engine->articles[j];
-      if(b->feed_region != rr || a->id == b->id) continue;
+  for(size_t wl = 0; wl < bs_l->word_cap && found < max_pairs; ++wl) {
+    uint64_t word_l = bs_l->words[wl];
+    while(word_l && found < max_pairs) {
+      uint32_t bit_l = ctz64(word_l);
+      uint32_t slot_l = (uint32_t)(wl * 64u + bit_l);
+      word_l &= (word_l - 1ULL);
+      if(slot_l >= engine->article_count) continue;
+      const ArticleRecord *a = &engine->articles[slot_l];
 
-      const char *witness = NULL;
-      if(by_country) {
-        for(size_t ca = 0; ca < a->mentioned_country_count && !witness; ++ca) {
-          for(size_t cb = 0; cb < b->mentioned_country_count; ++cb) {
-            if(strcmp(a->mentioned_countries[ca], b->mentioned_countries[cb]) == 0) {
-              witness = a->mentioned_countries[ca];
-              break;
-            }
+      for(size_t wr = 0; wr < bs_r->word_cap && found < max_pairs; ++wr) {
+        uint64_t word_r = bs_r->words[wr];
+        while(word_r && found < max_pairs) {
+          uint32_t bit_r = ctz64(word_r);
+          uint32_t slot_r = (uint32_t)(wr * 64u + bit_r);
+          word_r &= (word_r - 1ULL);
+          if(slot_r >= engine->article_count || slot_l == slot_r) continue;
+          const ArticleRecord *b = &engine->articles[slot_r];
+
+          const char *witness = match_article_witness(a, b, pivot_dimension);
+          if(witness) {
+            uint32_t dist = simhash64_distance(a->simhash64, b->simhash64);
+            PullbackPair pair;
+            pair.left = a;
+            pair.right = b;
+            pair.shared_witness = witness;
+            pair.hamming_distance = dist;
+            pair.coherence_score = 1.0 - ((double)dist / 64.0);
+            out_pairs[found++] = pair;
           }
-        }
-      } else if(by_asset) {
-        for(size_t aa = 0; aa < a->mentioned_asset_count && !witness; ++aa) {
-          for(size_t ab = 0; ab < b->mentioned_asset_count; ++ab) {
-            if(strcmp(a->mentioned_assets[aa], b->mentioned_assets[ab]) == 0) {
-              witness = a->mentioned_assets[aa];
-              break;
-            }
-          }
-        }
-      } else if(by_org) {
-        for(size_t oa = 0; oa < a->mentioned_org_count && !witness; ++oa) {
-          for(size_t ob = 0; ob < b->mentioned_org_count; ++ob) {
-            if(strcmp(a->mentioned_orgs[oa], b->mentioned_orgs[ob]) == 0) {
-              witness = a->mentioned_orgs[oa];
-              break;
-            }
-          }
-        }
-      } else if(by_cve) {
-        for(size_t ca = 0; ca < a->mentioned_cve_count && !witness; ++ca) {
-          for(size_t cb = 0; cb < b->mentioned_cve_count; ++cb) {
-            if(strcmp(a->mentioned_cves[ca], b->mentioned_cves[cb]) == 0) {
-              witness = a->mentioned_cves[ca];
-              break;
-            }
-          }
-        }
-      } else if(by_event) {
-        for(size_t ea = 0; ea < a->mentioned_fiscal_event_count && !witness; ++ea) {
-          for(size_t eb = 0; eb < b->mentioned_fiscal_event_count; ++eb) {
-            if(strcmp(a->mentioned_fiscal_events[ea], b->mentioned_fiscal_events[eb]) == 0) {
-              witness = a->mentioned_fiscal_events[ea];
-              break;
-            }
-          }
-        }
-      } else if(by_ai_model) {
-        for(size_t ma = 0; ma < a->mentioned_ai_model_count && !witness; ++ma) {
-          for(size_t mb = 0; mb < b->mentioned_ai_model_count; ++mb) {
-            if(strcmp(a->mentioned_ai_models[ma], b->mentioned_ai_models[mb]) == 0) {
-              witness = a->mentioned_ai_models[ma];
-              break;
-            }
-          }
-        }
-      } else if(by_ai_infra) {
-        for(size_t ia = 0; ia < a->mentioned_ai_infra_count && !witness; ++ia) {
-          for(size_t ib = 0; ib < b->mentioned_ai_infra_count; ++ib) {
-            if(strcmp(a->mentioned_ai_infra[ia], b->mentioned_ai_infra[ib]) == 0) {
-              witness = a->mentioned_ai_infra[ia];
-              break;
-            }
-          }
-        }
-      } else if(by_hf_repo) {
-        for(size_t ha = 0; ha < a->mentioned_hf_repo_count && !witness; ++ha) {
-          for(size_t hb = 0; hb < b->mentioned_hf_repo_count; ++hb) {
-            if(strcmp(a->mentioned_hf_repos[ha], b->mentioned_hf_repos[hb]) == 0) {
-              witness = a->mentioned_hf_repos[ha];
-              break;
-            }
-          }
-        }
-      } else if(by_ai_license) {
-        if(a->ai_license != AI_LICENSE_UNSPECIFIED && a->ai_license == b->ai_license) {
-          witness = ai_weight_license_slug(a->ai_license);
-        }
-      } else if(by_type) {
-        if(a->news_type == b->news_type) {
-          witness = news_type_slug(a->news_type);
-        }
-      } else {
-        uint32_t shared = (a->direct_ontology_mask & b->direct_ontology_mask) & ~1u;
-        if(shared) {
-          uint32_t node = ctz64((uint64_t)shared);
-          witness = ontology_node((OntologyNodeId)node)->slug;
         }
       }
+    }
+  }
+  return found;
+}
 
-      if(witness) {
-        uint32_t dist = simhash64_distance(a->simhash64, b->simhash64);
-        PullbackPair pair;
-        pair.left = a;
-        pair.right = b;
-        pair.shared_witness = witness;
-        pair.hamming_distance = dist;
-        pair.coherence_score = 1.0 - ((double)dist / 64.0);
-        out_pairs[found++] = pair;
+size_t engine_categorical_pushout(const OyezEngine *engine,
+                                  const char *left_region,
+                                  const char *right_region,
+                                  const char *pivot_dimension,
+                                  PushoutAmalgam *out_amalgams,
+                                  size_t max_amalgams) {
+  if(!engine || !left_region || !right_region || !out_amalgams || max_amalgams == 0) return 0;
+  WorldRegion lr, rr;
+  if(world_region_from_slug(left_region, &lr) != 0 ||
+     world_region_from_slug(right_region, &rr) != 0) {
+    return 0;
+  }
+
+  PullbackPair pairs[256];
+  size_t np = engine_categorical_pullback(engine, left_region, right_region, pivot_dimension, pairs, 256u);
+  if(np == 0) return 0;
+
+  size_t count = 0;
+  for(size_t p = 0; p < np; ++p) {
+    const PullbackPair *pb = &pairs[p];
+    if(!pb->shared_witness) continue;
+
+    /* Find or create the pushout equivalence class [w] in X \sqcup_Z Y */
+    PushoutAmalgam *am = NULL;
+    for(size_t c = 0; c < count; ++c) {
+      if(strcmp(out_amalgams[c].shared_witness, pb->shared_witness) == 0) {
+        am = &out_amalgams[c];
+        break;
+      }
+    }
+    if(!am) {
+      if(count >= max_amalgams) continue;
+      am = &out_amalgams[count++];
+      memset(am, 0, sizeof(*am));
+      snprintf(am->shared_witness, sizeof(am->shared_witness), "%s", pb->shared_witness);
+      am->shared_closure_mask = 0xFFFFFFFFu;
+    }
+
+    const ArticleRecord *sides[2] = {pb->left, pb->right};
+    for(int s = 0; s < 2; ++s) {
+      const ArticleRecord *art = sides[s];
+      int exists = 0;
+      for(size_t m = 0; m < am->member_count; ++m) {
+        if(am->member_ids[m] == art->id) {
+          exists = 1;
+          break;
+        }
+      }
+      if(!exists && am->member_count < 16u) {
+        am->member_ids[am->member_count++] = art->id;
+        if(art->feed_region == lr) am->left_count++;
+        if(art->feed_region == rr) am->right_count++;
+      }
+      am->coproduct_ontology_mask |= art->direct_ontology_mask;
+      am->shared_closure_mask &= art->closure_ontology_mask;
+    }
+  }
+
+  for(size_t c = 0; c < count; ++c) {
+    PushoutAmalgam *am = &out_amalgams[c];
+    if(am->member_count == 0) am->shared_closure_mask = 0;
+    am->sheafified_ontology_mask = ontology_lawvere_tierney_sheafify(am->coproduct_ontology_mask);
+    double spec = ontology_information_specificity(am->coproduct_ontology_mask);
+    double balance = (am->left_count > 0 && am->right_count > 0)
+                     ? (2.0 * (double)am->left_count * (double)am->right_count) /
+                       (double)(am->left_count + am->right_count)
+                     : 0.5;
+    am->colimit_cocone_score = balance * (1.0 + 0.25 * spec) *
+                               (double)popcnt64((uint64_t)am->sheafified_ontology_mask);
+  }
+  return count;
+}
+
+void engine_natural_transformation(const OyezEngine *engine,
+                                   WorldRegion source_region,
+                                   WorldRegion target_region,
+                                   PresheafMorphism *out_morphism) {
+  if(!out_morphism) return;
+  memset(out_morphism, 0, sizeof(*out_morphism));
+  out_morphism->source_region = source_region;
+  out_morphism->target_region = target_region;
+  if(!engine || (uint32_t)source_region >= WORLD_REGION_COUNT ||
+     (uint32_t)target_region >= WORLD_REGION_COUNT) {
+    return;
+  }
+
+  const BitSet *bs_src = &engine->by_region[source_region];
+  const BitSet *bs_dst = &engine->by_region[target_region];
+  double f_vec[ONTOLOGY_NODE_COUNT];
+  double g_vec[ONTOLOGY_NODE_COUNT];
+
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t fc = bitset_intersect_count(bs_src, &engine->by_closure_ontology[c]);
+    uint32_t gc = bitset_intersect_count(bs_dst, &engine->by_closure_ontology[c]);
+    out_morphism->source_fiber_counts[c] = fc;
+    out_morphism->target_fiber_counts[c] = gc;
+    f_vec[c] = (double)fc;
+    g_vec[c] = (double)gc;
+    if(fc > 0) out_morphism->source_support_mask |= (1u << c);
+    if(gc > 0) out_morphism->target_support_mask |= (1u << c);
+    out_morphism->component_ratios[c] = (fc > 0) ? ((double)gc / (double)fc) : (gc > 0 ? 1.0 : 0.0);
+  }
+
+  out_morphism->heyting_truth_mask = ontology_heyting_implication(
+    out_morphism->source_support_mask,
+    out_morphism->target_support_mask
+  );
+  out_morphism->dense_sieve_mask = ontology_lawvere_tierney_sheafify(
+    out_morphism->source_support_mask & out_morphism->target_support_mask
+  );
+  out_morphism->coend_pairing = ontology_profunctor_coend(f_vec, g_vec);
+
+  /* Naturality Square Defect:
+   * For every covering morphism u -> v in C, check commutativity of
+   *   F(v) --eta_v--> G(v)
+   *    |               |
+   *    v               v
+   *   F(u) --eta_u--> G(u)
+   * normalized by total presheaf mass. */
+  double defect = 0.0;
+  uint32_t edge_cnt = 0;
+  for(uint32_t u = 1u; u < ONTOLOGY_NODE_COUNT; ++u) {
+    uint32_t parents = ontology_node((OntologyNodeId)u)->parents_mask;
+    while(parents) {
+      uint32_t v = ctz64((uint64_t)parents);
+      parents &= (parents - 1u);
+      if(v == 0) continue;
+      double diff = fabs(out_morphism->component_ratios[u] - out_morphism->component_ratios[v]);
+      defect += diff / (1.0 + diff);
+      edge_cnt++;
+    }
+  }
+  out_morphism->naturality_defect = edge_cnt > 0 ? (defect / (double)edge_cnt) : 0.0;
+  out_morphism->lawvere_transport_cost = ontology_lawvere_distance(
+    out_morphism->source_support_mask,
+    out_morphism->target_support_mask
+  );
+  out_morphism->reverse_transport_cost = ontology_lawvere_distance(
+    out_morphism->target_support_mask,
+    out_morphism->source_support_mask
+  );
+}
+
+static const char *find_cartesian_transport_witness(const ArticleRecord *sub_a,
+                                                    const ArticleRecord *sup_a) {
+  static const char *const k_pivots[] = {
+    "organization",
+    "ai_model",
+    "asset",
+    "cve",
+    "fiscal_event",
+    "mentioned_country",
+    "ai_infra",
+    "sport",
+    "news_type"
+  };
+  for(size_t i = 0; i < sizeof(k_pivots) / sizeof(k_pivots[0]); ++i) {
+    const char *w = match_article_witness(sub_a, sup_a, k_pivots[i]);
+    if(w && w[0] != '\0') return w;
+  }
+  return NULL;
+}
+
+size_t engine_grothendieck_fibration(const OyezEngine *engine,
+                                     const char *base_category,
+                                     CartesianLift *out_lifts,
+                                     size_t max_lifts) {
+  if(!engine || !out_lifts || max_lifts == 0 || engine->article_count == 0) return 0;
+
+  OntologyNodeId root_node = ONTO_ROOT;
+  if(base_category && base_category[0] != '\0') {
+    if(ontology_from_slug(base_category, &root_node) != 0) {
+      root_node = ONTO_ROOT;
+    }
+  }
+
+  uint32_t sieve_mask = ontology_downward_closure(1u << root_node);
+  /* If root_node is a leaf with no strict children, include its immediate parents so covering morphisms u -> v exist */
+  if(popcnt64((uint64_t)sieve_mask) <= 1u) {
+    sieve_mask |= ontology_upward_closure(1u << root_node);
+  }
+
+  size_t found = 0;
+  for(uint32_t u = 1u; u < ONTOLOGY_NODE_COUNT && found < max_lifts; ++u) {
+    if(!(sieve_mask & (1u << u))) continue;
+    uint32_t parents = ontology_node((OntologyNodeId)u)->parents_mask;
+    while(parents && found < max_lifts) {
+      uint32_t v = ctz64((uint64_t)parents);
+      parents &= (parents - 1u);
+      if(v == 0u || v == u) continue;
+
+      const BitSet *bs_u = &engine->by_direct_ontology[u];
+      const BitSet *bs_v = &engine->by_closure_ontology[v];
+      if(bitset_popcount(bs_u) == 0) bs_u = &engine->by_closure_ontology[u];
+
+      size_t edge_lifts = 0;
+      for(size_t wu = 0; wu < bs_u->word_cap && found < max_lifts && edge_lifts < 4u; ++wu) {
+        uint64_t word_u = bs_u->words[wu];
+        while(word_u && found < max_lifts && edge_lifts < 4u) {
+          uint32_t bit_u = ctz64(word_u);
+          uint32_t slot_u = (uint32_t)(wu * 64u + bit_u);
+          word_u &= (word_u - 1ULL);
+          if(slot_u >= engine->article_count) continue;
+          const ArticleRecord *a_u = &engine->articles[slot_u];
+
+          for(size_t wv = 0; wv < bs_v->word_cap && found < max_lifts && edge_lifts < 4u; ++wv) {
+            uint64_t word_v = bs_v->words[wv];
+            while(word_v && found < max_lifts && edge_lifts < 4u) {
+              uint32_t bit_v = ctz64(word_v);
+              uint32_t slot_v = (uint32_t)(wv * 64u + bit_v);
+              word_v &= (word_v - 1ULL);
+              if(slot_v >= engine->article_count || slot_v == slot_u) continue;
+              const ArticleRecord *a_v = &engine->articles[slot_v];
+
+              /* Prefer genuine strict lifts where a_v sits in the broader fiber v outside direct u */
+              if((a_v->direct_ontology_mask & (1u << u)) != 0u &&
+                 bitset_popcount(&engine->by_direct_ontology[v]) > 0) {
+                continue;
+              }
+
+              const char *witness = find_cartesian_transport_witness(a_u, a_v);
+              if(!witness) continue;
+
+              uint32_t hamming = simhash64_distance(a_u->simhash64, a_v->simhash64);
+              double geodesic = ontology_lawvere_distance(1u << u, 1u << v);
+              double spec_u = ontology_information_specificity(a_u->direct_ontology_mask);
+              double fidelity = (1.0 - ((double)hamming / 64.0)) *
+                                (1.0 + 0.20 * spec_u) /
+                                (1.0 + 0.15 * geodesic);
+
+              CartesianLift *lift = &out_lifts[found++];
+              lift->sub_node = (OntologyNodeId)u;
+              lift->sup_node = (OntologyNodeId)v;
+              lift->sub_article = a_u;
+              lift->sup_article = a_v;
+              snprintf(lift->transport_witness, sizeof(lift->transport_witness), "%s", witness);
+              lift->hamming_distance = hamming;
+              lift->lawvere_geodesic = geodesic;
+              lift->cartesian_fidelity = fidelity;
+              edge_lifts++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* Sort Cartesian lifts in descending order of cartesian_fidelity */
+  for(size_t i = 0; i < found; ++i) {
+    for(size_t j = i + 1u; j < found; ++j) {
+      if(out_lifts[j].cartesian_fidelity > out_lifts[i].cartesian_fidelity) {
+        CartesianLift tmp = out_lifts[i];
+        out_lifts[i] = out_lifts[j];
+        out_lifts[j] = tmp;
       }
     }
   }
@@ -1444,6 +1919,20 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
       snprintf(e->id, sizeof(e->id), "hf:%s", engine->by_hf_repo[i].key);
       snprintf(e->label, sizeof(e->label), "%s", engine->by_hf_repo[i].key);
       e->kind = "hf_repo";
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+
+  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
+    if(engine->by_sport[i].occupied) {
+      uint32_t deg = bitset_popcount(&engine->by_sport[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_sport[i].bits;
+      RankedEntity *e = &ents[ent_count++];
+      snprintf(e->id, sizeof(e->id), "sport:%s", engine->by_sport[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", engine->by_sport[i].key);
+      e->kind = "sport";
       e->degree = deg;
       e->score = 1.0;
     }

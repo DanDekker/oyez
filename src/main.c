@@ -141,7 +141,10 @@ static int run_bench(void) {
   double clo_s[ONTOLOGY_NODE_COUNT] = {0};
   double kan_s[ONTOLOGY_NODE_COUNT] = {0};
   double ran_s[ONTOLOGY_NODE_COUNT] = {0};
+  double mob_s[ONTOLOGY_NODE_COUNT] = {0};
+  double ykan_s[ONTOLOGY_NODE_COUNT] = {0};
   SheafCohomology sheaf;
+  double coend_acc = 0.0;
   for(size_t iter = 0; iter < 10000u; ++iter) {
     for(uint32_t k = 0; k < ONTOLOGY_NODE_COUNT; ++k) {
       raw_s[k] = (double)(k + 1u);
@@ -149,19 +152,42 @@ static int run_bench(void) {
     }
     ontology_left_kan_extend(raw_s, kan_s);
     ontology_right_kan_extend(clo_s, ran_s);
+    ontology_mobius_invert(kan_s, mob_s);
+    ontology_yoneda_kan_transform(raw_s, ykan_s);
     ontology_sheaf_cohomology(raw_s, clo_s, &sheaf);
+    coend_acc += ontology_profunctor_coend(raw_s, clo_s);
   }
   uint64_t s1 = monotonic_ns();
-  printf("5. 32-Node Poset Left/Right Kan Extensions & Sheaf Cohomology (10,000 runs):\n");
-  printf("   Avg Latency: %.3f us/pass (L2 cohomology norm=%.2f)\n",
+  printf("5. 32-Node Poset Kan + Yoneda + Coend + Helmholtz-Hodge Complex (10,000 runs):\n");
+  printf("   Avg Latency: %.3f us/pass (|C|_L=%.2f, grad=%.1f, curl=%.1f, d1*d0=%.2e, coend=%.0f)\n",
          ((double)(s1 - s0) / 1e3) / 10000.0,
-         sheaf.total_cohomology_norm);
+         sheaf.leinster_magnitude,
+         sheaf.hodge_gradient_norm,
+         sheaf.hodge_solenoidal_norm,
+         sheaf.cochain_exactness_norm,
+         coend_acc / 10000.0);
+
+  uint64_t po0 = monotonic_ns();
+  PushoutAmalgam amalgams[32];
+  size_t po_cnt = engine_categorical_pushout(&eng, "east-asia", "europe", "topic", amalgams, 32u);
+  PresheafMorphism nat_morph;
+  engine_natural_transformation(&eng, REGION_EAST_ASIA, REGION_EUROPE, &nat_morph);
+  CartesianLift lifts[32];
+  size_t fib_cnt = engine_grothendieck_fibration(&eng, "all-news", lifts, 32u);
+  uint64_t po1 = monotonic_ns();
+  printf("6. Categorical Pushout, Natural Transformation & Grothendieck Fibration:\n");
+  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, naturality_defect=%.4f, coend=%.1f)\n",
+         (double)(po1 - po0) / 1e6,
+         po_cnt,
+         fib_cnt,
+         nat_morph.naturality_defect,
+         nat_morph.coend_pairing);
 
   M1Tokenizer m1;
   uint64_t m0 = monotonic_ns();
   train_default_m1(&m1);
   uint64_t m1_ns = monotonic_ns();
-  printf("6. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
+  printf("7. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
   printf("   Vocab Size:  %u (trained in %.2f ms)\n",
          m1_tokenizer_vocab_size(&m1),
          (double)(m1_ns - m0) / 1e6);
