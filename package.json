@@ -1,0 +1,25 @@
+{
+  "name": "oyez",
+  "version": "0.1.0",
+  "description": "Oyez! A zero-dependency news API, RSS/Atom aggregator, readability extractor, and proprietary BM25 search engine built with TypeScript and Bun.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit"
+  },
+  "keywords": [
+    "news",
+    "rss",
+    "atom",
+    "aggregator",
+    "search-engine",
+    "bm25",
+    "readability",
+    "bun",
+    "typescript"
+  ],
+  "license": "MIT"
+}
