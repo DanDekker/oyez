@@ -845,6 +845,64 @@ static void test_hardening_and_concurrency(void) {
     assert(args[t].hits_sum == 200u);
   }
 
+  /* 5. Nested HTML tags in readability_extract & unclosed script/comment stripping */
+  Buffer sbuf;
+  buffer_init(&sbuf);
+  const char *unclosed_html = "<p>Visible text</p><script>evil_payload();";
+  assert(markup_strip_html(unclosed_html, strlen(unclosed_html), &sbuf) == 0);
+  assert(strstr(sbuf.data, "Visible text") != NULL);
+  assert(strstr(sbuf.data, "evil_payload") == NULL);
+  buffer_free(&sbuf);
+
+  const char *nested_article_html =
+    "<html><body><article><div class=\"callout\"><article>Inner note.</article></div>"
+    "<p>Outer main paragraph after nested article tag must be preserved in full.</p>"
+    "</article></body></html>";
+  ExtractedContent rres;
+  assert(readability_extract(nested_article_html, strlen(nested_article_html), "https://sec.example/nested", &rres) == 0);
+  assert(strstr(rres.text_content, "Outer main paragraph after nested article tag") != NULL);
+  readability_free(&rres);
+
+  /* 6. CVE deduplication and word-boundary enforcement */
+  engine_ingest_article(&eng,
+                        fid,
+                        "adv-cve",
+                        "Critical CVE-2026-9999 and fake abcve-2026-8888",
+                        "https://sec.example/cve",
+                        "Sec",
+                        "Patch CVE-2026-9999 immediately; CVE-2026-9999 is actively exploited.",
+                        "<p>Details on CVE-2026-9999 and abcve-2026-8888.</p>",
+                        "2026-11-03T06:00:00Z",
+                        1762138000000ULL,
+                        "",
+                        NULL,
+                        0,
+                        NULL,
+                        &ins);
+  assert(ins == 1);
+  assert(eng.article_count == 2u);
+  const ArticleRecord *cve_rec = &eng.articles[1];
+  uint32_t cve_9999_count = 0;
+  for(size_t i = 0; i < cve_rec->mentioned_cve_count; ++i) {
+    if(strcmp(cve_rec->mentioned_cves[i], "CVE-2026-9999") == 0) {
+      cve_9999_count++;
+    }
+    assert(strcmp(cve_rec->mentioned_cves[i], "CVE-2026-8888") != 0);
+  }
+  assert(cve_9999_count == 1u);
+
+  /* 7. Corrupted snapshot rejection without state corruption */
+  FILE *bad_snap = fopen("/tmp/oyez_corrupt_test.snap", "wb");
+  assert(bad_snap != NULL);
+  fwrite("OYEZSNAP_CORRUPT_HEADER_DATA", 1, 28, bad_snap);
+  fclose(bad_snap);
+  OyezEngine snap_eng;
+  engine_init(&snap_eng);
+  assert(engine_load_snapshot(&snap_eng, "/tmp/oyez_corrupt_test.snap") == -1);
+  assert(snap_eng.article_count == 0u);
+  engine_free(&snap_eng);
+  remove("/tmp/oyez_corrupt_test.snap");
+
   engine_free(&eng);
 }
 
