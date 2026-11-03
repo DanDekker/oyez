@@ -86,13 +86,14 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
 };
 
 static int g_ontology_ready = 0;
+static int8_t g_mobius[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 
 void ontology_init(void) {
   if(g_ontology_ready) return;
   for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     g_ontology[i].upward_mask = BIT(i) | g_ontology[i].parents_mask;
   }
-  /* Transitive closure Warshall pass on 24-bit poset masks */
+  /* Transitive closure Warshall pass on 32-bit poset masks */
   for(int iter = 0; iter < 6; ++iter) {
     for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
       uint32_t m = g_ontology[i].upward_mask;
@@ -114,6 +115,34 @@ void ontology_init(void) {
     }
     g_ontology[i].downward_mask = down;
   }
+
+  /* Compute Rota's Incidence Algebra Mobius Function mu(u, v) on Poset C:
+   * mu(u, u) = 1
+   * mu(u, v) = - sum_{u <= z < v} mu(u, z) for u < v */
+  memset(g_mobius, 0, sizeof(g_mobius));
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    g_mobius[u][u] = 1;
+  }
+  /* Iterate by increasing size of interval [u, v] */
+  for(uint32_t len = 2u; len <= ONTOLOGY_NODE_COUNT; ++len) {
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+        if(u == v) continue;
+        if((g_ontology[u].upward_mask & BIT(v)) == 0u) continue;
+        uint32_t interval = g_ontology[u].upward_mask & g_ontology[v].downward_mask;
+        if(popcnt64((uint64_t)interval) != len) continue;
+        int sum = 0;
+        uint32_t z_mask = interval & ~BIT(v);
+        while(z_mask) {
+          uint32_t z = ctz64((uint64_t)z_mask);
+          sum += g_mobius[u][z];
+          z_mask &= (z_mask - 1u);
+        }
+        g_mobius[u][v] = (int8_t)(-sum);
+      }
+    }
+  }
+
   g_ontology_ready = 1;
 }
 
@@ -300,6 +329,41 @@ void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores)
     }
     out_ran_scores[c] = any ? limit_val : raw_scores[c];
   }
+}
+
+void ontology_mobius_invert(const double *kan_section, double *out_fundamental) {
+  /* Rota's Mobius Inversion over the Poset Ideal Zeta Function:
+   * Given g(c) = (Lan_iota f)(c) = sum_{u <= c} f(u),
+   * recover f(c) = sum_{u <= c} g(u) * mu(u, c). */
+  ontology_init();
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t ideal = g_ontology[c].downward_mask;
+    double acc = 0.0;
+    while(ideal) {
+      uint32_t u = ctz64((uint64_t)ideal);
+      acc += kan_section[u] * (double)g_mobius[u][c];
+      ideal &= (ideal - 1u);
+    }
+    out_fundamental[c] = acc;
+  }
+}
+
+double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b) {
+  ontology_init();
+  uint32_t ua = ontology_upward_closure(mask_a);
+  uint32_t ub = ontology_upward_closure(mask_b);
+  uint32_t sym_diff = ua ^ ub;
+  uint32_t union_m = ua | ub;
+  if(union_m == 0u) return 0.0;
+  /* Weight each node u in symmetric difference by inverse depth (1 / |^u|) */
+  double diff_mass = 0.0;
+  double total_mass = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    double w = 1.0 / (double)popcnt64((uint64_t)g_ontology[u].upward_mask);
+    if(union_m & BIT(u)) total_mass += w;
+    if(sym_diff & BIT(u)) diff_mass += w;
+  }
+  return total_mass > 0.0 ? (diff_mass / total_mass) : 0.0;
 }
 
 uint32_t ontology_heyting_implication(uint32_t sub_mask_a, uint32_t sub_mask_b) {

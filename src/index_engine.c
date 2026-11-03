@@ -589,11 +589,9 @@ static int compare_scored_desc(const void *a, const void *b) {
 static double article_similarity(const ArticleRecord *a, const ArticleRecord *b) {
   uint32_t hamming = simhash64_distance(a->simhash64, b->simhash64);
   double sim_hash = 1.0 - ((double)hamming / 64.0);
-  uint32_t inter_onto = popcnt64((uint64_t)(a->closure_ontology_mask & b->closure_ontology_mask));
-  uint32_t union_onto = popcnt64((uint64_t)(a->closure_ontology_mask | b->closure_ontology_mask));
-  double sim_onto = union_onto > 0 ? ((double)inter_onto / (double)union_onto) : 0.0;
+  double sim_onto = 1.0 - ontology_wasserstein_distance(a->direct_ontology_mask, b->direct_ontology_mask);
   double same_feed = (a->feed_id == b->feed_id) ? 1.0 : 0.0;
-  return 0.50 * sim_hash + 0.30 * sim_onto + 0.20 * same_feed;
+  return 0.45 * sim_hash + 0.35 * sim_onto + 0.20 * same_feed;
 }
 
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out) {

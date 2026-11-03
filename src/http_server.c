@@ -370,12 +370,14 @@ int http_handle_request(ServerContext *ctx,
     double closure_scores[ONTOLOGY_NODE_COUNT] = {0};
     double kan_scores[ONTOLOGY_NODE_COUNT] = {0};
     double ran_scores[ONTOLOGY_NODE_COUNT] = {0};
+    double mobius_recovered[ONTOLOGY_NODE_COUNT] = {0};
     for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
       raw_scores[i] = (double)bitset_popcount(&eng->by_direct_ontology[i]);
       closure_scores[i] = (double)bitset_popcount(&eng->by_closure_ontology[i]);
     }
     ontology_left_kan_extend(raw_scores, kan_scores);
     ontology_right_kan_extend(closure_scores, ran_scores);
+    ontology_mobius_invert(kan_scores, mobius_recovered);
 
     SheafCohomology sheaf;
     ontology_sheaf_cohomology(raw_scores, closure_scores, &sheaf);
@@ -398,8 +400,10 @@ int http_handle_request(ServerContext *ctx,
         uint32_t m = ontology_meet_mask(na, nb);
         uint32_t hey_imp = ontology_heyting_implication(1u << na, 1u << nb);
         uint32_t hey_neg = ontology_heyting_negation(1u << na);
-        buffer_format(out_json, ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\",\"meet\":",
-                      a_slug, b_slug, ontology_node(j)->slug);
+        double w_dist = ontology_wasserstein_distance(1u << na, 1u << nb);
+        buffer_format(out_json,
+                      ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\",\"wasserstein_distance\":%.4f,\"meet\":",
+                      a_slug, b_slug, ontology_node(j)->slug, w_dist);
         serialize_ontology_mask_array(out_json, m);
         buffer_text(out_json, ",\"heyting_implication\":");
         serialize_ontology_mask_array(out_json, hey_imp);
@@ -420,11 +424,13 @@ int http_handle_request(ServerContext *ctx,
       serialize_ontology_mask_array(out_json, n->downward_mask);
       buffer_format(out_json,
                     ",\"direct_fiber_size\":%u,\"presheaf_fiber_size\":%u,"
-                    "\"left_kan_score\":%.2f,\"right_kan_score\":%.2f,\"cohomology_defect\":%.2f}",
+                    "\"left_kan_score\":%.2f,\"right_kan_score\":%.2f,"
+                    "\"mobius_fundamental\":%.2f,\"cohomology_defect\":%.2f}",
                     bitset_popcount(&eng->by_direct_ontology[i]),
                     bitset_popcount(&eng->by_closure_ontology[i]),
                     kan_scores[i],
                     ran_scores[i],
+                    mobius_recovered[i],
                     sheaf.cohomology_defect[i]);
     }
     buffer_text(out_json, "]}");

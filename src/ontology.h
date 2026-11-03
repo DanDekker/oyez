@@ -165,6 +165,8 @@ OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b);
 uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b);
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores);
 void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores);
+void ontology_mobius_invert(const double *upper_section, double *out_fundamental);
+double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b);
 uint32_t ontology_heyting_implication(uint32_t upper_a, uint32_t upper_b);
 uint32_t ontology_heyting_negation(uint32_t upper_a);
 void ontology_sheaf_cohomology(const double *raw_fiber_counts,

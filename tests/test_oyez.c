@@ -196,19 +196,33 @@ static void test_category_theory_and_ontology(void) {
   assert((h_neg & (1u << ONTO_AI)) != 0u);
   assert((h_neg & (1u << ONTO_SPORTS)) == 0u);
 
-  /* Left & Right Kan Extensions + Sheaf Cohomology */
+  /* Left & Right Kan Extensions + Rota Mobius Inversion + Sheaf Cohomology */
   double raw[ONTOLOGY_NODE_COUNT] = {0};
   double kan[ONTOLOGY_NODE_COUNT] = {0};
   double ran[ONTOLOGY_NODE_COUNT] = {0};
+  double mobius_rec[ONTOLOGY_NODE_COUNT] = {0};
   raw[ONTO_AI] = 10.0;
   raw[ONTO_CYBER] = 6.0;
   raw[ONTO_QUANTUM] = 8.0;
+  raw[ONTO_CRYPTOGRAPHY] = 5.0;
   ontology_left_kan_extend(raw, kan);
   ontology_right_kan_extend(kan, ran);
+  ontology_mobius_invert(kan, mobius_rec);
+  /* Mobius inversion over the incidence algebra must exactly recover the raw signal f(c) */
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    double diff = mobius_rec[c] > raw[c] ? (mobius_rec[c] - raw[c]) : (raw[c] - mobius_rec[c]);
+    assert(diff < 1e-9);
+  }
   assert(kan[ONTO_TECHNOLOGY] >= 24.0);
   assert(kan[ONTO_SECURITY] >= 6.0);
   assert(kan[ONTO_ROOT] >= kan[ONTO_TECHNOLOGY]);
   assert(ran[ONTO_AI] > 0.0);
+
+  /* Wasserstein / Radon metric on poset filters */
+  assert(ontology_wasserstein_distance(1u << ONTO_AI, 1u << ONTO_AI) < 1e-9);
+  double d_ai_rob = ontology_wasserstein_distance(1u << ONTO_AI, 1u << ONTO_ROBOTICS);
+  double d_ai_spo = ontology_wasserstein_distance(1u << ONTO_AI, 1u << ONTO_SPORTS);
+  assert(d_ai_rob < d_ai_spo);
 
   SheafCohomology sheaf;
   ontology_sheaf_cohomology(raw, kan, &sheaf);
