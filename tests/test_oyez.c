@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void test_checksum_and_wire(void) {
@@ -928,6 +929,7 @@ static void test_hardening_and_concurrency(void) {
   assert(snap_eng.article_count == 0u);
   engine_free(&snap_eng);
   remove("/tmp/oyez_corrupt_test.snap");
+
   /* A checksum-valid but truncated record must leave an existing engine intact. */
   Buffer malformed_snap;
   buffer_init(&malformed_snap);
@@ -957,7 +959,6 @@ static void test_hardening_and_concurrency(void) {
   assert(engine_get_article_by_id(&replacement, 2u) != NULL);
   engine_free(&replacement);
   remove("/tmp/oyez_replace_test.snap");
-
 
   /* 8. Deeply repeated unclosed CDATA recursion guard & CDATA/comment closing-tag shielding */
   Buffer cdata_in, cdata_out;
@@ -1142,6 +1143,73 @@ static void test_http_connection_framing(void) {
   engine_free(&eng);
 }
 
+static long file_size_or_zero(const char *path) {
+  FILE *fp = fopen(path, "rb");
+  if(!fp) return 0;
+  assert(fseek(fp, 0, SEEK_END) == 0);
+  long size = ftell(fp);
+  fclose(fp);
+  return size;
+}
+
+static void test_url_fetch_redirect_policy(void) {
+  assert(http_url_is_public("http://1.1.1.1/") == 1);
+  assert(http_url_is_public("http://127.0.0.1/") == 0);
+  assert(http_url_is_public("http://127.1/") == 0);
+  assert(http_url_is_public("http://2130706433/") == 0);
+  assert(http_url_is_public("http://user@127.0.0.1/") == 0);
+  assert(http_url_is_public("http://169.254.169.254/") == 0);
+  assert(http_url_is_public("http://[::ffff:127.0.0.1]/") == 0);
+  assert(http_url_is_public("http://[2002:7f00:1::]/") == 0);
+  assert(http_url_is_public("http://1.1.1.1:999999999999999999/") == 0);
+  assert(http_url_is_public("file:///etc/passwd") == 0);
+
+  char dir[] = "/tmp/oyez_curl_test_XXXXXX";
+  assert(mkdtemp(dir) != NULL);
+  char script_path[256], calls_path[256], path_value[4096];
+  assert(snprintf(script_path, sizeof(script_path), "%s/curl", dir) < (int)sizeof(script_path));
+  assert(snprintf(calls_path, sizeof(calls_path), "%s/calls", dir) < (int)sizeof(calls_path));
+  FILE *script = fopen(script_path, "wb");
+  assert(script != NULL);
+  const char *script_text =
+      "#!/bin/sh\n"
+      "url=''\n"
+      "for arg do url=$arg; done\n"
+      "printf x >> \"$OYEZ_TEST_CALLS\"\n"
+      "case \"$url\" in\n"
+      "  http://1.1.1.1/start) printf moved; printf '301 http://8.8.8.8/final' >&2 ;;\n"
+      "  http://8.8.8.8/final) printf 'public feed'; printf '200 ' >&2 ;;\n"
+      "  http://1.1.1.1/private-start) printf moved; printf '302 http://127.0.0.1/secret' >&2 ;;\n"
+      "  *) printf unexpected; printf '500 ' >&2 ;;\n"
+      "esac\n";
+  assert(fwrite(script_text, 1u, strlen(script_text), script) == strlen(script_text));
+  fclose(script);
+  assert(chmod(script_path, 0700) == 0);
+
+  const char *current_path = getenv("PATH");
+  char *saved_path = strdup(current_path ? current_path : "");
+  assert(saved_path != NULL);
+  assert(snprintf(path_value, sizeof(path_value), "%s:%s", dir, saved_path) < (int)sizeof(path_value));
+  assert(setenv("PATH", path_value, 1) == 0);
+  assert(setenv("OYEZ_TEST_CALLS", calls_path, 1) == 0);
+
+  Buffer fetched;
+  assert(http_fetch_url("http://1.1.1.1/start", &fetched) == 0);
+  assert(strcmp(fetched.data, "public feed") == 0);
+  buffer_free(&fetched);
+  assert(file_size_or_zero(calls_path) == 2);
+
+  assert(http_fetch_url("http://1.1.1.1/private-start", &fetched) == -1);
+  assert(file_size_or_zero(calls_path) == 3);
+
+  assert(setenv("PATH", saved_path, 1) == 0);
+  unsetenv("OYEZ_TEST_CALLS");
+  free(saved_path);
+  remove(script_path);
+  remove(calls_path);
+  rmdir(dir);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
@@ -1150,6 +1218,7 @@ int main(void) {
   test_engine_search_and_categorical_endpoints();
   test_hardening_and_concurrency();
   test_http_connection_framing();
+  test_url_fetch_redirect_policy();
   printf("ALL C23 OYEZ TESTS PASSED\n");
   return 0;
 }

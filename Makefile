@@ -13,6 +13,7 @@ LIB_SRCS = \
 	src/ontology.c \
 	src/catalog.c \
 	src/index_engine.c \
+	src/url_fetch.c \
 	src/http_server.c
 
 LIB_HDRS = $(wildcard src/*.h)

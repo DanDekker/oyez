@@ -14,6 +14,8 @@ typedef struct {
 } ServerContext;
 
 int http_fetch_url(const char *url, Buffer *out);
+/* Resolves the host and rejects local, private, and non-global destinations. */
+int http_url_is_public(const char *url);
 int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted);
 size_t engine_poll_all(OyezEngine *engine, size_t max_feeds);
 size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count);

@@ -15,62 +15,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-static int url_is_safe(const char *url) {
-  if(!url) return 0;
-  const char *host = NULL;
-  if(strncmp(url, "http://", 7u) == 0) host = url + 7u;
-  else if(strncmp(url, "https://", 8u) == 0) host = url + 8u;
-  else return 0;
-  if(*host == '\0' || *host == '/') return 0;
-
-  /* Block local/loopback/link-local SSRF targets */
-  if(strncasecmp(host, "localhost", 9u) == 0 &&
-     (host[9] == '\0' || host[9] == ':' || host[9] == '/')) return 0;
-  if(strncmp(host, "127.", 4u) == 0 ||
-     strncmp(host, "0.0.0.0", 7u) == 0 ||
-     strncmp(host, "169.254.", 8u) == 0 ||
-     strncmp(host, "[::1]", 5u) == 0 ||
-     strncmp(host, "[0:0:0:0:0:0:0:1]", 17u) == 0) {
-    return 0;
-  }
-
-  for(const char *p = url; *p; ++p) {
-    unsigned char c = (unsigned char)*p;
-    if(c <= 0x20u || c >= 0x7Fu || c == '\'' || c == '"' || c == '`' || c == '$' || c == ';' ||
-       c == '|' || c == '&' || c == '<' || c == '>' || c == '\\') {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-int http_fetch_url(const char *url, Buffer *out) {
-  if(!url_is_safe(url) || !out) return -1;
-  buffer_init(out);
-  char cmd[2048];
-  int n = snprintf(cmd,
-                   sizeof(cmd),
-                   "curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-redirs 5 --max-time 12 -A 'Oyez/1.0 (+https://github.com/dandekker/oyez)' '%s' 2>/dev/null",
-                   url);
-  if(n < 0 || (size_t)n >= sizeof(cmd)) return -1;
-
-  FILE *pipe = popen(cmd, "r");
-  if(!pipe) return -1;
-
-  char chunk[8192];
-  size_t r = 0;
-  while((r = fread(chunk, 1u, sizeof(chunk), pipe)) > 0) {
-    buffer_append(out, chunk, r);
-    if(out->len > 8u * 1024u * 1024u) break;
-  }
-  int status = pclose(pipe);
-  if(status != 0 || out->len == 0) {
-    buffer_free(out);
-    return -1;
-  }
-  return 0;
-}
-
 int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted) {
   if(out_inserted) *out_inserted = 0;
   FeedRecord *feed = NULL;
