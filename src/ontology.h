@@ -94,6 +94,7 @@ typedef enum {
 } NewsType;
 
 typedef enum {
+  ONTO_NONE = -1,
   ONTO_ROOT = 0,
   ONTO_PUBLIC_AFFAIRS = 1,
   ONTO_KNOWLEDGE_ECONOMY = 2,
@@ -136,6 +137,25 @@ typedef struct {
   uint32_t upward_mask;   /* Principal filter ^u: all v with u <= v */
   uint32_t downward_mask; /* Principal ideal  vu: all v with v <= u */
 } OntologyNode;
+
+/* Exhaustive structural audit of the finite ontology category.  Pair counts
+ * are over unordered pairs, enumerated by numeric IDs a <= b and including
+ * the diagonal. */
+typedef struct {
+  uint32_t object_count;
+  uint32_t morphism_count;
+  uint32_t pair_count;
+  uint32_t unique_join_pairs;
+  uint32_t ambiguous_join_pairs;
+  uint32_t missing_join_pairs;
+  uint32_t unique_meet_pairs;
+  uint32_t ambiguous_meet_pairs;
+  uint32_t missing_meet_pairs;
+  int is_reflexive;
+  int is_antisymmetric;
+  int is_transitive;
+  int is_lattice;
+} OntologyOrderAudit;
 
 typedef struct {
   uint32_t grothendieck_sieve[ONTOLOGY_NODE_COUNT]; /* Covering sieve S(c) for each c */
@@ -201,14 +221,19 @@ typedef struct {
   uint32_t rank_strata_masks[SPECTRAL_FILTRATION_RANKS]; /* Objects u in C of categorical height p in {0..5} */
   uint32_t e0_simplex_counts[SPECTRAL_FILTRATION_RANKS][4]; /* E_0^{p, k-p} filtered k-simplices at stratum p */
   double e1_stratum_energy[SPECTRAL_FILTRATION_RANKS];   /* E_1 vertical fiber cohomology norm at stratum p */
-  double e2_derived_energy[SPECTRAL_FILTRATION_RANKS];   /* E_2 horizontal base derived sheaf norm at stratum p */
-  double e_inf_abutment_energy[SPECTRAL_FILTRATION_RANKS]; /* E_infty converged spectral abutment norm */
-  int32_t euler_e0;                                      /* chi(E_0) == 1 */
-  int32_t euler_e1;                                      /* chi(E_1) == 1 */
-  int32_t euler_e2;                                      /* chi(E_2) == 1 */
-  int32_t euler_e_inf;                                   /* chi(E_infty) == 1 */
-  double differential_nilpotency_defect;                 /* ||d_1 o d_0||_2 + ||d_2 o d_1||_2 == 0 */
+  double e2_derived_energy[SPECTRAL_FILTRATION_RANKS];   /* Heuristic neighboring-stratum variation */
+  double e_inf_abutment_energy[SPECTRAL_FILTRATION_RANKS]; /* Heuristic smoothed rank-page summary */
+  int32_t euler_e0;                                      /* Legacy page-shaped copy of chi(N(C)) */
+  int32_t euler_e1;                                      /* Legacy page-shaped copy of chi(N(C)) */
+  int32_t euler_e2;                                      /* Legacy page-shaped copy of chi(N(C)) */
+  int32_t euler_e_inf;                                   /* Legacy page-shaped copy of chi(N(C)) */
+  double differential_nilpotency_defect;                 /* Reserved legacy field; differentials are not computed */
+  int derived_pages_computed;                            /* Always false for this diagnostic */
 } SpectralSequenceState;
+
+/* Honest name for the diagnostic above; the original typedef remains for
+ * source compatibility. */
+typedef SpectralSequenceState RankPageDiagnostic;
 
 typedef struct {
   double entropic_wasserstein;   /* Kantorovich entropic optimal transport cost W_eps(mu, nu) */
@@ -344,13 +369,29 @@ void ontology_atmospheric_dynamics(double temp_celsius,
                                    WeatherPhysicsState *out_wx);
 
 void ontology_init(void);
+/* ONTO_NONE maps to a sentinel descriptor with slug "none"; other invalid
+ * IDs retain the historical ONTO_ROOT fallback. */
 const OntologyNode *ontology_node(OntologyNodeId id);
 int ontology_from_slug(const char *slug, OntologyNodeId *out);
 int ontology_has_morphism(OntologyNodeId sub, OntologyNodeId sup);
 uint32_t ontology_upward_closure(uint32_t mask);
 uint32_t ontology_downward_closure(uint32_t mask);
+uint32_t ontology_minimal_upper_bounds(OntologyNodeId a, OntologyNodeId b);
+uint32_t ontology_maximal_lower_bounds(OntologyNodeId a, OntologyNodeId b);
+/* Return 0 and set the output iff the corresponding bound is unique;
+ * otherwise return -1 without selecting an arbitrary candidate. */
+int ontology_unique_join(OntologyNodeId a, OntologyNodeId b, OntologyNodeId *out_join);
+int ontology_unique_meet(OntologyNodeId a, OntologyNodeId b, OntologyNodeId *out_meet);
+/* Deprecated scalar helper: returns the unique join or ONTO_NONE.  This is a
+ * deliberate behavior change from the former arbitrary tie-breaker; prefer
+ * ontology_unique_join for new code. */
 OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b);
+/* Returns every maximal lower bound, not an arbitrarily selected meet. */
 uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b);
+int ontology_is_ideal(uint32_t mask);
+uint32_t ontology_ideal_join(uint32_t ideal_a, uint32_t ideal_b);
+uint32_t ontology_ideal_meet(uint32_t ideal_a, uint32_t ideal_b);
+void ontology_order_audit(OntologyOrderAudit *out_audit);
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores);
 void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores);
 void ontology_mobius_invert(const double *upper_section, double *out_fundamental);
@@ -374,6 +415,11 @@ uint32_t ontology_coheyting_subtraction(uint32_t sub_mask_a, uint32_t sub_mask_b
 uint32_t ontology_coheyting_negation(uint32_t sub_mask_a);
 uint32_t ontology_coheyting_boundary(uint32_t sub_mask_a);
 uint32_t ontology_universal_quantifier(uint32_t sub_mask_s);
+/* Exact characteristic sieve chi_A(c) = down(c) intersect down(A). */
+uint32_t ontology_subobject_classifier_sieve(uint32_t sub_mask_s, OntologyNodeId stage);
+/* A scalar visualization of the exact sieve, weighted by the similarity kernel. */
+void ontology_subobject_classifier_score(uint32_t sub_mask_s, double *out_score);
+/* Compatibility alias for ontology_subobject_classifier_score. */
 void ontology_subobject_classifier_omega(uint32_t sub_mask_s, double *out_omega_truth);
 uint32_t ontology_lawvere_tierney_sheafify(uint32_t sub_mask_a);
 int ontology_is_grothendieck_dense(uint32_t sub_mask_a);
@@ -385,6 +431,20 @@ void ontology_persistent_homology(const double *raw_fiber_counts,
                                   PersistenceBarcode *out_barcode);
 void ontology_adjunction_monad(const double *raw_fiber_counts,
                                AdjunctionMonadState *out_state);
+/* Associative, commutative cocone semipromonoidal convolution.  It has no
+ * global unit on unrestricted signal arrays and no representable unit object;
+ * on isotone max-plus sections, the constant-zero section is a unit. */
+void ontology_cocone_convolution(const double *presheaf_f,
+                                 const double *presheaf_g,
+                                 double *out_fg);
+void ontology_cocone_internal_hom(const double *presheaf_g,
+                                  const double *presheaf_h,
+                                  double *out_hom_gh);
+double ontology_cocone_adjunction_defect(const double *presheaf_f,
+                                         const double *presheaf_g,
+                                         const double *presheaf_h);
+/* Deprecated source aliases.  Their semantics now follow cocone convolution,
+ * not the former arbitrary-join calculation; migrate to the cocone names. */
 void ontology_day_convolution(const double *presheaf_f,
                               const double *presheaf_g,
                               double *out_day_fg);
@@ -404,6 +464,15 @@ void ontology_heat_kernel_propagate(const double *initial_f,
                                     double time_t,
                                     double *out_diffused);
 double ontology_cheeger_constant(int *out_buser_inequality_holds);
+void ontology_rank_page_diagnostic(const double *raw_fiber_counts,
+                                   RankPageDiagnostic *out_diagnostic);
+void ontology_modal_closure_diagnostic(uint32_t sub_a,
+                                       uint32_t sub_b,
+                                       uint32_t *out_intermediate,
+                                       uint32_t *out_target,
+                                       int *out_closure_matches);
+/* Deprecated source aliases; these diagnostics do not construct a spectral
+ * sequence or a Quillen model-category factorization. */
 void ontology_spectral_sequence(const double *raw_fiber_counts,
                                 SpectralSequenceState *out_spectral);
 void ontology_quillen_factorize(uint32_t sub_a,

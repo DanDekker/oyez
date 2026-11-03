@@ -111,6 +111,10 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
     {ONTO_NUCLEAR_FUSION, "nuclear-fusion", "Plasma Physics, Tokamaks & Advanced Fission", BIT(ONTO_ENERGY) | BIT(ONTO_SCIENCE), 0u, 0u},
 };
 
+static const OntologyNode g_no_unique_node = {
+    ONTO_NONE, "none", "No Unique Ontology Bound", 0u, 0u, 0u
+};
+
 static pthread_once_t g_ontology_once = PTHREAD_ONCE_INIT;
 static int8_t g_mobius[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static uint32_t g_mobius_tv = 0u;
@@ -124,7 +128,8 @@ static double g_lawvere_dist[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static double g_leinster_sim[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static double g_leinster_weight[ONTOLOGY_NODE_COUNT];
 static double g_leinster_magnitude = 0.0;
-static OntologyNodeId g_join_table[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static uint32_t g_minimal_upper_bounds[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static uint32_t g_maximal_lower_bounds[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static uint32_t g_node_rank[ONTOLOGY_NODE_COUNT];
 static double g_cheeger_constant = 0.0;
 static int g_cheeger_buser_holds = 0;
@@ -457,23 +462,35 @@ static void ontology_init_once(void) {
     g_leinster_magnitude += g_leinster_weight[u];
   }
 
-  /* Precompute O(1) Lattice Join table u v v and categorical height/rank p = rank(u) in {0..5} */
+  /* Precompute the exact extremal bounds of every pair.  The ontology is a
+   * finite poset, not a lattice: some pairs have several minimal upper bounds,
+   * and many have no (or several) maximal lower bounds. */
   for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
     g_node_rank[a] = 0u;
     for(uint32_t b = 0; b < ONTOLOGY_NODE_COUNT; ++b) {
-      uint32_t common = g_ontology[a].upward_mask & g_ontology[b].upward_mask;
-      OntologyNodeId best = ONTO_ROOT;
-      uint32_t best_ideal = 0xFFFFFFFFu;
-      while(common) {
-        uint32_t c = ctz64((uint64_t)common);
-        uint32_t sz = popcnt64((uint64_t)g_ontology[c].downward_mask);
-        if(sz < best_ideal) {
-          best_ideal = sz;
-          best = (OntologyNodeId)c;
+      uint32_t common_up = g_ontology[a].upward_mask & g_ontology[b].upward_mask;
+      uint32_t minimal = 0u;
+      uint32_t scan = common_up;
+      while(scan) {
+        uint32_t c = ctz64((uint64_t)scan);
+        if((g_ontology[c].downward_mask & common_up & ~BIT(c)) == 0u) {
+          minimal |= BIT(c);
         }
-        common &= (common - 1u);
+        scan &= (scan - 1u);
       }
-      g_join_table[a][b] = best;
+      g_minimal_upper_bounds[a][b] = minimal;
+
+      uint32_t common_down = g_ontology[a].downward_mask & g_ontology[b].downward_mask;
+      uint32_t maximal = 0u;
+      scan = common_down;
+      while(scan) {
+        uint32_t c = ctz64((uint64_t)scan);
+        if((g_ontology[c].upward_mask & common_down & ~BIT(c)) == 0u) {
+          maximal |= BIT(c);
+        }
+        scan &= (scan - 1u);
+      }
+      g_maximal_lower_bounds[a][b] = maximal;
     }
   }
   for(int pass = 0; pass < 6; ++pass) {
@@ -529,11 +546,19 @@ static void ontology_init_once(void) {
   g_cheeger_buser_holds = (g_cheeger_constant >= lower_bound - 1e-9 &&
                            g_cheeger_constant <= upper_bound + 1e-9) ? 1 : 0;
 
-  /* Precompute Symmetric Cospan Geodesic Metric g_sym_lawvere_dist[u][v] via Kleene Star */
+  /* Symmetric cospan distance: minimize through every common upper bound,
+   * rather than selecting an arbitrary one when the pair has several. */
   for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
     for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
-      uint32_t j = (uint32_t)g_join_table[u][v];
-      g_sym_lawvere_dist[u][v] = g_lawvere_dist[u][j] + g_lawvere_dist[v][j];
+      double best = 1e9;
+      uint32_t common_up = g_ontology[u].upward_mask & g_ontology[v].upward_mask;
+      while(common_up) {
+        uint32_t w = ctz64((uint64_t)common_up);
+        common_up &= (common_up - 1u);
+        double candidate = g_lawvere_dist[u][w] + g_lawvere_dist[v][w];
+        if(candidate < best) best = candidate;
+      }
+      g_sym_lawvere_dist[u][v] = best;
     }
   }
   for(uint32_t k = 0; k < ONTOLOGY_NODE_COUNT; ++k) {
@@ -671,6 +696,7 @@ int weather_severity_from_slug(const char *slug, WeatherSeverity *out) {
 
 const OntologyNode *ontology_node(OntologyNodeId id) {
   ontology_init();
+  if(id == ONTO_NONE) return &g_no_unique_node;
   if((unsigned)id >= ONTOLOGY_NODE_COUNT) return &g_ontology[ONTO_ROOT];
   return &g_ontology[id];
 }
@@ -715,41 +741,98 @@ uint32_t ontology_downward_closure(uint32_t mask) {
   return out;
 }
 
-OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b) {
+uint32_t ontology_minimal_upper_bounds(OntologyNodeId a, OntologyNodeId b) {
   ontology_init();
-  if((unsigned)a >= ONTOLOGY_NODE_COUNT || (unsigned)b >= ONTOLOGY_NODE_COUNT) return ONTO_ROOT;
-  uint32_t common = g_ontology[a].upward_mask & g_ontology[b].upward_mask;
-  /* Minimal element in common upper bounds: node u in common whose downward_mask & common == {u} */
-  uint32_t scan = common;
-  OntologyNodeId best = ONTO_ROOT;
-  uint32_t best_up_size = 999u;
-  while(scan) {
-    uint32_t u = ctz64((uint64_t)scan);
-    uint32_t up_cnt = popcnt64((uint64_t)g_ontology[u].upward_mask);
-    if(up_cnt > best_up_size || best == ONTO_ROOT) {
-      best = (OntologyNodeId)u;
-      best_up_size = up_cnt;
-    }
-    scan &= (scan - 1u);
-  }
-  return best;
+  if((unsigned)a >= ONTOLOGY_NODE_COUNT || (unsigned)b >= ONTOLOGY_NODE_COUNT) return 0u;
+  return g_minimal_upper_bounds[a][b];
+}
+
+uint32_t ontology_maximal_lower_bounds(OntologyNodeId a, OntologyNodeId b) {
+  ontology_init();
+  if((unsigned)a >= ONTOLOGY_NODE_COUNT || (unsigned)b >= ONTOLOGY_NODE_COUNT) return 0u;
+  return g_maximal_lower_bounds[a][b];
+}
+
+int ontology_unique_join(OntologyNodeId a, OntologyNodeId b, OntologyNodeId *out_join) {
+  if(!out_join) return -1;
+  uint32_t bounds = ontology_minimal_upper_bounds(a, b);
+  if(bounds == 0u || (bounds & (bounds - 1u)) != 0u) return -1;
+  *out_join = (OntologyNodeId)ctz64((uint64_t)bounds);
+  return 0;
+}
+
+int ontology_unique_meet(OntologyNodeId a, OntologyNodeId b, OntologyNodeId *out_meet) {
+  if(!out_meet) return -1;
+  uint32_t bounds = ontology_maximal_lower_bounds(a, b);
+  if(bounds == 0u || (bounds & (bounds - 1u)) != 0u) return -1;
+  *out_meet = (OntologyNodeId)ctz64((uint64_t)bounds);
+  return 0;
+}
+
+OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b) {
+  OntologyNodeId unique = ONTO_NONE;
+  return ontology_unique_join(a, b, &unique) == 0 ? unique : ONTO_NONE;
 }
 
 uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b) {
+  return ontology_maximal_lower_bounds(a, b);
+}
+
+int ontology_is_ideal(uint32_t mask) {
+  return ontology_downward_closure(mask) == mask;
+}
+
+uint32_t ontology_ideal_join(uint32_t ideal_a, uint32_t ideal_b) {
+  return ontology_downward_closure(ideal_a | ideal_b);
+}
+
+uint32_t ontology_ideal_meet(uint32_t ideal_a, uint32_t ideal_b) {
+  return ontology_downward_closure(ideal_a) & ontology_downward_closure(ideal_b);
+}
+
+void ontology_order_audit(OntologyOrderAudit *out_audit) {
+  if(!out_audit) return;
   ontology_init();
-  if((unsigned)a >= ONTOLOGY_NODE_COUNT || (unsigned)b >= ONTOLOGY_NODE_COUNT) return 0u;
-  uint32_t common = g_ontology[a].downward_mask & g_ontology[b].downward_mask;
-  uint32_t maximal = 0u;
-  uint32_t scan = common;
-  while(scan) {
-    uint32_t l = ctz64((uint64_t)scan);
-    uint32_t strict_up = g_ontology[l].upward_mask & ~BIT(l);
-    if((strict_up & common) == 0u) {
-      maximal |= BIT(l);
+  memset(out_audit, 0, sizeof(*out_audit));
+  out_audit->object_count = ONTOLOGY_NODE_COUNT;
+  out_audit->is_reflexive = 1;
+  out_audit->is_antisymmetric = 1;
+  out_audit->is_transitive = 1;
+
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    if((g_ontology[a].upward_mask & BIT(a)) == 0u) out_audit->is_reflexive = 0;
+    for(uint32_t b = 0; b < ONTOLOGY_NODE_COUNT; ++b) {
+      int a_le_b = (g_ontology[a].upward_mask & BIT(b)) != 0u;
+      if(a_le_b) out_audit->morphism_count++;
+      if(a != b && a_le_b && (g_ontology[b].upward_mask & BIT(a)) != 0u) {
+        out_audit->is_antisymmetric = 0;
+      }
+      for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+        if(a_le_b && (g_ontology[b].upward_mask & BIT(c)) != 0u &&
+           (g_ontology[a].upward_mask & BIT(c)) == 0u) {
+          out_audit->is_transitive = 0;
+        }
+      }
     }
-    scan &= (scan - 1u);
   }
-  return maximal;
+
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    for(uint32_t b = a; b < ONTOLOGY_NODE_COUNT; ++b) {
+      out_audit->pair_count++;
+      uint32_t joins = popcnt64((uint64_t)g_minimal_upper_bounds[a][b]);
+      uint32_t meets = popcnt64((uint64_t)g_maximal_lower_bounds[a][b]);
+      if(joins == 0u) out_audit->missing_join_pairs++;
+      else if(joins == 1u) out_audit->unique_join_pairs++;
+      else out_audit->ambiguous_join_pairs++;
+      if(meets == 0u) out_audit->missing_meet_pairs++;
+      else if(meets == 1u) out_audit->unique_meet_pairs++;
+      else out_audit->ambiguous_meet_pairs++;
+    }
+  }
+  out_audit->is_lattice = out_audit->is_reflexive && out_audit->is_antisymmetric &&
+                          out_audit->is_transitive &&
+                          out_audit->unique_join_pairs == out_audit->pair_count &&
+                          out_audit->unique_meet_pairs == out_audit->pair_count;
 }
 
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores) {
@@ -779,12 +862,10 @@ void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores)
     int any = 0;
     while(filter) {
       uint32_t sup = ctz64((uint64_t)filter);
-      if(sup != ONTO_ROOT) {
-        double v = raw_scores[sup];
-        if(!any || v < limit_val) {
-          limit_val = v;
-          any = 1;
-        }
+      double v = raw_scores[sup];
+      if(!any || v < limit_val) {
+        limit_val = v;
+        any = 1;
       }
       filter &= (filter - 1u);
     }
@@ -836,7 +917,10 @@ double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b) {
 
 double ontology_lawvere_distance(uint32_t mask_from, uint32_t mask_to) {
   ontology_init();
-  if(mask_from == 0u || mask_to == 0u) return 0.0;
+  /* The directed Hausdorff convention has sup(empty) = 0 and
+   * inf(empty) = +infinity. */
+  if(mask_from == 0u) return 0.0;
+  if(mask_to == 0u) return INFINITY;
   /* Directed Hausdorff-Lawvere Quasimetric over the Cost Quantale ([0, inf], >=, +, 0):
    *   d_L(A, B) = sup_{u in A} inf_{v in B} d_L(u, v)
    * Reduces to g_lawvere_dist[u][v] on singletons (1u << u, 1u << v) and
@@ -1124,12 +1208,18 @@ uint32_t ontology_universal_quantifier(uint32_t sub_mask_s) {
   return forall_mask;
 }
 
-void ontology_subobject_classifier_omega(uint32_t sub_mask_a, double *out_omega_truth) {
-  /* Presheaf Topos Subobject Classifier Characteristic Map chi_A: 1 -> Omega:
-   * In Set^{C^op}, the truth value Omega(c) of a subobject A at stage c is the fraction
-   * of the principal sieve Y(c) = v(c) that lies in the downward-closed sieve v(A),
-   * weighted by the positive Leinster similarity kernel Z(u, c).
-   * Satisfies chi_A(c) == 1.0 iff c in v(A), and chi_A(c) > 0.0 iff v(c) intersects v(A). */
+uint32_t ontology_subobject_classifier_sieve(uint32_t sub_mask_a, OntologyNodeId stage) {
+  /* In Set^{C^op}, chi_A(c) is the sieve of arrows into c that factor
+   * through the downward-closed subobject A.  A sieve is represented exactly
+   * by its object mask. */
+  ontology_init();
+  if((unsigned)stage >= ONTOLOGY_NODE_COUNT) return 0u;
+  return g_ontology[stage].downward_mask & ontology_downward_closure(sub_mask_a);
+}
+
+void ontology_subobject_classifier_score(uint32_t sub_mask_a, double *out_omega_truth) {
+  /* Scalar visualization of the exact characteristic sieve, weighted by the
+   * positive Leinster similarity kernel.  This is not itself Omega(c). */
   if(!out_omega_truth) return;
   ontology_init();
   uint32_t da = ontology_downward_closure(sub_mask_a);
@@ -1156,6 +1246,10 @@ void ontology_subobject_classifier_omega(uint32_t sub_mask_a, double *out_omega_
     }
     out_omega_truth[c] = den > 0.0 ? (num / den) : 0.0;
   }
+}
+
+void ontology_subobject_classifier_omega(uint32_t sub_mask_a, double *out_omega_truth) {
+  ontology_subobject_classifier_score(sub_mask_a, out_omega_truth);
 }
 
 double ontology_information_specificity(uint32_t mask) {
@@ -1580,84 +1674,103 @@ void ontology_adjunction_monad(const double *raw_fiber_counts,
   out_state->kleisli_entropy = ent;
 }
 
-void ontology_day_convolution(const double *presheaf_f,
-                              const double *presheaf_g,
-                              double *out_day_fg) {
-  /* Brian Day's Monoidal Convolution Tensor Product (Day 1970) over (C, v, ONTO_ROOT):
-   *   (F *_Day G)(c) = int^{u, v in C} C(c, u v v) (x) F(u) (x) G(v)
-   *                  = sup_{u, v in C} (F(u) + G(v) - d_L(c, u v v)). */
-  if(!presheaf_f || !presheaf_g || !out_day_fg) return;
+static double ontology_ideal_supremum(const double *values, uint32_t ideal) {
+  double supremum = -INFINITY;
+  while(ideal) {
+    uint32_t u = ctz64((uint64_t)ideal);
+    ideal &= (ideal - 1u);
+    if(values[u] > supremum) supremum = values[u];
+  }
+  return supremum;
+}
+
+void ontology_cocone_convolution(const double *presheaf_f,
+                                 const double *presheaf_g,
+                                 double *out_fg) {
+  /* Convolution for the symmetric cocone promultiplication
+   *   P(c; u, v) = 0 when u <= c and v <= c, and -infinity otherwise.
+   * Hence (F * G)(c) = sup_{u,v <= c}(F(u) + G(v)).  It is associative
+   * and commutative on every poset.  On unrestricted arrays there is no
+   * global unit; on isotone max-plus sections, the constant-zero section is a
+   * unit.  Since C has no bottom, that unit is not representable by an object. */
+  if(!presheaf_f || !presheaf_g || !out_fg) return;
   ontology_init();
-  double max_fg_by_join[ONTOLOGY_NODE_COUNT];
-  for(uint32_t j = 0; j < ONTOLOGY_NODE_COUNT; ++j) max_fg_by_join[j] = -1e18;
-  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
-    double fu = presheaf_f[u];
-    for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
-      OntologyNodeId j = g_join_table[u][v];
-      double s = fu + presheaf_g[v];
-      if(s > max_fg_by_join[j]) max_fg_by_join[j] = s;
-    }
+  double f_sup[ONTOLOGY_NODE_COUNT];
+  double g_sup[ONTOLOGY_NODE_COUNT];
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t ideal = g_ontology[c].downward_mask;
+    f_sup[c] = ontology_ideal_supremum(presheaf_f, ideal);
+    g_sup[c] = ontology_ideal_supremum(presheaf_g, ideal);
   }
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-    double sup_val = -1e18;
-    for(uint32_t j = 0; j < ONTOLOGY_NODE_COUNT; ++j) {
-      if(max_fg_by_join[j] <= -1e17) continue;
-      double cand = max_fg_by_join[j] - g_lawvere_dist[c][j];
-      if(cand > sup_val) sup_val = cand;
-    }
-    out_day_fg[c] = sup_val > -1e17 ? sup_val : 0.0;
+    out_fg[c] = f_sup[c] + g_sup[c];
   }
 }
 
-void ontology_day_internal_hom(const double *presheaf_g,
-                               const double *presheaf_h,
-                               double *out_hom_gh) {
-  /* Day Convolution Closed Monoidal Internal Hom Presheaf [G, H]_Day:
-   *   [G, H]_Day(u) = int_{v, c in C} [C(c, u v v), [G(v), H(c)]]
-   *                 = inf_{v, c in C} (H(c) - G(v) + d_L(c, u v v)). */
+void ontology_cocone_internal_hom(const double *presheaf_g,
+                                  const double *presheaf_h,
+                                  double *out_hom_gh) {
+  /* Right residual of cocone convolution:
+   *   [G,H](u) = inf_{c >= u}(H(c) - sup_{v <= c} G(v)). */
   if(!presheaf_g || !presheaf_h || !out_hom_gh) return;
   ontology_init();
-  double min_hc_by_join[ONTOLOGY_NODE_COUNT];
-  for(uint32_t j = 0; j < ONTOLOGY_NODE_COUNT; ++j) {
-    double inf_c = 1e18;
-    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-      double cand = presheaf_h[c] + g_lawvere_dist[c][j];
-      if(cand < inf_c) inf_c = cand;
-    }
-    min_hc_by_join[j] = inf_c;
+  double g_sup[ONTOLOGY_NODE_COUNT];
+  double residual_at_stage[ONTOLOGY_NODE_COUNT];
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    g_sup[c] = ontology_ideal_supremum(presheaf_g, g_ontology[c].downward_mask);
+    residual_at_stage[c] = presheaf_h[c] - g_sup[c];
   }
   for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
-    double inf_val = 1e18;
-    for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
-      OntologyNodeId j = g_join_table[u][v];
-      double cand = min_hc_by_join[j] - presheaf_g[v];
-      if(cand < inf_val) inf_val = cand;
+    double infimum = INFINITY;
+    uint32_t filter = g_ontology[u].upward_mask;
+    while(filter) {
+      uint32_t c = ctz64((uint64_t)filter);
+      filter &= (filter - 1u);
+      double candidate = residual_at_stage[c];
+      if(candidate < infimum) infimum = candidate;
     }
-    out_hom_gh[u] = inf_val < 1e17 ? inf_val : 0.0;
+    out_hom_gh[u] = infimum;
   }
 }
 
-double ontology_day_adjunction_defect(const double *presheaf_f,
-                                      const double *presheaf_g,
-                                      const double *presheaf_h) {
-  /* Verifies the exact Day Convolution Tensor-Hom Adjunction:
-   *   Hom(F *_Day G, H) = inf_c (H(c) - (F *_Day G)(c))
-   *                    == inf_u ([G, H]_Day(u) - F(u)) = Hom(F, [G, H]_Day). */
+double ontology_cocone_adjunction_defect(const double *presheaf_f,
+                                         const double *presheaf_g,
+                                         const double *presheaf_h) {
+  /* Numeric check of Hom(F * G, H) == Hom(F, [G,H]) in the max-plus
+   * preorder, where Hom(X,Y) = inf_c(Y(c) - X(c)). */
   if(!presheaf_f || !presheaf_g || !presheaf_h) return 0.0;
-  double day_fg[ONTOLOGY_NODE_COUNT];
+  double fg[ONTOLOGY_NODE_COUNT];
   double hom_gh[ONTOLOGY_NODE_COUNT];
-  ontology_day_convolution(presheaf_f, presheaf_g, day_fg);
-  ontology_day_internal_hom(presheaf_g, presheaf_h, hom_gh);
-  double lhs = 1e18;
-  double rhs = 1e18;
+  ontology_cocone_convolution(presheaf_f, presheaf_g, fg);
+  ontology_cocone_internal_hom(presheaf_g, presheaf_h, hom_gh);
+  double lhs = INFINITY;
+  double rhs = INFINITY;
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-    double d_l = presheaf_h[c] - day_fg[c];
+    double d_l = presheaf_h[c] - fg[c];
     if(d_l < lhs) lhs = d_l;
     double d_r = hom_gh[c] - presheaf_f[c];
     if(d_r < rhs) rhs = d_r;
   }
   double diff = lhs - rhs;
   return diff < 0.0 ? -diff : diff;
+}
+
+void ontology_day_convolution(const double *presheaf_f,
+                              const double *presheaf_g,
+                              double *out_day_fg) {
+  ontology_cocone_convolution(presheaf_f, presheaf_g, out_day_fg);
+}
+
+void ontology_day_internal_hom(const double *presheaf_g,
+                               const double *presheaf_h,
+                               double *out_hom_gh) {
+  ontology_cocone_internal_hom(presheaf_g, presheaf_h, out_hom_gh);
+}
+
+double ontology_day_adjunction_defect(const double *presheaf_f,
+                                      const double *presheaf_g,
+                                      const double *presheaf_h) {
+  return ontology_cocone_adjunction_defect(presheaf_f, presheaf_g, presheaf_h);
 }
 
 static void normalize_simplex32(const double *raw, double *out_prob) {
@@ -1769,8 +1882,7 @@ void ontology_sinkhorn_optimal_transport(const double *density_p,
   double k_mat[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
   for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
     for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
-      uint32_t j = (uint32_t)g_join_table[u][v];
-      double cospan_d = g_lawvere_dist[u][j] + g_lawvere_dist[v][j];
+      double cospan_d = g_sym_lawvere_dist[u][v];
       c_mat[u][v] = cospan_d;
       k_mat[u][v] = fast_exp_neg(cospan_d * inv_eps);
     }
@@ -1840,12 +1952,13 @@ double ontology_cheeger_constant(int *out_buser_inequality_holds) {
   return g_cheeger_constant;
 }
 
-void ontology_spectral_sequence(const double *raw_fiber_counts,
-                                SpectralSequenceState *out_spectral) {
-  /* Grothendieck-Leray Spectral Sequence (E_r^{p,q}, d_r) of the Rank-Filtered Nerve F_p N(C):
-   * Filters N_k(C) by the categorical height p = rank(u_k) in {0..5} of the top vertex u_k.
-   * Preserves the Euler Characteristic invariant across all pages:
-   *   chi(E_0) == chi(E_1) == chi(E_2) == chi(E_infty) == chi(N(C)) == 1. */
+void ontology_rank_page_diagnostic(const double *raw_fiber_counts,
+                                   RankPageDiagnostic *out_spectral) {
+  /* Experimental page summary of the rank-filtered nerve (historically named
+   * as a Grothendieck-Leray spectral sequence):
+   * Filters N_k(C) by the categorical height p = rank(u_k) in {0..5} of the
+   * top vertex u_k.  The legacy page fields repeat chi(N(C)); page
+   * differentials and derived pages are not constructed. */
   if(!out_spectral) return;
   ontology_init();
   memset(out_spectral, 0, sizeof(*out_spectral));
@@ -1907,27 +2020,45 @@ void ontology_spectral_sequence(const double *raw_fiber_counts,
   out_spectral->differential_nilpotency_defect = 0.0;
 }
 
+void ontology_spectral_sequence(const double *raw_fiber_counts,
+                                SpectralSequenceState *out_spectral) {
+  ontology_rank_page_diagnostic(raw_fiber_counts, out_spectral);
+}
+
+void ontology_modal_closure_diagnostic(uint32_t sub_a,
+                                       uint32_t sub_b,
+                                       uint32_t *out_intermediate,
+                                       uint32_t *out_target,
+                                       int *out_closure_matches) {
+  /* Experimental modal-closure factorization diagnostic (historically named
+   * as a Quillen factorization; no model structure is defined here):
+   * Two subobjects A and B determine the intermediate subobject
+   *   M = (v(A) | v(B)) & j(v(A))
+   * and the inclusions v(A) -> M -> (v(A) | v(B)).  The diagnostic reports
+   * whether j(M) == j(v(A)); it does not assign model-category classes to
+   * those arrows. */
+  ontology_init();
+  uint32_t da = ontology_downward_closure(sub_a);
+  uint32_t db = ontology_downward_closure(sub_b);
+  uint32_t ja = ontology_lawvere_tierney_sheafify(da);
+  uint32_t target = da | db;
+  uint32_t m_inter = target & ja;
+  uint32_t jm = ontology_lawvere_tierney_sheafify(m_inter);
+  if(out_intermediate) *out_intermediate = m_inter;
+  if(out_target) *out_target = target;
+  if(out_closure_matches) *out_closure_matches = (jm == ja && (m_inter & da) == da) ? 1 : 0;
+}
+
 void ontology_quillen_factorize(uint32_t sub_a,
                                 uint32_t sub_b,
                                 uint32_t *out_acyclic_cofib_m,
                                 uint32_t *out_fibration_target,
                                 int *out_weak_equiv_holds) {
-  /* Quillen Model Category Factorization in the Lawvere-Tierney Topos (Set^{C^op}, j):
-   * Any subobject morphism A -> B factors canonically through the intermediate subobject
-   *   M = (v(A) | v(B)) & j(v(A))
-   * as:
-   *   v(A) --(acyclic cofibration ~)-> M --(j-fibration)-> (v(A) | v(B))
-   * where j(M) == j(v(A)) holds identically by idempotence and meet-preservation of j. */
-  ontology_init();
-  uint32_t da = ontology_downward_closure(sub_a);
-  uint32_t db = ontology_downward_closure(sub_b);
-  uint32_t ja = ontology_lawvere_tierney_sheafify(da);
-  uint32_t fib_target = da | db;
-  uint32_t m_inter = fib_target & ja;
-  uint32_t jm = ontology_lawvere_tierney_sheafify(m_inter);
-  if(out_acyclic_cofib_m) *out_acyclic_cofib_m = m_inter;
-  if(out_fibration_target) *out_fibration_target = fib_target;
-  if(out_weak_equiv_holds) *out_weak_equiv_holds = (jm == ja && (m_inter & da) == da) ? 1 : 0;
+  ontology_modal_closure_diagnostic(sub_a,
+                                    sub_b,
+                                    out_acyclic_cofib_m,
+                                    out_fibration_target,
+                                    out_weak_equiv_holds);
 }
 
 void ontology_polynomial_functor_eval(const double *fiber_x,

@@ -6,6 +6,7 @@
 #include "wire.h"
 
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2303,7 +2304,7 @@ void engine_topos_state(const OyezEngine *engine,
                          (out_topos->ideal_a & out_topos->lawvere_boundary_b);
   out_topos->leibniz_rule_holds = (out_topos->lawvere_boundary_meet_ab == leibniz_rhs) ? 1 : 0;
   out_topos->universal_quantifier_ab = ontology_universal_quantifier(out_topos->ideal_a | out_topos->ideal_b);
-  ontology_subobject_classifier_omega(mask_a, out_topos->omega_truth_a);
+  ontology_subobject_classifier_score(mask_a, out_topos->classifier_score_a);
 
   double f_src[ONTOLOGY_NODE_COUNT];
   double f_dst[ONTOLOGY_NODE_COUNT];
@@ -2348,16 +2349,19 @@ void engine_topos_state(const OyezEngine *engine,
   double lim_dual = ontology_weighted_limit(f_src, f_dual);
   out_topos->tensor_hom_adjunction_defect = fabs((k_scalar - out_topos->weighted_colimit) - lim_dual);
 
-  /* Day Convolution, Day Internal Hom, and Day Tensor-Hom Adjunction Defect */
-  ontology_day_convolution(f_src, f_dst, out_topos->day_convolution_fg);
-  ontology_day_internal_hom(f_dst, out_topos->coequalizer_quotient, out_topos->day_internal_hom_gh);
-  out_topos->day_adjunction_defect = ontology_day_adjunction_defect(f_src, f_dst, out_topos->coequalizer_quotient);
+  /* Cocone semipromonoidal convolution and its exact right residual.
+   * ToposState retains its historical field names for source compatibility. */
+  ontology_cocone_convolution(f_src, f_dst, out_topos->cocone_convolution_fg);
+  ontology_cocone_internal_hom(f_dst, out_topos->coequalizer_quotient, out_topos->cocone_internal_hom_gh);
+  out_topos->cocone_adjunction_defect =
+      ontology_cocone_adjunction_defect(f_src, f_dst, out_topos->coequalizer_quotient);
 
-  /* Quillen Model Category Factorization A ~-> M ->> (A v B) */
-  ontology_quillen_factorize(mask_a, mask_b,
-                             &out_topos->quillen_acyclic_cofibration_m,
-                             &out_topos->quillen_fibration_target,
-                             &out_topos->quillen_weak_equivalence_holds);
+  /* Experimental modal-closure factorization diagnostic.  Historical field
+   * names are retained; no model-category structure is asserted here. */
+  ontology_modal_closure_diagnostic(mask_a, mask_b,
+                                    &out_topos->modal_intermediate,
+                                    &out_topos->modal_factorization_target,
+                                    &out_topos->modal_closure_matches);
 
   /* Spivak Polynomial Endofunctor P_C(X) & Dependent Co-Design Lens */
   ontology_polynomial_functor_eval(f_src, out_topos->polynomial_functor_px, out_topos->polynomial_codesign_lens);
@@ -2368,8 +2372,9 @@ void engine_topos_state(const OyezEngine *engine,
   /* Entropic Sinkhorn-Knopp Optimal Transport, Debiased Sinkhorn Divergence & Fisher-Rao Geodesic */
   ontology_sinkhorn_optimal_transport(f_src, f_dst, 0.75, &out_topos->sinkhorn_ot);
 
-  /* Grothendieck-Leray Spectral Sequence (E_r^{p,q}, d_r) of Rank-Filtered Nerve F_p N(C) */
-  ontology_spectral_sequence(f_src, &out_topos->spectral_seq);
+  /* Experimental rank-filtered page summary.  This is not a constructed
+   * Grothendieck-Leray spectral sequence. */
+  ontology_rank_page_diagnostic(f_src, &out_topos->rank_page_diagnostics);
 
   /* Simplicial Gauss-Bonnet-Chern, Forman-Ricci, Ollivier-Ricci Curvature & Discrete Ricci Flow */
   ontology_ricci_curvature(f_src, &out_topos->ricci_curv);
@@ -3313,7 +3318,7 @@ void engine_appliance_state(const OyezEngine *engine,
       out_app->lsh_and_dedup_bytes +
       out_app->query_cache_bytes;
 
-  /* 2. 12-Theorem Mathematical & Topos Self-Verification */
+  /* 2. Twelve exact or numerically bounded invariant checks. */
   double raw_f[ONTOLOGY_NODE_COUNT];
   double clos_f[ONTOLOGY_NODE_COUNT];
   for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
@@ -3331,6 +3336,25 @@ void engine_appliance_state(const OyezEngine *engine,
 
   ToposState topos;
   engine_topos_state(engine, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
+
+  OntologyOrderAudit order_audit;
+  ontology_order_audit(&order_audit);
+  uint32_t ideal_ai = ontology_downward_closure(1u << ONTO_AI);
+  uint32_t ideal_tech = ontology_downward_closure(1u << ONTO_TECHNOLOGY);
+  uint32_t ideal_join = ontology_ideal_join(ideal_ai, ideal_tech);
+  uint32_t ideal_meet = ontology_ideal_meet(ideal_ai, ideal_tech);
+  int sieve_naturality_holds = 1;
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT && sieve_naturality_holds; ++c) {
+    uint32_t sieve_c = ontology_subobject_classifier_sieve(ideal_ai, (OntologyNodeId)c);
+    for(uint32_t d = 0; d < ONTOLOGY_NODE_COUNT; ++d) {
+      if(!ontology_has_morphism((OntologyNodeId)d, (OntologyNodeId)c)) continue;
+      uint32_t restricted = sieve_c & ontology_node((OntologyNodeId)d)->downward_mask;
+      if(restricted != ontology_subobject_classifier_sieve(ideal_ai, (OntologyNodeId)d)) {
+        sieve_naturality_holds = 0;
+        break;
+      }
+    }
+  }
 
   size_t severe_wx_cnt =
       bitset_popcount(&engine->by_weather_severity[WEATHER_WARNING]) +
@@ -3351,10 +3375,10 @@ void engine_appliance_state(const OyezEngine *engine,
   if(monad.zig_zag_triangle_defect < 1e-10 &&
      monad.beck_coequalizer_defect < 1e-10 &&
      monad.isbell_adjunction_defect < 1e-10) passed++;                                      /* 4. Kan/Beck/Isbell Monadicity */
-  if(topos.spectral_seq.euler_e0 == 1 && topos.spectral_seq.euler_e_inf == 1 &&
-     topos.spectral_seq.differential_nilpotency_defect < 1e-11) passed++;                   /* 5. Grothendieck Spectral Sequence */
-  if(topos.day_adjunction_defect < 1e-10 &&
-     topos.tensor_hom_adjunction_defect < 1e-10) passed++;                                  /* 6. Day & Weighted Tensor-Hom Adjunction */
+  if(order_audit.is_reflexive && order_audit.is_antisymmetric && order_audit.is_transitive &&
+     !order_audit.is_lattice && order_audit.pair_count == 528u) passed++;                  /* 5. Finite Poset Order Audit */
+  if(topos.cocone_adjunction_defect < 1e-10 &&
+     topos.tensor_hom_adjunction_defect < 1e-10) passed++;                                  /* 6. Cocone & Weighted Residuation */
   if(topos.sinkhorn_ot.cheeger_buser_holds == 1 &&
      topos.sinkhorn_ot.marginal_defect_l1 < 1e-6) passed++;                                 /* 7. Cheeger-Buser & Sinkhorn OT */
   if(topos.ricci_curv.gauss_bonnet_defect < 1e-10 &&
@@ -3364,22 +3388,42 @@ void engine_appliance_state(const OyezEngine *engine,
      topos.zeta_tropical.tropical_idempotence_defect < 1e-10) passed++;                     /* 9. Ihara-Bass & Tropical Hull */
   if(topos.rota_baxter.rota_baxter_identity_defect < 1e-10 &&
      topos.rota_baxter.spitzer_birkhoff_defect < 1e-10) passed++;                           /* 10. Rota-Baxter & Spitzer-Birkhoff */
-  if(topos.quillen_weak_equivalence_holds == 1 &&
-     topos.leibniz_rule_holds == 1) passed++;                                               /* 11. Quillen & Bi-Heyting Leibniz */
+  if(ontology_is_ideal(ideal_join) && ontology_is_ideal(ideal_meet) &&
+     topos.leibniz_rule_holds == 1 && sieve_naturality_holds) passed++;                     /* 11. Ideal Lattice & Sieve Naturality */
   if(out_app->weather_physics.lyapunov_max > 0.1 &&
      out_app->weather_physics.kaplan_yorke_dim > 2.0 &&
      out_app->weather_physics.kaplan_yorke_dim < 2.2) passed++;                             /* 12. Lorenz-63 Strange Attractor */
 
-  double max_def = cohom.cochain_exactness_norm;
-  if(monad.zig_zag_triangle_defect > max_def) max_def = monad.zig_zag_triangle_defect;
-  if(topos.day_adjunction_defect > max_def) max_def = topos.day_adjunction_defect;
-  if(topos.ricci_curv.gauss_bonnet_defect > max_def) max_def = topos.ricci_curv.gauss_bonnet_defect;
-  if(topos.zeta_tropical.tropical_idempotence_defect > max_def) max_def = topos.zeta_tropical.tropical_idempotence_defect;
-  if(topos.rota_baxter.rota_baxter_identity_defect > max_def) max_def = topos.rota_baxter.rota_baxter_identity_defect;
+  const double checked_residuals[] = {
+    fabs(leinster_mag - weight_sum),
+    cohom.cochain_exactness_norm,
+    monad.zig_zag_triangle_defect,
+    monad.beck_coequalizer_defect,
+    monad.isbell_adjunction_defect,
+    topos.cocone_adjunction_defect,
+    topos.tensor_hom_adjunction_defect,
+    topos.sinkhorn_ot.marginal_defect_l1,
+    topos.ricci_curv.gauss_bonnet_defect,
+    topos.ricci_curv.ricci_flow_volume_defect,
+    topos.zeta_tropical.ihara_det_at_zero_defect,
+    topos.zeta_tropical.ihara_det_at_one_defect,
+    topos.zeta_tropical.tropical_idempotence_defect,
+    topos.rota_baxter.rota_baxter_identity_defect,
+    topos.rota_baxter.spitzer_birkhoff_defect
+  };
+  double max_residual = 0.0;
+  for(size_t i = 0; i < sizeof(checked_residuals) / sizeof(checked_residuals[0]); ++i) {
+    double residual = fabs(checked_residuals[i]);
+    if(!isfinite(residual)) {
+      max_residual = DBL_MAX;
+      break;
+    }
+    if(residual > max_residual) max_residual = residual;
+  }
 
-  out_app->theorems_verified_count = passed;
-  out_app->theorems_total_count = 12u;
-  out_app->all_theorems_verified = (passed == 12u) ? 1 : 0;
+  out_app->checks_passed = passed;
+  out_app->checks_total = 12u;
+  out_app->all_checks_passed = (passed == 12u) ? 1 : 0;
   out_app->leinster_magnitude = leinster_mag;
   out_app->euler_characteristic = cohom.euler_characteristic;
   out_app->fiedler_eigenvalue = cohom.fiedler_eigenvalue;
@@ -3389,9 +3433,9 @@ void engine_appliance_state(const OyezEngine *engine,
   out_app->tropical_eigenvalue = topos.zeta_tropical.tropical_eigenvalue;
   out_app->sinkhorn_divergence = topos.sinkhorn_ot.sinkhorn_divergence;
   out_app->fisher_rao_geodesic = topos.sinkhorn_ot.fisher_rao_geodesic;
-  out_app->day_adjunction_defect = topos.day_adjunction_defect;
+  out_app->cocone_adjunction_defect = topos.cocone_adjunction_defect;
   out_app->rota_baxter_defect = topos.rota_baxter.rota_baxter_identity_defect;
-  out_app->max_numerical_defect = max_def;
+  out_app->max_numerical_residual = max_residual;
 
   /* 3. Cross-Domain Intelligence Situation Room */
   out_app->cyber_strategic_articles =

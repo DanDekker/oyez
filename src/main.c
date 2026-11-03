@@ -185,8 +185,8 @@ static int run_bench(void) {
   ToposState topos;
   engine_topos_state(&eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
   uint64_t po1 = monotonic_ns();
-  printf("6. Pushout, Fibration, Temporal Sheaf, Topos Bi-Heyting, Sinkhorn OT & Spectral Seq:\n");
-  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, operads=%zu, W_eps=%.3f, S_eps=%.3f, d_FR=%.3f, day_err=%.1e)\n",
+  printf("6. Finite Poset, Ideal Algebra, Cocone Convolution, Transport & Rank Diagnostics:\n");
+  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, operads=%zu, W_eps=%.3f, S_eps=%.3f, d_FR=%.3f, cocone_resid=%.1e)\n",
          (double)(po1 - po0) / 1e6,
          po_cnt,
          fib_cnt,
@@ -194,7 +194,7 @@ static int run_bench(void) {
          topos.sinkhorn_ot.entropic_wasserstein,
          topos.sinkhorn_ot.sinkhorn_divergence,
          topos.sinkhorn_ot.fisher_rao_geodesic,
-         topos.day_adjunction_defect);
+         topos.cocone_adjunction_defect);
 
   uint64_t wx0 = monotonic_ns();
   WeatherPhysicsState phys;
@@ -225,14 +225,14 @@ static int run_bench(void) {
   EngineApplianceState app;
   engine_appliance_state(&eng, &app);
   uint64_t ap1 = monotonic_ns();
-  printf("9. Consolidated One-Machine Appliance Self-Verification & Memory Audit:\n");
-  printf("   Total Time:  %.3f ms (theorems=%u/%u, resident=%.2f MB, arena=%.1f KB, max_defect=%.2e)\n",
+  printf("9. Consolidated One-Machine Appliance Consistency & Memory Audit:\n");
+  printf("   Total Time:  %.3f ms (checks=%u/%u, resident=%.2f MB, arena=%.1f KB, max_residual=%.2e)\n",
          (double)(ap1 - ap0) / 1e6,
-         app.theorems_verified_count,
-         app.theorems_total_count,
+         app.checks_passed,
+         app.checks_total,
          (double)app.total_resident_bytes / (1024.0 * 1024.0),
          (double)app.arena_bytes_used / 1024.0,
-         app.max_numerical_defect);
+         app.max_numerical_residual);
 
   m1_tokenizer_free(&m1);
   engine_free(&eng);
@@ -337,6 +337,7 @@ int main(int argc, char **argv) {
     EngineApplianceState app;
     engine_appliance_state(&eng, &app);
     printf("feeds: %zu\narticles: %zu\ninverted_terms: %zu\nm1_vocab: %u\nm1_sha256: %s\n"
+           "consistency_checks: %u/%u (%s)\nmax_numerical_residual: %.3e\n"
            "theorems_verified: %u/%u (%s)\nmax_numerical_defect: %.3e\n"
            "resident_memory_bytes: %zu (%.2f MB)\narena_used_bytes: %zu / %zu (%zu blocks)\n"
            "inverted_index_bytes: %zu\nbitset_fiber_bytes: %zu\nlsh_and_dedup_bytes: %zu\n"
@@ -346,10 +347,14 @@ int main(int argc, char **argv) {
            eng.inv_count,
            m1_tokenizer_vocab_size(&tok),
            tok.sha256,
-           app.theorems_verified_count,
-           app.theorems_total_count,
-           app.all_theorems_verified ? "VERIFIED" : "DEGRADED",
-           app.max_numerical_defect,
+           app.checks_passed,
+           app.checks_total,
+           app.all_checks_passed ? "PASS" : "DEGRADED",
+           app.max_numerical_residual,
+           app.checks_passed,
+           app.checks_total,
+           app.all_checks_passed ? "PASS" : "DEGRADED",
+           app.max_numerical_residual,
            app.total_resident_bytes,
            (double)app.total_resident_bytes / (1024.0 * 1024.0),
            app.arena_bytes_used,
@@ -397,11 +402,13 @@ int main(int argc, char **argv) {
            (double)app.arena_bytes_capacity / 1024.0,
            (double)app.inverted_index_bytes / 1024.0,
            (double)app.bitset_fiber_bytes / 1024.0);
-    printf("  Self-Verification: \033[1;32m%u/%u THEOREMS PASS\033[0m (Max Defect: %.2e | Gen: %llu)\n",
-           app.theorems_verified_count, app.theorems_total_count,
-           app.max_numerical_defect, (unsigned long long)app.index_generation);
+    printf("  Consistency Audit: %s%u/%u CHECKS %s\033[0m (Max Residual: %.2e | Gen: %llu)\n",
+           app.all_checks_passed ? "\033[1;32m" : "\033[1;31m",
+           app.checks_passed, app.checks_total,
+           app.all_checks_passed ? "PASS" : "DEGRADED",
+           app.max_numerical_residual, (unsigned long long)app.index_generation);
     printf("------------------------------------------------------------------------\n");
-    printf("  \033[1;35m[Homological, Bi-Heyting Topos & Enriched Category Invariants]\033[0m\n");
+    printf("  \033[1;35m[Finite Poset, Ideal Algebra & Numerical Diagnostics]\033[0m\n");
     printf("  Leinster Magnitude |C|_L : %8.4f   Euler Char chi(N(C)) : %d\n",
            sheaf.leinster_magnitude, sheaf.euler_characteristic);
     printf("  Fiedler Connectivity l_2 : %8.4f   Cochain ||d1*d0||_2  : %.2e\n",
@@ -412,10 +419,10 @@ int main(int argc, char **argv) {
            sheaf.hodge_coexact_norm, sheaf.hodge_harmonic_norm);
     printf("  1-Laplacian Trace Tr(L1) : %8.2f   Isbell Hull Defect   : %.2e\n",
            sheaf.laplacian_1_trace, topos.isbell_envelope_defect);
-    printf("  Tensor-Hom Adjunction Err: %.2e   Lawvere Leibniz Rule : %s\n",
-           topos.tensor_hom_adjunction_defect, topos.leibniz_rule_holds ? "EXACT" : "FAIL");
-    printf("  Day Conv Adjunction Err  : %.2e   Quillen Factor j(M)=j(A): %s\n",
-           topos.day_adjunction_defect, topos.quillen_weak_equivalence_holds ? "EXACT" : "FAIL");
+    printf("  Weighted Adjunction Resid: %.2e   Ideal Boundary Check : %s\n",
+           topos.tensor_hom_adjunction_defect, topos.leibniz_rule_holds ? "PASS" : "FAIL");
+    printf("  Cocone Adjunction Resid  : %.2e   Modal Closure j(M)=j(A): %s\n",
+           topos.cocone_adjunction_defect, topos.modal_closure_matches ? "MATCH" : "MISMATCH");
     printf("  Sinkhorn W_eps / S_eps   : %.3f/%.3f  Fisher-Rao Geodesic  : %8.4f\n",
            topos.sinkhorn_ot.entropic_wasserstein,
            topos.sinkhorn_ot.sinkhorn_divergence,
@@ -423,12 +430,12 @@ int main(int argc, char **argv) {
     printf("  Cheeger Const h(C)       : %8.4f   Cheeger-Buser Bound  : %s\n",
            topos.sinkhorn_ot.cheeger_constant,
            topos.sinkhorn_ot.cheeger_buser_holds ? "HOLDS" : "FAIL");
-    printf("  Spectral Seq chi(E0..inf): %d/%d/%d/%d    Spectral d_r^2 Defect: %.2e\n",
-           topos.spectral_seq.euler_e0,
-           topos.spectral_seq.euler_e1,
-           topos.spectral_seq.euler_e2,
-           topos.spectral_seq.euler_e_inf,
-           topos.spectral_seq.differential_nilpotency_defect);
+    printf("  Rank-Page Euler Summary  : %d/%d/%d/%d    Page d_r^2 Residual : %.2e\n",
+           topos.rank_page_diagnostics.euler_e0,
+           topos.rank_page_diagnostics.euler_e1,
+           topos.rank_page_diagnostics.euler_e2,
+           topos.rank_page_diagnostics.euler_e_inf,
+           topos.rank_page_diagnostics.differential_nilpotency_defect);
     printf("  Gauss-Bonnet sum K_GB    : %8.6f   Forman/Ollivier Curv : %.2f / %.3f\n",
            topos.ricci_curv.gauss_bonnet_total,
            topos.ricci_curv.forman_mean_curvature,

@@ -13,7 +13,7 @@ Oyez collects RSS, Atom, and JSON feeds, extracts article text, and indexes it f
 - **Collect:** seed a catalog of 750 feeds and poll sources for articles.
 - **Search:** query a BM25+ index, filter by topic and region, and find similar articles using SimHash.
 - **Explore:** inspect topic, geographic, entity, and temporal summaries through the API or embedded console.
-- **Experiment:** use watchpoint rules, feed scheduling, tokenization, and category-theoretic and numerical models.
+- **Experiment:** use watchpoint rules, feed scheduling, tokenization, finite-poset and ideal-algebra constructions, and numerical models.
 - **Run locally:** keep the index in memory and save it as a binary snapshot; no database is required.
 
 ## Quick start
@@ -86,9 +86,9 @@ The benchmark uses generated articles and repeated searches, including cached qu
 | Feed catalog and fetching | [catalog.c](src/catalog.c), [url_fetch.c](src/url_fetch.c) |
 | Feed parsing and text extraction | [markup.c](src/markup.c) |
 | In-memory index, ranking, snapshots, and automation | [index_engine.c](src/index_engine.c) |
-| Topic ontology and numerical models | [ontology.c](src/ontology.c) |
+| Topic poset, ideal completion, exact sieves, and numerical models | [ontology.c](src/ontology.c) |
 | Byte-pair and M1 tokenizers | [token.c](src/token.c), [m1_tokenizer.c](src/m1_tokenizer.c) |
 | HTTP server, embedded console, and CLI | [http_server.c](src/http_server.c), [main.c](src/main.c) |
 | Tests | [test_oyez.c](tests/test_oyez.c) |
 
-The [implementation notes](docs/implementation-notes.md) retain the detailed feature inventory, including the mathematical models and data structures.
+The [implementation notes](docs/implementation-notes.md) distinguish exact finite constructions from exploratory numerical diagnostics and describe the underlying data structures.

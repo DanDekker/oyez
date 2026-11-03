@@ -201,10 +201,19 @@ typedef struct {
   size_t query_cache_valid_entries;
   uint64_t index_generation;
 
-  /* 12-Theorem Algebraic, Topological, Differential-Geometric & Dynamical Self-Verification */
-  uint32_t theorems_verified_count;
-  uint32_t theorems_total_count;
-  int all_theorems_verified;
+  /* Twelve exact or numerically bounded invariant checks. */
+  union {
+    uint32_t checks_passed;
+    uint32_t theorems_verified_count; /* Deprecated compatibility name. */
+  };
+  union {
+    uint32_t checks_total;
+    uint32_t theorems_total_count; /* Deprecated compatibility name. */
+  };
+  union {
+    int all_checks_passed;
+    int all_theorems_verified; /* Deprecated compatibility name. */
+  };
   double leinster_magnitude;
   int32_t euler_characteristic;
   double fiedler_eigenvalue;
@@ -214,9 +223,15 @@ typedef struct {
   double tropical_eigenvalue;
   double sinkhorn_divergence;
   double fisher_rao_geodesic;
-  double day_adjunction_defect;
+  union {
+    double cocone_adjunction_defect;
+    double day_adjunction_defect; /* Deprecated compatibility name. */
+  };
   double rota_baxter_defect;
-  double max_numerical_defect;
+  union {
+    double max_numerical_residual;
+    double max_numerical_defect; /* Deprecated compatibility name. */
+  };
 
   /* Unified Cross-Domain Situation Room & Atmospheric Physics */
   WeatherPhysicsState weather_physics;
@@ -466,7 +481,10 @@ typedef struct {
   uint32_t lawvere_boundary_meet_ab;
   int leibniz_rule_holds;
   uint32_t universal_quantifier_ab;
-  double omega_truth_a[ONTOLOGY_NODE_COUNT];
+  union {
+    double classifier_score_a[ONTOLOGY_NODE_COUNT];
+    double omega_truth_a[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
+  };
   uint32_t equalizer_mask;
   double coequalizer_quotient[ONTOLOGY_NODE_COUNT];
   double isbell_covariant_star[ONTOLOGY_NODE_COUNT];
@@ -477,17 +495,38 @@ typedef struct {
   double weighted_colimit;
   double weighted_limit;
   double tensor_hom_adjunction_defect;
-  double day_convolution_fg[ONTOLOGY_NODE_COUNT];
-  double day_internal_hom_gh[ONTOLOGY_NODE_COUNT];
-  double day_adjunction_defect;
-  uint32_t quillen_acyclic_cofibration_m;
-  uint32_t quillen_fibration_target;
-  int quillen_weak_equivalence_holds;
+  union {
+    double cocone_convolution_fg[ONTOLOGY_NODE_COUNT];
+    double day_convolution_fg[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
+  };
+  union {
+    double cocone_internal_hom_gh[ONTOLOGY_NODE_COUNT];
+    double day_internal_hom_gh[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
+  };
+  union {
+    double cocone_adjunction_defect;
+    double day_adjunction_defect; /* Deprecated compatibility name. */
+  };
+  union {
+    uint32_t modal_intermediate;
+    uint32_t quillen_acyclic_cofibration_m; /* Deprecated compatibility name. */
+  };
+  union {
+    uint32_t modal_factorization_target;
+    uint32_t quillen_fibration_target; /* Deprecated compatibility name. */
+  };
+  union {
+    int modal_closure_matches;
+    int quillen_weak_equivalence_holds; /* Deprecated compatibility name. */
+  };
   double polynomial_functor_px[ONTOLOGY_NODE_COUNT];
   double polynomial_codesign_lens[ONTOLOGY_NODE_COUNT];
   double heat_diffused_src[ONTOLOGY_NODE_COUNT];
   SinkhornTransportState sinkhorn_ot;
-  SpectralSequenceState spectral_seq;
+  union {
+    RankPageDiagnostic rank_page_diagnostics;
+    SpectralSequenceState spectral_seq; /* Deprecated compatibility name. */
+  };
   RicciCurvatureState ricci_curv;
   ZetaTropicalState zeta_tropical;
   RotaBaxterState rota_baxter;

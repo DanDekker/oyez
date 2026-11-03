@@ -346,6 +346,49 @@ static void serialize_ontology_mask_array(Buffer *buf, uint32_t mask) {
   buffer_text(buf, "]");
 }
 
+static void serialize_ontology_score_map(Buffer *buf, const double *scores) {
+  buffer_text(buf, "{");
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    if(c > 0u) buffer_text(buf, ",");
+    json_cstr(buf, ontology_node((OntologyNodeId)c)->slug);
+    buffer_format(buf, ":%.4f", scores[c]);
+  }
+  buffer_text(buf, "}");
+}
+
+static void serialize_rank_page_diagnostic(Buffer *buf, const SpectralSequenceState *rank) {
+  buffer_format(buf, "{\"nerve_euler_characteristic\":%d,\"rank_strata\":[", rank->euler_e0);
+  for(uint32_t p = 0; p < SPECTRAL_FILTRATION_RANKS; ++p) {
+    if(p > 0u) buffer_text(buf, ",");
+    serialize_ontology_mask_array(buf, rank->rank_strata_masks[p]);
+  }
+  buffer_text(buf, "],\"simplex_counts_by_rank\":[");
+  for(uint32_t p = 0; p < SPECTRAL_FILTRATION_RANKS; ++p) {
+    if(p > 0u) buffer_text(buf, ",");
+    buffer_format(buf,
+                  "[%u,%u,%u,%u]",
+                  rank->e0_simplex_counts[p][0],
+                  rank->e0_simplex_counts[p][1],
+                  rank->e0_simplex_counts[p][2],
+                  rank->e0_simplex_counts[p][3]);
+  }
+  buffer_format(buf,
+                "],\"stratum_signal_norm\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                "\"neighbor_variation\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                "\"smoothed_rank_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                "\"derived_pages_computed\":%s,\"diagnostic_only\":true}",
+                rank->e1_stratum_energy[0], rank->e1_stratum_energy[1],
+                rank->e1_stratum_energy[2], rank->e1_stratum_energy[3],
+                rank->e1_stratum_energy[4], rank->e1_stratum_energy[5],
+                rank->e2_derived_energy[0], rank->e2_derived_energy[1],
+                rank->e2_derived_energy[2], rank->e2_derived_energy[3],
+                rank->e2_derived_energy[4], rank->e2_derived_energy[5],
+                rank->e_inf_abutment_energy[0], rank->e_inf_abutment_energy[1],
+                rank->e_inf_abutment_energy[2], rank->e_inf_abutment_energy[3],
+                rank->e_inf_abutment_energy[4], rank->e_inf_abutment_energy[5],
+                rank->derived_pages_computed ? "true" : "false");
+}
+
 static void serialize_article(Buffer *buf, const ArticleRecord *a, double score, int include_content) {
   buffer_text(buf, "{");
   buffer_format(buf, "\"id\":%u,\"feed_id\":%u,", a->id, a->feed_id);
@@ -481,7 +524,7 @@ int http_handle_request(ServerContext *ctx,
   if(strcmp(method, "GET") == 0 && (strcmp(path, "/console") == 0 || strcmp(path, "/index.html") == 0)) {
     static const char *const k_console_html_head =
       "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-      "<title>Oyez // C23 Category-Theoretic Intelligence Console</title>"
+      "<title>Oyez // C23 Finite Poset &amp; Ideal Analytics</title>"
       "<style>"
       "body{margin:0;background:#080b11;color:#e2e8f0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}"
       "header{padding:14px 20px;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;background:#0b111e}"
@@ -496,14 +539,14 @@ int http_handle_request(ServerContext *ctx,
       ".art a{color:#38bdf8;text-decoration:none;font-weight:600}"
       ".badge{display:inline-block;padding:1px 6px;border-radius:3px;background:#1e293b;color:#7dd3fc;font-size:11px;margin-right:4px}"
       "</style></head><body>"
-      "<header><h1>OYEZ // C23 TOPOS &amp; SHEAF INTELLIGENCE CONSOLE</h1>"
-      "<div id=\"hdr-meta\">Loading C23 Topos Engine...</div></header>"
+      "<header><h1>OYEZ // C23 FINITE POSET &amp; IDEAL ANALYTICS</h1>"
+      "<div id=\"hdr-meta\">Loading C23 ontology engine...</div></header>"
       "<div class=\"grid\"><div>"
-      "<div class=\"card\"><h2>One-Machine Appliance &amp; 12-Theorem Proof</h2><div id=\"app-stats\"></div>"
+      "<div class=\"card\"><h2>One-Machine Appliance &amp; 12-Invariant Self-Check</h2><div id=\"app-stats\"></div>"
       "<div style=\"margin-top:8px\"><button onclick=\"runAutoSweep()\" style=\"width:100%\">Run Autonomous Sweep (UCB1 + Watchpoints)</button></div></div>"
       "<div class=\"card\"><h2>Category C &amp; Hodge Invariants</h2><div id=\"onto-stats\"></div></div>"
       "<div class=\"card\"><h2>Persistent Homology Barcode (beta_0, beta_1)</h2><div id=\"ph-stats\"></div></div>"
-      "<div class=\"card\"><h2>Grothendieck Cartesian Lifts (int_C F)</h2><div id=\"fib-list\"></div></div>"
+      "<div class=\"card\"><h2>Region&ndash;Topic Fiber Links</h2><div id=\"fib-list\"></div></div>"
       "</div><div>"
       "<div class=\"card\"><h2>BM25+ &amp; Poset Presheaf Fiber Search</h2>"
       "<div style=\"display:flex;gap:8px;margin-bottom:10px\">"
@@ -523,9 +566,9 @@ int http_handle_request(ServerContext *ctx,
       "fetch('/api/v1/appliance').then(r=>r.json()),fetch('/api/v1/ontology').then(r=>r.json()),"
       "fetch('/api/v1/temporal').then(r=>r.json()),fetch('/api/v1/fibration').then(r=>r.json())]);"
       "document.getElementById('hdr-meta').textContent="
-      "`Feeds: ${st.feeds} | Articles: ${st.articles} | Terms: ${st.inverted_terms} | Theorems: ${ap.theorems_verified_count}/${ap.theorems_total_count} | RAM: ${(ap.memory.total_resident_bytes/1048576).toFixed(2)} MB`;"
+      "`Feeds: ${st.feeds} | Articles: ${st.articles} | Terms: ${st.inverted_terms} | Checks: ${ap.checks_passed}/${ap.checks_total} | RAM: ${(ap.memory.total_resident_bytes/1048576).toFixed(2)} MB`;"
       "document.getElementById('app-stats').innerHTML="
-      "`<div class='stat-row'><span>Appliance Self-Verification</span><b>${ap.theorems_verified_count}/${ap.theorems_total_count} PASS</b></div>"
+      "`<div class='stat-row'><span>Appliance Consistency Audit</span><b>${ap.checks_passed}/${ap.checks_total} ${ap.all_checks_passed?'PASS':'DEGRADED'}</b></div>"
       "<div class='stat-row'><span>Resident Memory Footprint</span><b>${(ap.memory.total_resident_bytes/1048576).toFixed(2)} MB</b></div>"
       "<div class='stat-row'><span>String Arena (Used / Cap)</span><b>${(ap.memory.arena_bytes_used/1024).toFixed(1)} / ${(ap.memory.arena_bytes_capacity/1024).toFixed(1)} KB</b></div>"
       "<div class='stat-row'><span>Lorenz-63 Lyapunov / D_KY</span><b>${ap.atmospheric_physics.lyapunov_max.toFixed(4)} / ${ap.atmospheric_physics.kaplan_yorke_dim.toFixed(4)}</b></div>"
@@ -665,7 +708,9 @@ int http_handle_request(ServerContext *ctx,
     double w_lim_self = ontology_weighted_limit(raw_scores, closure_scores);
     int buser_holds = 0;
     double cheeger_h = ontology_cheeger_constant(&buser_holds);
-    double day_defect_self = ontology_day_adjunction_defect(raw_scores, closure_scores, kan_scores);
+    double cocone_defect_self = ontology_cocone_adjunction_defect(raw_scores, closure_scores, kan_scores);
+    OntologyOrderAudit order_audit;
+    ontology_order_audit(&order_audit);
 
     buffer_format(out_json,
                   "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f,"
@@ -679,6 +724,7 @@ int http_handle_request(ServerContext *ctx,
                   "\"leinster_magnitude\":%.4f,\"isbell_codensity_defect\":%.6e,\"monad_closure_defect\":%.4f,"
                   "\"profunctor_coend_self\":%.2f,\"profunctor_end_self\":%.4f,"
                   "\"weighted_colimit_self\":%.4f,\"weighted_limit_self\":%.4f,"
+                  "\"cocone_adjunction_defect_self\":%.6e,"
                   "\"day_adjunction_defect_self\":%.6e",
                   ONTOLOGY_NODE_COUNT,
                   sheaf.total_cohomology_norm,
@@ -712,7 +758,26 @@ int http_handle_request(ServerContext *ctx,
                   end_self,
                   w_colim_self,
                   w_lim_self,
-                  day_defect_self);
+                  cocone_defect_self,
+                  cocone_defect_self);
+    buffer_format(out_json,
+                  ",\"order_audit\":{\"object_count\":%u,\"morphism_count\":%u,\"pair_count\":%u,"
+                  "\"unique_join_pairs\":%u,\"ambiguous_join_pairs\":%u,\"missing_join_pairs\":%u,"
+                  "\"unique_meet_pairs\":%u,\"ambiguous_meet_pairs\":%u,\"missing_meet_pairs\":%u,"
+                  "\"is_reflexive\":%s,\"is_antisymmetric\":%s,\"is_transitive\":%s,\"is_lattice\":%s}",
+                  order_audit.object_count,
+                  order_audit.morphism_count,
+                  order_audit.pair_count,
+                  order_audit.unique_join_pairs,
+                  order_audit.ambiguous_join_pairs,
+                  order_audit.missing_join_pairs,
+                  order_audit.unique_meet_pairs,
+                  order_audit.ambiguous_meet_pairs,
+                  order_audit.missing_meet_pairs,
+                  order_audit.is_reflexive ? "true" : "false",
+                  order_audit.is_antisymmetric ? "true" : "false",
+                  order_audit.is_transitive ? "true" : "false",
+                  order_audit.is_lattice ? "true" : "false");
     if(sub[0] && sup[0]) {
       OntologyNodeId u, v;
       int has = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0 &&
@@ -728,8 +793,16 @@ int http_handle_request(ServerContext *ctx,
     if(a_slug[0] && b_slug[0]) {
       OntologyNodeId na, nb;
       if(ontology_from_slug(a_slug, &na) == 0 && ontology_from_slug(b_slug, &nb) == 0) {
-        OntologyNodeId j = ontology_join(na, nb);
-        uint32_t m = ontology_meet_mask(na, nb);
+        OntologyNodeId unique_join, unique_meet;
+        uint32_t minimal_upper_bounds = ontology_minimal_upper_bounds(na, nb);
+        uint32_t maximal_lower_bounds = ontology_maximal_lower_bounds(na, nb);
+        int has_unique_join = ontology_unique_join(na, nb, &unique_join) == 0;
+        int has_unique_meet = ontology_unique_meet(na, nb, &unique_meet) == 0;
+        uint32_t ideal_a = ontology_node(na)->downward_mask;
+        uint32_t ideal_b = ontology_node(nb)->downward_mask;
+        uint32_t ideal_join = ontology_ideal_join(ideal_a, ideal_b);
+        uint32_t ideal_meet = ontology_ideal_meet(ideal_a, ideal_b);
+        uint32_t characteristic_sieve_a_at_b = ontology_subobject_classifier_sieve(ideal_a, nb);
         uint32_t hey_imp = ontology_heyting_implication(1u << na, 1u << nb);
         uint32_t hey_neg = ontology_heyting_negation(1u << na);
         uint32_t lt_sheaf = ontology_lawvere_tierney_sheafify(1u << na);
@@ -741,17 +814,62 @@ int http_handle_request(ServerContext *ctx,
         double w_dist = ontology_wasserstein_distance(1u << na, 1u << nb);
         double l_ab = ontology_lawvere_distance(1u << na, 1u << nb);
         double l_ba = ontology_lawvere_distance(1u << nb, 1u << na);
-        buffer_text(out_json, ",\"lattice\":{\"a\":");
+        buffer_text(out_json, ",\"order\":{\"a\":");
         json_cstr(out_json, a_slug);
         buffer_text(out_json, ",\"b\":");
         json_cstr(out_json, b_slug);
+        buffer_text(out_json, ",\"minimal_upper_bounds\":");
+        serialize_ontology_mask_array(out_json, minimal_upper_bounds);
+        buffer_text(out_json, ",\"maximal_lower_bounds\":");
+        serialize_ontology_mask_array(out_json, maximal_lower_bounds);
+        buffer_text(out_json, ",\"unique_join\":");
+        if(has_unique_join) json_cstr(out_json, ontology_node(unique_join)->slug);
+        else buffer_text(out_json, "null");
+        buffer_text(out_json, ",\"unique_meet\":");
+        if(has_unique_meet) json_cstr(out_json, ontology_node(unique_meet)->slug);
+        else buffer_text(out_json, "null");
+        buffer_text(out_json, ",\"ideal_join\":");
+        serialize_ontology_mask_array(out_json, ideal_join);
+        buffer_text(out_json, ",\"ideal_meet\":");
+        serialize_ontology_mask_array(out_json, ideal_meet);
+        buffer_text(out_json, ",\"characteristic_sieve_a_at_b\":");
+        serialize_ontology_mask_array(out_json, characteristic_sieve_a_at_b);
         buffer_format(out_json,
-                      ",\"join\":\"%s\","
-                      "\"wasserstein_distance\":%.4f,\"lawvere_distance_ab\":%.4f,"
-                      "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s,\"meet\":",
-                      ontology_node(j)->slug, w_dist, l_ab, l_ba,
+                      ",\"wasserstein_distance\":%.4f,\"lawvere_distance_ab\":%.4f,"
+                      "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s",
+                      w_dist, l_ab, l_ba,
                       dense_a ? "true" : "false");
-        serialize_ontology_mask_array(out_json, m);
+        buffer_text(out_json, ",\"heyting_implication\":");
+        serialize_ontology_mask_array(out_json, hey_imp);
+        buffer_text(out_json, ",\"heyting_negation_a\":");
+        serialize_ontology_mask_array(out_json, hey_neg);
+        buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
+        serialize_ontology_mask_array(out_json, lt_sheaf);
+        buffer_text(out_json, ",\"coheyting_subtraction\":");
+        serialize_ontology_mask_array(out_json, co_sub);
+        buffer_text(out_json, ",\"coheyting_supplement_a\":");
+        serialize_ontology_mask_array(out_json, co_supp);
+        buffer_text(out_json, ",\"lawvere_boundary_a\":");
+        serialize_ontology_mask_array(out_json, law_bd);
+        buffer_text(out_json, ",\"universal_quantifier_ab\":");
+        serialize_ontology_mask_array(out_json, univ_q);
+        buffer_text(out_json, "}");
+
+        /* Deprecated v1 alias.  Ambiguous joins are null rather than an
+         * arbitrary topic, which is the intentional correctness break. */
+        buffer_text(out_json, ",\"lattice\":{\"deprecated\":true,\"a\":");
+        json_cstr(out_json, a_slug);
+        buffer_text(out_json, ",\"b\":");
+        json_cstr(out_json, b_slug);
+        buffer_text(out_json, ",\"join\":");
+        if(has_unique_join) json_cstr(out_json, ontology_node(unique_join)->slug);
+        else buffer_text(out_json, "null");
+        buffer_format(out_json,
+                      ",\"wasserstein_distance\":%.4f,\"lawvere_distance_ab\":%.4f,"
+                      "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s,\"meet\":",
+                      w_dist, l_ab, l_ba,
+                      dense_a ? "true" : "false");
+        serialize_ontology_mask_array(out_json, maximal_lower_bounds);
         buffer_text(out_json, ",\"heyting_implication\":");
         serialize_ontology_mask_array(out_json, hey_imp);
         buffer_text(out_json, ",\"heyting_negation_a\":");
@@ -1109,41 +1227,59 @@ int http_handle_request(ServerContext *ctx,
                   "\"profunctor_end\":%.4f,\"profunctor_coend\":%.4f,"
                   "\"weighted_colimit\":%.4f,\"weighted_limit\":%.4f,"
                   "\"tensor_hom_adjunction_defect\":%.6e},"
-                  "\"subobject_classifier_omega\":{",
+                  "\"subobject_classifier\":{\"score\":",
                   topos.isbell_envelope_defect,
                   topos.profunctor_end,
                   topos.profunctor_coend,
                   topos.weighted_colimit,
                   topos.weighted_limit,
                   topos.tensor_hom_adjunction_defect);
-    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-      if(c > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
-      buffer_format(out_json, ":%.4f", topos.omega_truth_a[c]);
-    }
+    serialize_ontology_score_map(out_json, topos.classifier_score_a);
+    buffer_text(out_json, ",\"characteristic_sieve_a_at_b\":");
+    serialize_ontology_mask_array(
+        out_json,
+        ontology_subobject_classifier_sieve(topos.ideal_a, topos.prop_b));
+    buffer_text(out_json, "},\"subobject_classifier_omega\":");
+    serialize_ontology_score_map(out_json, topos.classifier_score_a);
     buffer_format(out_json,
-                  "},\"day_convolution\":{\"day_adjunction_defect\":%.6e,"
+                  ",\"cocone_convolution\":{\"cocone_adjunction_defect\":%.6e,"
                   "\"root_convolution\":%.4f,\"root_internal_hom\":%.4f},"
-                  "\"quillen_model_factorization\":{\"weak_equivalence_holds\":%s,"
-                  "\"acyclic_cofibration_m\":",
-                  topos.day_adjunction_defect,
-                  topos.day_convolution_fg[ONTO_ROOT],
-                  topos.day_internal_hom_gh[ONTO_ROOT],
-                  topos.quillen_weak_equivalence_holds ? "true" : "false");
-    serialize_ontology_mask_array(out_json, topos.quillen_acyclic_cofibration_m);
-    buffer_text(out_json, ",\"fibration_target\":");
-    serialize_ontology_mask_array(out_json, topos.quillen_fibration_target);
+                  "\"day_convolution\":{\"deprecated\":true,\"day_adjunction_defect\":%.6e,"
+                  "\"root_convolution\":%.4f,\"root_internal_hom\":%.4f},"
+                  "\"modal_closure_diagnostic\":{\"closure_matches\":%s,\"intermediate\":",
+                  topos.cocone_adjunction_defect,
+                  topos.cocone_convolution_fg[ONTO_ROOT],
+                  topos.cocone_internal_hom_gh[ONTO_ROOT],
+                  topos.cocone_adjunction_defect,
+                  topos.cocone_convolution_fg[ONTO_ROOT],
+                  topos.cocone_internal_hom_gh[ONTO_ROOT],
+                  topos.modal_closure_matches ? "true" : "false");
+    serialize_ontology_mask_array(out_json, topos.modal_intermediate);
+    buffer_text(out_json, ",\"target\":");
+    serialize_ontology_mask_array(out_json, topos.modal_factorization_target);
+    buffer_text(out_json, ",\"diagnostic_only\":true}");
     buffer_format(out_json,
-                  "},\"sinkhorn_optimal_transport\":{\"entropic_wasserstein\":%.4f,"
+                  ",\"quillen_model_factorization\":{\"deprecated\":true,"
+                  "\"weak_equivalence_holds\":%s,\"acyclic_cofibration_m\":",
+                  topos.modal_closure_matches ? "true" : "false");
+    serialize_ontology_mask_array(out_json, topos.modal_intermediate);
+    buffer_text(out_json, ",\"fibration_target\":");
+    serialize_ontology_mask_array(out_json, topos.modal_factorization_target);
+    buffer_text(out_json, ",\"diagnostic_only\":true");
+    buffer_text(out_json, "},\"rank_page_diagnostic\":");
+    serialize_rank_page_diagnostic(out_json, &topos.rank_page_diagnostics);
+    buffer_format(out_json,
+                  ",\"sinkhorn_optimal_transport\":{\"entropic_wasserstein\":%.4f,"
                   "\"sinkhorn_divergence\":%.4f,\"marginal_defect_l1\":%.6e,"
                   "\"coupling_entropy\":%.4f,\"fisher_rao_geodesic\":%.4f,"
                   "\"cheeger_constant\":%.4f,\"cheeger_buser_holds\":%s},"
-                  "\"spectral_sequence\":{\"euler_e0\":%d,\"euler_e1\":%d,"
+                  "\"spectral_sequence\":{\"deprecated\":true,\"euler_e0\":%d,\"euler_e1\":%d,"
                   "\"euler_e2\":%d,\"euler_e_inf\":%d,"
                   "\"differential_nilpotency_defect\":%.6e,"
                   "\"e1_stratum_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
                   "\"e2_derived_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
-                  "\"e_inf_abutment_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]},"
+                  "\"e_inf_abutment_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                  "\"derived_pages_computed\":false,\"diagnostic_only\":true},"
                   "\"polynomial_functor_codesign\":{\"root_poly_px\":%.4f,\"root_codesign_lens\":%.4f},"
                   "\"ricci_curvature\":{\"gauss_bonnet_total\":%.6f,\"gauss_bonnet_defect\":%.6e,"
                   "\"forman_mean_curvature\":%.4f,\"ollivier_mean_curvature\":%.4f,"
@@ -1162,29 +1298,29 @@ int http_handle_request(ServerContext *ctx,
                   topos.sinkhorn_ot.fisher_rao_geodesic,
                   topos.sinkhorn_ot.cheeger_constant,
                   topos.sinkhorn_ot.cheeger_buser_holds ? "true" : "false",
-                  topos.spectral_seq.euler_e0,
-                  topos.spectral_seq.euler_e1,
-                  topos.spectral_seq.euler_e2,
-                  topos.spectral_seq.euler_e_inf,
-                  topos.spectral_seq.differential_nilpotency_defect,
-                  topos.spectral_seq.e1_stratum_energy[0],
-                  topos.spectral_seq.e1_stratum_energy[1],
-                  topos.spectral_seq.e1_stratum_energy[2],
-                  topos.spectral_seq.e1_stratum_energy[3],
-                  topos.spectral_seq.e1_stratum_energy[4],
-                  topos.spectral_seq.e1_stratum_energy[5],
-                  topos.spectral_seq.e2_derived_energy[0],
-                  topos.spectral_seq.e2_derived_energy[1],
-                  topos.spectral_seq.e2_derived_energy[2],
-                  topos.spectral_seq.e2_derived_energy[3],
-                  topos.spectral_seq.e2_derived_energy[4],
-                  topos.spectral_seq.e2_derived_energy[5],
-                  topos.spectral_seq.e_inf_abutment_energy[0],
-                  topos.spectral_seq.e_inf_abutment_energy[1],
-                  topos.spectral_seq.e_inf_abutment_energy[2],
-                  topos.spectral_seq.e_inf_abutment_energy[3],
-                  topos.spectral_seq.e_inf_abutment_energy[4],
-                  topos.spectral_seq.e_inf_abutment_energy[5],
+                  topos.rank_page_diagnostics.euler_e0,
+                  topos.rank_page_diagnostics.euler_e1,
+                  topos.rank_page_diagnostics.euler_e2,
+                  topos.rank_page_diagnostics.euler_e_inf,
+                  topos.rank_page_diagnostics.differential_nilpotency_defect,
+                  topos.rank_page_diagnostics.e1_stratum_energy[0],
+                  topos.rank_page_diagnostics.e1_stratum_energy[1],
+                  topos.rank_page_diagnostics.e1_stratum_energy[2],
+                  topos.rank_page_diagnostics.e1_stratum_energy[3],
+                  topos.rank_page_diagnostics.e1_stratum_energy[4],
+                  topos.rank_page_diagnostics.e1_stratum_energy[5],
+                  topos.rank_page_diagnostics.e2_derived_energy[0],
+                  topos.rank_page_diagnostics.e2_derived_energy[1],
+                  topos.rank_page_diagnostics.e2_derived_energy[2],
+                  topos.rank_page_diagnostics.e2_derived_energy[3],
+                  topos.rank_page_diagnostics.e2_derived_energy[4],
+                  topos.rank_page_diagnostics.e2_derived_energy[5],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[0],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[1],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[2],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[3],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[4],
+                  topos.rank_page_diagnostics.e_inf_abutment_energy[5],
                   topos.polynomial_functor_px[ONTO_ROOT],
                   topos.polynomial_codesign_lens[ONTO_ROOT],
                   topos.ricci_curv.gauss_bonnet_total,
@@ -1892,15 +2028,18 @@ int http_handle_request(ServerContext *ctx,
 
     buffer_format(out_json,
                   "{\"appliance\":\"oyez-one-machine-c23\",\"status\":\"%s\","
+                  "\"status_deprecated\":true,"
                   "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu,"
                   "\"index_generation\":%llu,\"m1_tokenizer_vocab_size\":%u,\"m1_tokenizer_sha256\":",
-                  app.all_theorems_verified ? "verified" : "degraded",
+                  app.all_checks_passed ? "verified" : "degraded",
                   cat_count, eng->feed_count, eng->article_count, eng->inv_count,
                   (unsigned long long)app.index_generation,
                   ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u);
     json_cstr(out_json, ctx->tokenizer ? ctx->tokenizer->sha256 : "");
     buffer_format(out_json,
-                  ",\"all_theorems_verified\":%s,\"theorems_verified_count\":%u,\"theorems_total_count\":%u,"
+                  ",\"consistency_status\":\"%s\",\"all_checks_passed\":%s,"
+                  "\"checks_passed\":%u,\"checks_total\":%u,"
+                  "\"all_theorems_verified\":%s,\"theorems_verified_count\":%u,\"theorems_total_count\":%u,"
                   "\"memory\":{\"total_resident_bytes\":%zu,\"struct_base_bytes\":%zu,"
                   "\"arena_bytes_used\":%zu,\"arena_bytes_capacity\":%zu,\"arena_block_count\":%zu,"
                   "\"feed_and_article_table_bytes\":%zu,\"inverted_index_bytes\":%zu,"
@@ -1909,8 +2048,10 @@ int http_handle_request(ServerContext *ctx,
                   "\"mathematical_invariants\":{\"leinster_magnitude\":%.8f,\"euler_characteristic\":%d,"
                   "\"fiedler_eigenvalue\":%.6f,\"cheeger_constant\":%.6f,\"gauss_bonnet_total\":%.8f,"
                   "\"ihara_zeta_val\":%.6f,\"tropical_eigenvalue\":%.6f,\"sinkhorn_divergence\":%.6f,"
-                  "\"fisher_rao_geodesic\":%.6f,\"day_adjunction_defect\":%.12e,"
-                  "\"rota_baxter_defect\":%.12e,\"max_numerical_defect\":%.12e},"
+                  "\"fisher_rao_geodesic\":%.6f,\"cocone_adjunction_defect\":%.12e,"
+                  "\"day_adjunction_defect\":%.12e,"
+                  "\"rota_baxter_defect\":%.12e,\"max_numerical_residual\":%.12e,"
+                  "\"max_numerical_defect\":%.12e},"
                   "\"atmospheric_physics\":{\"lorenz_state\":[%.4f,%.4f,%.4f],\"lyapunov_max\":%.6f,"
                   "\"lyapunov_sum_div\":%.4f,\"kaplan_yorke_dim\":%.6f,\"predictability_horizon\":%.4f,"
                   "\"saturation_vapor_hpa\":%.4f,\"wet_bulb_celsius\":%.4f,\"rossby_phase_speed\":%.4f,"
@@ -1918,9 +2059,13 @@ int http_handle_request(ServerContext *ctx,
                   "\"situation_room\":{\"cyber_strategic_articles\":%zu,\"frontier_ai_articles\":%zu,"
                   "\"severe_weather_articles\":%zu,\"macro_active_articles\":%zu,\"sports_articles\":%zu,"
                   "\"emerging_category\":",
-                  app.all_theorems_verified ? "true" : "false",
-                  app.theorems_verified_count,
-                  app.theorems_total_count,
+                  app.all_checks_passed ? "passing" : "degraded",
+                  app.all_checks_passed ? "true" : "false",
+                  app.checks_passed,
+                  app.checks_total,
+                  app.all_checks_passed ? "true" : "false",
+                  app.checks_passed,
+                  app.checks_total,
                   app.total_resident_bytes,
                   app.struct_base_bytes,
                   app.arena_bytes_used,
@@ -1941,9 +2086,11 @@ int http_handle_request(ServerContext *ctx,
                   app.tropical_eigenvalue,
                   app.sinkhorn_divergence,
                   app.fisher_rao_geodesic,
-                  app.day_adjunction_defect,
+                  app.cocone_adjunction_defect,
+                  app.cocone_adjunction_defect,
                   app.rota_baxter_defect,
-                  app.max_numerical_defect,
+                  app.max_numerical_residual,
+                  app.max_numerical_residual,
                   app.weather_physics.lorenz_state[0],
                   app.weather_physics.lorenz_state[1],
                   app.weather_physics.lorenz_state[2],

@@ -10,6 +10,7 @@
 #include "wire.h"
 
 #include <assert.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,34 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static int mask_subset32(uint32_t a, uint32_t b) {
+  return (a & ~b) == 0u;
+}
+
+static uint32_t mask_popcount32(uint32_t mask) {
+  uint32_t count = 0u;
+  while(mask) {
+    mask &= mask - 1u;
+    count++;
+  }
+  return count;
+}
+
+static uint32_t mask_ctz32(uint32_t mask) {
+  uint32_t index = 0u;
+  assert(mask != 0u);
+  while((mask & 1u) == 0u) {
+    mask >>= 1u;
+    index++;
+  }
+  return index;
+}
+
+static double abs_diff(double a, double b) {
+  double d = a - b;
+  return d < 0.0 ? -d : d;
+}
 
 static void test_checksum_and_wire(void) {
   const char *msg = "oyez-c23-wire-test";
@@ -178,23 +207,186 @@ static void test_markup_and_readability(void) {
 
 static void test_category_theory_and_ontology(void) {
   ontology_init();
-  /* Reflexivity: c <= c */
-  for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
-    assert(ontology_has_morphism((OntologyNodeId)i, (OntologyNodeId)i) == 1);
-    assert(ontology_has_morphism((OntologyNodeId)i, ONTO_ROOT) == 1);
+  /* Exhaustively verify that the ontology is a finite poset with a terminal object. */
+  uint32_t counted_morphisms = 0u;
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    assert(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)a) == 1);
+    assert(ontology_has_morphism((OntologyNodeId)a, ONTO_ROOT) == 1);
+    for(uint32_t b = 0; b < ONTOLOGY_NODE_COUNT; ++b) {
+      if(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)b)) counted_morphisms++;
+      if(a != b) {
+        assert(!(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)b) &&
+                 ontology_has_morphism((OntologyNodeId)b, (OntologyNodeId)a)));
+      }
+      for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+        if(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)b) &&
+           ontology_has_morphism((OntologyNodeId)b, (OntologyNodeId)c)) {
+          assert(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)c));
+        }
+      }
+    }
   }
-  /* Transitivity: cryptography <= mathematics <= ai <= technology <= knowledge-economy <= all-news */
-  assert(ontology_has_morphism(ONTO_CRYPTOGRAPHY, ONTO_MATHEMATICS) == 1);
-  assert(ontology_has_morphism(ONTO_MATHEMATICS, ONTO_AI) == 1);
-  assert(ontology_has_morphism(ONTO_AI, ONTO_TECHNOLOGY) == 1);
-  assert(ontology_has_morphism(ONTO_TECHNOLOGY, ONTO_KNOWLEDGE_ECONOMY) == 1);
-  assert(ontology_has_morphism(ONTO_CRYPTOGRAPHY, ONTO_KNOWLEDGE_ECONOMY) == 1);
 
-  /* Join & Meet: cyber <= security and cyber <= technology */
-  uint32_t meet = ontology_meet_mask(ONTO_SECURITY, ONTO_TECHNOLOGY);
-  assert((meet & (1u << ONTO_CYBER)) != 0u);
-  OntologyNodeId join = ontology_join(ONTO_AI, ONTO_SPACE);
-  assert(join == ONTO_SCIENCE || join == ONTO_TECHNOLOGY || join == ONTO_KNOWLEDGE_ECONOMY);
+  /* The object poset is not a lattice.  Report all minimal upper and maximal
+   * lower bounds instead of silently choosing one of several incomparable
+   * candidates.  Validate the bound APIs and unique-bound adapters for every
+   * unordered object pair. */
+  uint32_t counted_unique_joins = 0u, counted_ambiguous_joins = 0u, counted_missing_joins = 0u;
+  uint32_t counted_unique_meets = 0u, counted_ambiguous_meets = 0u, counted_missing_meets = 0u;
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    for(uint32_t b = a; b < ONTOLOGY_NODE_COUNT; ++b) {
+      uint32_t upper = ontology_minimal_upper_bounds((OntologyNodeId)a, (OntologyNodeId)b);
+      uint32_t lower = ontology_maximal_lower_bounds((OntologyNodeId)a, (OntologyNodeId)b);
+      uint32_t common_up = ontology_node((OntologyNodeId)a)->upward_mask &
+                           ontology_node((OntologyNodeId)b)->upward_mask;
+      uint32_t common_down = ontology_node((OntologyNodeId)a)->downward_mask &
+                             ontology_node((OntologyNodeId)b)->downward_mask;
+      assert(upper == ontology_minimal_upper_bounds((OntologyNodeId)b, (OntologyNodeId)a));
+      assert(lower == ontology_maximal_lower_bounds((OntologyNodeId)b, (OntologyNodeId)a));
+      assert(lower == ontology_meet_mask((OntologyNodeId)a, (OntologyNodeId)b));
+
+      uint32_t scan = upper;
+      while(scan) {
+        uint32_t u = mask_ctz32(scan);
+        scan &= scan - 1u;
+        assert(ontology_has_morphism((OntologyNodeId)a, (OntologyNodeId)u));
+        assert(ontology_has_morphism((OntologyNodeId)b, (OntologyNodeId)u));
+        uint32_t strict_common_below_u = common_up &
+                                         ontology_node((OntologyNodeId)u)->downward_mask &
+                                         ~(1u << u);
+        assert(strict_common_below_u == 0u);
+      }
+      scan = lower;
+      while(scan) {
+        uint32_t u = mask_ctz32(scan);
+        scan &= scan - 1u;
+        assert(ontology_has_morphism((OntologyNodeId)u, (OntologyNodeId)a));
+        assert(ontology_has_morphism((OntologyNodeId)u, (OntologyNodeId)b));
+        uint32_t strict_common_above_u = common_down &
+                                         ontology_node((OntologyNodeId)u)->upward_mask &
+                                         ~(1u << u);
+        assert(strict_common_above_u == 0u);
+      }
+      scan = common_up;
+      while(scan) {
+        uint32_t u = mask_ctz32(scan);
+        scan &= scan - 1u;
+        assert((ontology_node((OntologyNodeId)u)->downward_mask & upper) != 0u);
+      }
+      scan = common_down;
+      while(scan) {
+        uint32_t u = mask_ctz32(scan);
+        scan &= scan - 1u;
+        assert((ontology_node((OntologyNodeId)u)->upward_mask & lower) != 0u);
+      }
+
+      OntologyNodeId unique = ONTO_ROOT;
+      uint32_t upper_count = mask_popcount32(upper);
+      if(upper_count == 1u) {
+        assert(ontology_unique_join((OntologyNodeId)a, (OntologyNodeId)b, &unique) == 0);
+        assert((upper & (1u << unique)) != 0u);
+        assert(ontology_join((OntologyNodeId)a, (OntologyNodeId)b) == unique);
+        counted_unique_joins++;
+      } else {
+        assert(ontology_unique_join((OntologyNodeId)a, (OntologyNodeId)b, &unique) == -1);
+        assert(ontology_join((OntologyNodeId)a, (OntologyNodeId)b) == ONTO_NONE);
+        if(upper_count == 0u) counted_missing_joins++;
+        else counted_ambiguous_joins++;
+      }
+      uint32_t lower_count = mask_popcount32(lower);
+      if(lower_count == 1u) {
+        assert(ontology_unique_meet((OntologyNodeId)a, (OntologyNodeId)b, &unique) == 0);
+        assert((lower & (1u << unique)) != 0u);
+        counted_unique_meets++;
+      } else {
+        assert(ontology_unique_meet((OntologyNodeId)a, (OntologyNodeId)b, &unique) == -1);
+        if(lower_count == 0u) counted_missing_meets++;
+        else counted_ambiguous_meets++;
+      }
+    }
+  }
+  assert(ontology_minimal_upper_bounds(ONTO_AI, ONTO_SPACE) ==
+         ((1u << ONTO_SCIENCE) | (1u << ONTO_TECHNOLOGY)));
+  OntologyNodeId ambiguous_join = ONTO_ROOT;
+  assert(ontology_unique_join(ONTO_AI, ONTO_SPACE, &ambiguous_join) == -1);
+  assert(strcmp(ontology_node(ontology_join(ONTO_AI, ONTO_SPACE))->slug, "none") == 0);
+
+  OntologyOrderAudit order_audit;
+  ontology_order_audit(&order_audit);
+  assert(order_audit.object_count == ONTOLOGY_NODE_COUNT);
+  assert(order_audit.morphism_count == counted_morphisms);
+  assert(order_audit.pair_count == (ONTOLOGY_NODE_COUNT * (ONTOLOGY_NODE_COUNT + 1u)) / 2u);
+  assert(order_audit.is_reflexive == 1);
+  assert(order_audit.is_antisymmetric == 1);
+  assert(order_audit.is_transitive == 1);
+  assert(order_audit.is_lattice == 0);
+  assert(order_audit.unique_join_pairs == counted_unique_joins);
+  assert(order_audit.ambiguous_join_pairs == counted_ambiguous_joins);
+  assert(order_audit.missing_join_pairs == counted_missing_joins);
+  assert(order_audit.unique_meet_pairs == counted_unique_meets);
+  assert(order_audit.ambiguous_meet_pairs == counted_ambiguous_meets);
+  assert(order_audit.missing_meet_pairs == counted_missing_meets);
+  assert(order_audit.morphism_count == 170u);
+  assert(order_audit.unique_join_pairs == 495u);
+  assert(order_audit.ambiguous_join_pairs == 33u);
+  assert(order_audit.missing_join_pairs == 0u);
+  assert(order_audit.unique_meet_pairs == 205u);
+  assert(order_audit.ambiguous_meet_pairs == 13u);
+  assert(order_audit.missing_meet_pairs == 310u);
+
+  /* The ideal completion is a genuine bounded distributive lattice.  Exercise
+   * its operations and the Heyting/co-Heyting adjunctions over every principal
+   * ideal plus bottom and top. */
+  uint32_t ideals[ONTOLOGY_NODE_COUNT + 2u];
+  size_t ideal_count = 0u;
+  ideals[ideal_count++] = 0u;
+  ideals[ideal_count++] = 0xFFFFFFFFu;
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    uint32_t ideal = ontology_downward_closure(1u << a);
+    assert(ontology_is_ideal(ideal));
+    ideals[ideal_count++] = ideal;
+  }
+  assert(!ontology_is_ideal(1u << ONTO_ROOT));
+  for(size_t ai = 0; ai < ideal_count; ++ai) {
+    uint32_t a = ideals[ai];
+    assert(ontology_is_ideal(a));
+    assert(ontology_ideal_join(a, 0u) == a);
+    assert(ontology_ideal_join(a, 0xFFFFFFFFu) == 0xFFFFFFFFu);
+    assert(ontology_ideal_meet(a, 0u) == 0u);
+    assert(ontology_ideal_meet(a, 0xFFFFFFFFu) == a);
+    assert(ontology_ideal_join(a, a) == a);
+    assert(ontology_ideal_meet(a, a) == a);
+    for(size_t bi = 0; bi < ideal_count; ++bi) {
+      uint32_t b = ideals[bi];
+      uint32_t join_ab = ontology_ideal_join(a, b);
+      uint32_t meet_ab = ontology_ideal_meet(a, b);
+      uint32_t implication_ab = ontology_heyting_implication(a, b);
+      uint32_t subtraction_ab = ontology_coheyting_subtraction(a, b);
+      assert(ontology_is_ideal(join_ab));
+      assert(ontology_is_ideal(meet_ab));
+      assert(ontology_is_ideal(implication_ab));
+      assert(ontology_is_ideal(subtraction_ab));
+      assert(join_ab == ontology_ideal_join(b, a));
+      assert(meet_ab == ontology_ideal_meet(b, a));
+      assert(ontology_ideal_meet(a, join_ab) == a);
+      assert(ontology_ideal_join(a, meet_ab) == a);
+      for(size_t ci = 0; ci < ideal_count; ++ci) {
+        uint32_t c = ideals[ci];
+        assert(ontology_ideal_join(ontology_ideal_join(a, b), c) ==
+               ontology_ideal_join(a, ontology_ideal_join(b, c)));
+        assert(ontology_ideal_meet(ontology_ideal_meet(a, b), c) ==
+               ontology_ideal_meet(a, ontology_ideal_meet(b, c)));
+        assert(ontology_ideal_meet(a, ontology_ideal_join(b, c)) ==
+               ontology_ideal_join(ontology_ideal_meet(a, b), ontology_ideal_meet(a, c)));
+        assert(ontology_ideal_join(a, ontology_ideal_meet(b, c)) ==
+               ontology_ideal_meet(ontology_ideal_join(a, b), ontology_ideal_join(a, c)));
+        assert(mask_subset32(ontology_ideal_meet(c, a), b) ==
+               mask_subset32(c, implication_ab));
+        assert(mask_subset32(subtraction_ab, c) ==
+               mask_subset32(a, ontology_ideal_join(b, c)));
+      }
+    }
+  }
 
   /* Heyting Algebra Implication (A => B) & Intuitionistic Negation (~A) */
   uint32_t h_imp = ontology_heyting_implication(1u << ONTO_AI, 1u << ONTO_TECHNOLOGY);
@@ -217,6 +409,12 @@ static void test_category_theory_and_ontology(void) {
   ontology_left_kan_extend(raw, kan);
   ontology_right_kan_extend(kan, ran);
   ontology_mobius_invert(kan, mobius_rec);
+  double root_min_input[ONTOLOGY_NODE_COUNT];
+  double root_min_ran[ONTOLOGY_NODE_COUNT];
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) root_min_input[c] = 10.0 + (double)c;
+  root_min_input[ONTO_ROOT] = -7.0;
+  ontology_right_kan_extend(root_min_input, root_min_ran);
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) assert(root_min_ran[c] == -7.0);
   /* Mobius inversion over the incidence algebra must exactly recover the raw signal f(c) */
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     double diff = mobius_rec[c] > raw[c] ? (mobius_rec[c] - raw[c]) : (raw[c] - mobius_rec[c]);
@@ -251,20 +449,26 @@ static void test_category_theory_and_ontology(void) {
   assert(sheaf.cochain_exactness_norm < 1e-12);
   assert(sheaf.hodge_1_curl_norm >= 0.0);
 
-  /* Lawvere Enriched Quasimetric Space:
-   * 1. Zero self-distance d_L(A, A) = 0
-   * 2. Directed asymmetry: since AI -> TECHNOLOGY is an upward morphism (cost 0.5)
-   *    and TECHNOLOGY -> AI is a downward specialization (cost 1.5),
-   *    d_L(AI, TECHNOLOGY) < d_L(TECHNOLOGY, AI).
-   * 3. Directed Triangle Inequality: d_L(A, C) <= d_L(A, B) + d_L(B, C). */
-  assert(ontology_lawvere_distance(1u << ONTO_AI, 1u << ONTO_AI) < 1e-9);
+  /* Directed Hausdorff-Lawvere quasimetric.  The empty conventions are
+   * sup(empty) = 0 and inf(empty) = +infinity. */
+  assert(ontology_lawvere_distance(0u, 0u) == 0.0);
+  assert(ontology_lawvere_distance(0u, 1u << ONTO_AI) == 0.0);
+  assert(isinf(ontology_lawvere_distance(1u << ONTO_AI, 0u)));
   double dl_up = ontology_lawvere_distance(1u << ONTO_AI, 1u << ONTO_TECHNOLOGY);
   double dl_down = ontology_lawvere_distance(1u << ONTO_TECHNOLOGY, 1u << ONTO_AI);
   assert(dl_up < dl_down);
-  double dl_ac = ontology_lawvere_distance(1u << ONTO_CRYPTOGRAPHY, 1u << ONTO_SPORTS);
-  double dl_ab = ontology_lawvere_distance(1u << ONTO_CRYPTOGRAPHY, 1u << ONTO_TECHNOLOGY);
-  double dl_bc = ontology_lawvere_distance(1u << ONTO_TECHNOLOGY, 1u << ONTO_SPORTS);
-  assert(dl_ac <= dl_ab + dl_bc + 1e-9);
+  for(uint32_t a = 0; a < ONTOLOGY_NODE_COUNT; ++a) {
+    assert(ontology_lawvere_distance(1u << a, 1u << a) == 0.0);
+    for(uint32_t b = 0; b < ONTOLOGY_NODE_COUNT; ++b) {
+      double dl_ab = ontology_lawvere_distance(1u << a, 1u << b);
+      assert(dl_ab >= 0.0);
+      for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+        double dl_ac = ontology_lawvere_distance(1u << a, 1u << c);
+        double dl_bc = ontology_lawvere_distance(1u << b, 1u << c);
+        assert(dl_ac <= dl_ab + dl_bc + 1e-9);
+      }
+    }
+  }
 
   /* Lawvere-Tierney Double-Negation Topology j(A) = ~~A on Heyting ideals:
    * 1. Inflationary: A is a subset of j(A)
@@ -338,7 +542,7 @@ static void test_category_theory_and_ontology(void) {
    * 3. Lawvere Boundary d(A) = v(A) & ~A satisfies exact Leibniz derivation rule on downward-closed ideals:
    *      d(I & J) == (d(I) & J) | (I & d(J))
    * 4. Universal Quantifier ForAll(S) satisfies Galois adjunction: v(A) <= S  <==>  A <= ForAll(S)
-   * 5. Subobject Classifier chi_A: 1 -> Omega has chi_A(c) == 1.0 iff c in v(A). */
+   * 5. The exact subobject classifier is a stage-indexed natural family of sieves. */
   uint32_t ideal_tech = ontology_downward_closure(1u << ONTO_TECHNOLOGY);
   uint32_t ideal_sec = ontology_downward_closure(1u << ONTO_SECURITY);
   uint32_t co_sub_ts = ontology_coheyting_subtraction(ideal_tech, ideal_sec);
@@ -357,13 +561,29 @@ static void test_category_theory_and_ontology(void) {
   uint32_t s_arbitrary_mask = ideal_tech | (1u << ONTO_ROOT);
   uint32_t forall_s = ontology_universal_quantifier(s_arbitrary_mask);
   assert(forall_s == ideal_tech);
-  /* Subobject Classifier Omega */
-  double omega_tech[ONTOLOGY_NODE_COUNT] = {0};
-  ontology_subobject_classifier_omega(1u << ONTO_TECHNOLOGY, omega_tech);
-  assert(omega_tech[ONTO_AI] == 1.0);
-  assert(omega_tech[ONTO_TECHNOLOGY] == 1.0);
-  assert(omega_tech[ONTO_SPORTS] == 0.0);
-  assert(omega_tech[ONTO_ROOT] > 0.0 && omega_tech[ONTO_ROOT] < 1.0);
+  /* For every representative ideal A, chi_A(c) is A intersected with the
+   * principal ideal below c.  Restricting along d -> c gives chi_A(d). */
+  for(size_t ai = 0; ai < ideal_count; ++ai) {
+    uint32_t ideal = ideals[ai];
+    double classifier_score[ONTOLOGY_NODE_COUNT];
+    double compatibility_score[ONTOLOGY_NODE_COUNT];
+    ontology_subobject_classifier_score(ideal, classifier_score);
+    ontology_subobject_classifier_omega(ideal, compatibility_score);
+    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+      uint32_t sieve = ontology_subobject_classifier_sieve(ideal, (OntologyNodeId)c);
+      assert(sieve == (ideal & ontology_node((OntologyNodeId)c)->downward_mask));
+      assert(ontology_is_ideal(sieve));
+      assert(classifier_score[c] >= 0.0 && classifier_score[c] <= 1.0);
+      assert((classifier_score[c] == 1.0) == ((ideal & (1u << c)) != 0u));
+      assert(abs_diff(classifier_score[c], compatibility_score[c]) < 1e-12);
+      for(uint32_t d = 0; d < ONTOLOGY_NODE_COUNT; ++d) {
+        if(ontology_has_morphism((OntologyNodeId)d, (OntologyNodeId)c)) {
+          uint32_t restricted = sieve & ontology_node((OntologyNodeId)d)->downward_mask;
+          assert(restricted == ontology_subobject_classifier_sieve(ideal, (OntologyNodeId)d));
+        }
+      }
+    }
+  }
 
   /* Enriched Isbell Conjugacy (O^* -| Spec_#):
    * 1. Unit F <= (F^*)^# and Counit (G^#)^* <= G
@@ -404,14 +624,51 @@ static void test_category_theory_and_ontology(void) {
   if(th_err < 0.0) th_err = -th_err;
   assert(th_err < 1e-12);
 
-  /* Day Convolution (F *_Day G), Day Internal Hom [G, H]_Day & Day Tensor-Hom Adjunction:
-   *   Hom(F *_Day G, H) == Hom(F, [G, H]_Day) */
-  double day_fg[ONTOLOGY_NODE_COUNT];
-  double day_hom_gh[ONTOLOGY_NODE_COUNT];
-  ontology_day_convolution(raw, kan, day_fg);
-  ontology_day_internal_hom(kan, ran, day_hom_gh);
-  assert(day_fg[ONTO_ROOT] >= raw[ONTO_AI] + kan[ONTO_CYBER]);
-  assert(ontology_day_adjunction_defect(raw, kan, ran) < 1e-12);
+  /* Symmetric cocone convolution and its max-plus residual.  It is associative
+   * and commutative; unrestricted arrays have no global unit, while constant
+   * zero is a unit on isotone sections (not representable by an object here). */
+  double cocone_fg[ONTOLOGY_NODE_COUNT], cocone_gf[ONTOLOGY_NODE_COUNT];
+  double cocone_gh[ONTOLOGY_NODE_COUNT], cocone_left[ONTOLOGY_NODE_COUNT];
+  double cocone_right[ONTOLOGY_NODE_COUNT], cocone_hom_gh[ONTOLOGY_NODE_COUNT];
+  double zero_section[ONTOLOGY_NODE_COUNT] = {0};
+  double isotone_unit_check[ONTOLOGY_NODE_COUNT];
+  double unrestricted_unit_check[ONTOLOGY_NODE_COUNT];
+  ontology_cocone_convolution(raw, kan, cocone_fg);
+  ontology_cocone_convolution(kan, raw, cocone_gf);
+  ontology_cocone_convolution(kan, ran, cocone_gh);
+  ontology_cocone_convolution(cocone_fg, ran, cocone_left);
+  ontology_cocone_convolution(raw, cocone_gh, cocone_right);
+  ontology_cocone_internal_hom(kan, ran, cocone_hom_gh);
+  ontology_cocone_convolution(kan, zero_section, isotone_unit_check);
+  ontology_cocone_convolution(raw, zero_section, unrestricted_unit_check);
+  double cocone_in_place[ONTOLOGY_NODE_COUNT];
+  double hom_in_place[ONTOLOGY_NODE_COUNT];
+  memcpy(cocone_in_place, raw, sizeof(cocone_in_place));
+  memcpy(hom_in_place, ran, sizeof(hom_in_place));
+  ontology_cocone_convolution(cocone_in_place, kan, cocone_in_place);
+  ontology_cocone_internal_hom(kan, hom_in_place, hom_in_place);
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    assert(abs_diff(cocone_fg[c], cocone_gf[c]) < 1e-12);
+    assert(abs_diff(cocone_left[c], cocone_right[c]) < 1e-12);
+    assert(isfinite(cocone_hom_gh[c]));
+    assert(abs_diff(cocone_in_place[c], cocone_fg[c]) < 1e-12);
+    assert(abs_diff(hom_in_place[c], cocone_hom_gh[c]) < 1e-12);
+    assert(abs_diff(isotone_unit_check[c], kan[c]) < 1e-12);
+  }
+  assert(unrestricted_unit_check[ONTO_TECHNOLOGY] > raw[ONTO_TECHNOLOGY]);
+  assert(cocone_fg[ONTO_ROOT] >= raw[ONTO_AI] + kan[ONTO_CYBER]);
+  assert(ontology_cocone_adjunction_defect(raw, kan, ran) < 1e-12);
+
+  /* The historical Day-named entry points remain exact compatibility aliases. */
+  double compatibility_fg[ONTOLOGY_NODE_COUNT], compatibility_hom[ONTOLOGY_NODE_COUNT];
+  ontology_day_convolution(raw, kan, compatibility_fg);
+  ontology_day_internal_hom(kan, ran, compatibility_hom);
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    assert(abs_diff(compatibility_fg[c], cocone_fg[c]) < 1e-12);
+    assert(abs_diff(compatibility_hom[c], cocone_hom_gh[c]) < 1e-12);
+  }
+  assert(abs_diff(ontology_day_adjunction_defect(raw, kan, ran),
+                  ontology_cocone_adjunction_defect(raw, kan, ran)) < 1e-12);
 
   /* Entropic Sinkhorn-Knopp Optimal Transport & Debiased Sinkhorn Divergence:
    *   1. S_eps(p, p) == 0.0 (exact self-debiased zero)
@@ -466,25 +723,32 @@ static void test_category_theory_and_ontology(void) {
     assert(c_err < 1e-12);
   }
 
-  /* Grothendieck-Leray Spectral Sequence (E_r^{p,q}, d_r) of Rank-Filtered Nerve F_p N(C):
-   *   chi(E_0) == chi(E_1) == chi(E_2) == chi(E_infty) == 1 */
-  SpectralSequenceState spec_seq;
-  ontology_spectral_sequence(raw, &spec_seq);
+  /* Rank-filtered page diagnostic.  The historical spectral-sequence entry
+   * point remains an exact source alias, without claiming derived pages. */
+  RankPageDiagnostic spec_seq;
+  SpectralSequenceState legacy_spec_seq;
+  ontology_rank_page_diagnostic(raw, &spec_seq);
+  ontology_spectral_sequence(raw, &legacy_spec_seq);
   assert(spec_seq.euler_e0 == 1);
   assert(spec_seq.euler_e1 == 1);
   assert(spec_seq.euler_e2 == 1);
   assert(spec_seq.euler_e_inf == 1);
   assert(spec_seq.differential_nilpotency_defect == 0.0);
+  assert(spec_seq.derived_pages_computed == 0);
   assert(spec_seq.e1_stratum_energy[0] > 0.0);
+  assert(legacy_spec_seq.e1_stratum_energy[0] == spec_seq.e1_stratum_energy[0]);
 
-  /* Quillen Model Category Factorization A ~-> M ->> (A v B):
-   *   j(M) == j(v(A)) and M <= (v(A) | v(B)) */
-  uint32_t q_m = 0, q_fib = 0;
-  int q_weq = 0;
-  ontology_quillen_factorize(1u << ONTO_AI, 1u << ONTO_SECURITY, &q_m, &q_fib, &q_weq);
+  /* Modal closure diagnostic: j(M) == j(v(A)) and M is below the target. */
+  uint32_t q_m = 0, q_fib = 0, legacy_q_m = 0, legacy_q_fib = 0;
+  int q_weq = 0, legacy_q_weq = 0;
+  ontology_modal_closure_diagnostic(
+      1u << ONTO_AI, 1u << ONTO_SECURITY, &q_m, &q_fib, &q_weq);
+  ontology_quillen_factorize(
+      1u << ONTO_AI, 1u << ONTO_SECURITY, &legacy_q_m, &legacy_q_fib, &legacy_q_weq);
   assert(q_weq == 1);
   assert((q_m & ~q_fib) == 0u);
   assert(ontology_lawvere_tierney_sheafify(q_m) == ontology_lawvere_tierney_sheafify(1u << ONTO_AI));
+  assert(legacy_q_m == q_m && legacy_q_fib == q_fib && legacy_q_weq == q_weq);
 
   /* Spivak Polynomial Endofunctor P_C(X) & Dependent Co-Design Lens */
   double poly_px[ONTOLOGY_NODE_COUNT], poly_lens[ONTOLOGY_NODE_COUNT];
@@ -835,7 +1099,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   ServerContext ctx = {&eng, &tok, NULL, 8787u};
   int status = 0;
   Buffer json;
-  assert(http_handle_request(&ctx, "GET", "/api/v1/ontology?sub=ai&sup=knowledge-economy&a=cyber&b=ai", "", 0, &status, &json) == 0);
+  assert(http_handle_request(&ctx, "GET", "/api/v1/ontology?sub=ai&sup=knowledge-economy&a=ai&b=space", "", 0, &status, &json) == 0);
   assert(status == 200);
   assert(strstr(json.data, "\"exists\":true") != NULL);
   assert(strstr(json.data, "\"euler_characteristic\":1") != NULL);
@@ -850,7 +1114,19 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(strstr(json.data, "\"weighted_colimit_self\":") != NULL);
   assert(strstr(json.data, "\"cheeger_constant\":") != NULL);
   assert(strstr(json.data, "\"cheeger_buser_holds\":true") != NULL);
+  assert(strstr(json.data, "\"cocone_adjunction_defect_self\":") != NULL);
   assert(strstr(json.data, "\"day_adjunction_defect_self\":") != NULL);
+  assert(strstr(json.data, "\"order_audit\":{") != NULL);
+  assert(strstr(json.data, "\"order\":{") != NULL);
+  assert(strstr(json.data, "\"lattice\":{\"deprecated\":true") != NULL);
+  assert(strstr(json.data, "\"minimal_upper_bounds\":") != NULL);
+  assert(strstr(json.data, "\"maximal_lower_bounds\":") != NULL);
+  assert(strstr(json.data, "\"unique_join\":") != NULL);
+  assert(strstr(json.data, "\"unique_join\":null") != NULL);
+  assert(strstr(json.data, "\"unique_meet\":") != NULL);
+  assert(strstr(json.data, "\"ideal_join\":") != NULL);
+  assert(strstr(json.data, "\"ideal_meet\":") != NULL);
+  assert(strstr(json.data, "\"characteristic_sieve_a_at_b\":") != NULL);
   assert(strstr(json.data, "\"coheyting_subtraction\":") != NULL);
   assert(strstr(json.data, "\"lawvere_boundary_a\":") != NULL);
   assert(strstr(json.data, "\"yoneda_kan_score\":") != NULL);
@@ -863,11 +1139,13 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(topos_st.leibniz_rule_holds == 1);
   assert(topos_st.isbell_envelope_defect < 1e-12);
   assert(topos_st.tensor_hom_adjunction_defect < 1e-12);
-  assert(topos_st.day_adjunction_defect < 1e-12);
-  assert(topos_st.quillen_weak_equivalence_holds == 1);
+  assert(topos_st.cocone_adjunction_defect < 1e-12);
+  assert(topos_st.day_adjunction_defect == topos_st.cocone_adjunction_defect);
+  assert(topos_st.modal_closure_matches == 1);
   assert(topos_st.sinkhorn_ot.cheeger_buser_holds == 1);
   assert(topos_st.sinkhorn_ot.marginal_defect_l1 < 1e-6);
-  assert(topos_st.spectral_seq.euler_e0 == 1 && topos_st.spectral_seq.euler_e_inf == 1);
+  assert(topos_st.rank_page_diagnostics.euler_e0 == 1 &&
+         topos_st.rank_page_diagnostics.euler_e_inf == 1);
   assert(topos_st.ricci_curv.gauss_bonnet_defect < 1e-12);
   assert(topos_st.ricci_curv.ricci_flow_volume_defect < 1e-12);
   assert(topos_st.zeta_tropical.ihara_det_at_zero_defect < 1e-12);
@@ -877,18 +1155,29 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(topos_st.rota_baxter.spitzer_birkhoff_defect < 1e-11);
   assert(topos_st.profunctor_end > 0.0);
   assert(topos_st.profunctor_coend > 0.0);
-  assert(topos_st.omega_truth_a[ONTO_AI] == 1.0);
+  assert(topos_st.classifier_score_a[ONTO_AI] == 1.0);
+  assert(topos_st.omega_truth_a[ONTO_AI] == topos_st.classifier_score_a[ONTO_AI]);
 
   assert(http_handle_request(&ctx, "GET", "/api/v1/topos?source_region=east-asia&target_region=europe&a=ai&b=technology", "", 0, &status, &json) == 0);
   assert(status == 200);
   assert(strstr(json.data, "\"leibniz_rule_holds\":true") != NULL);
   assert(strstr(json.data, "\"isbell_and_enriched_limits\":") != NULL);
+  assert(strstr(json.data, "\"subobject_classifier\":{\"score\":") != NULL);
   assert(strstr(json.data, "\"subobject_classifier_omega\":") != NULL);
+  assert(strstr(json.data, "\"characteristic_sieve_a_at_b\":") != NULL);
   assert(strstr(json.data, "\"equalizer_subobject\":") != NULL);
-  assert(strstr(json.data, "\"day_convolution\":") != NULL);
-  assert(strstr(json.data, "\"quillen_model_factorization\":{\"weak_equivalence_holds\":true") != NULL);
+  assert(strstr(json.data, "\"cocone_convolution\":") != NULL);
+  assert(strstr(json.data, "\"cocone_adjunction_defect\":") != NULL);
+  assert(strstr(json.data, "\"day_convolution\":{\"deprecated\":true") != NULL);
+  assert(strstr(json.data, "\"modal_closure_diagnostic\":{\"closure_matches\":true") != NULL);
+  assert(strstr(json.data, "\"quillen_model_factorization\":{\"deprecated\":true") != NULL);
   assert(strstr(json.data, "\"sinkhorn_optimal_transport\":") != NULL);
-  assert(strstr(json.data, "\"spectral_sequence\":{\"euler_e0\":1,\"euler_e1\":1,\"euler_e2\":1,\"euler_e_inf\":1") != NULL);
+  assert(strstr(json.data, "\"rank_page_diagnostic\":{\"nerve_euler_characteristic\":1") != NULL);
+  assert(strstr(json.data, "\"rank_strata\":[") != NULL);
+  assert(strstr(json.data, "\"simplex_counts_by_rank\":[") != NULL);
+  assert(strstr(json.data, "\"derived_pages_computed\":false") != NULL);
+  assert(strstr(json.data, "\"spectral_sequence\":{\"deprecated\":true") != NULL);
+  assert(strstr(json.data, "\"diagnostic_only\":true") != NULL);
   assert(strstr(json.data, "\"polynomial_functor_codesign\":") != NULL);
   assert(strstr(json.data, "\"ricci_curvature\":") != NULL);
   assert(strstr(json.data, "\"ihara_zeta_and_tropical\":") != NULL);
@@ -956,7 +1245,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
 
   assert(http_handle_request(&ctx, "GET", "/console", "", 0, &status, &json) == 0);
   assert(status == 200);
-  assert(strstr(json.data, "TOPOS &amp; SHEAF INTELLIGENCE CONSOLE") != NULL);
+  assert(strstr(json.data, "FINITE POSET &amp; IDEAL ANALYTICS") != NULL);
   buffer_free(&json);
 
   assert(http_handle_request(&ctx, "GET", "/api/v1/pushout?left_region=east-asia&right_region=europe&over=mentioned_country", "", 0, &status, &json) == 0);
@@ -1666,10 +1955,12 @@ static void test_one_machine_consolidation_and_appliance(void) {
 
   EngineApplianceState app;
   engine_appliance_state(&restored, &app);
-  assert(app.all_theorems_verified == 1);
-  assert(app.theorems_verified_count == 12u);
-  assert(app.theorems_total_count == 12u);
-  assert(app.max_numerical_defect < 1e-10);
+  assert(app.all_checks_passed == 1);
+  assert(app.checks_passed == 12u);
+  assert(app.checks_total == 12u);
+  assert(app.all_theorems_verified == app.all_checks_passed);
+  assert(app.theorems_verified_count == app.checks_passed);
+  assert(app.max_numerical_residual < 1e-6);
   assert(app.total_resident_bytes > app.struct_base_bytes);
   assert(app.arena_bytes_used > 0u);
   assert(app.arena_bytes_capacity >= 65536u);
@@ -1683,9 +1974,14 @@ static void test_one_machine_consolidation_and_appliance(void) {
   assert(http_handle_request(&ctx, "GET", "/api/v1/appliance", "", 0, &status, &out) == 0);
   assert(status == 200);
   assert(strstr(out.data, "\"appliance\":\"oyez-one-machine-c23\"") != NULL);
+  assert(strstr(out.data, "\"status_deprecated\":true") != NULL);
+  assert(strstr(out.data, "\"consistency_status\":\"passing\"") != NULL);
+  assert(strstr(out.data, "\"all_checks_passed\":true") != NULL);
+  assert(strstr(out.data, "\"checks_passed\":12") != NULL);
   assert(strstr(out.data, "\"all_theorems_verified\":true") != NULL);
   assert(strstr(out.data, "\"theorems_verified_count\":12") != NULL);
   assert(strstr(out.data, "\"total_resident_bytes\":") != NULL);
+  assert(strstr(out.data, "\"cocone_adjunction_defect\":") != NULL);
   buffer_free(&out);
 
   engine_free(&restored);
