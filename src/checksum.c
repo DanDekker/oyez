@@ -5,6 +5,7 @@
 
 uint32_t checksum_crc32_update(uint32_t previous, const void *bytes, size_t length)
 {
+    if (!bytes && length > 0) return previous;
     uint32_t table[16];
     for (unsigned i = 0; i < 16; ++i) {
         uint32_t value = i;
@@ -82,6 +83,7 @@ static void sha256_compress(uint32_t state[8], const unsigned char bytes[64])
 
 void sha256_begin(Sha256Digest *digest)
 {
+    if (!digest) return;
     *digest = (Sha256Digest){
         .state = {
             0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
@@ -122,6 +124,11 @@ bool sha256_update(Sha256Digest *digest, const void *bytes, size_t length)
 
 void sha256_end(const Sha256Digest *digest, char hex[65])
 {
+    if (!hex) return;
+    if (!digest || digest->used >= 64) {
+        hex[0] = '\0';
+        return;
+    }
     uint32_t state[8];
     memcpy(state, digest->state, sizeof(state));
     unsigned char last[128] = {0};
@@ -143,6 +150,7 @@ void sha256_end(const Sha256Digest *digest, char hex[65])
 
 void sha256_hex(const void *bytes, size_t length, char hex[65])
 {
+    if (!hex) return;
     Sha256Digest digest;
     sha256_begin(&digest);
     if (!sha256_update(&digest, bytes, length)) {

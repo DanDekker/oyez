@@ -566,7 +566,24 @@ int m1_tokenizer_train(M1Tokenizer *tokenizer, const uint8_t *data, size_t len, 
                         &cfg,
                         err);
   buffer_free(&filtered);
-  return ok ? 0 : -1;
+  if(!ok) return -1;
+
+  Buffer bpe_buf;
+  buffer_init(&bpe_buf);
+  if(token_valid(&tokenizer->bpe) && token_save(&tokenizer->bpe, &bpe_buf)) {
+    Buffer payload;
+    buffer_init(&payload);
+    buffer_append(&payload, "OYEZMT02", 8u);
+    wire_append_u32(&payload, tokenizer->target_vocab_size);
+    wire_append_u32(&payload, (uint32_t)bpe_buf.len);
+    if(bpe_buf.len > 0) buffer_append(&payload, bpe_buf.data, bpe_buf.len);
+    if(payload.data && !payload.truncated) {
+      sha256_hex(payload.data, payload.len, tokenizer->sha256);
+    }
+    buffer_free(&payload);
+  }
+  buffer_free(&bpe_buf);
+  return 0;
 }
 
 uint32_t m1_tokenizer_vocab_size(const M1Tokenizer *tokenizer) {
@@ -589,6 +606,7 @@ int m1_tokenizer_encode(const M1Tokenizer *tokenizer,
                         uint32_t **out_tokens,
                         size_t *out_count) {
   if(!tokenizer || !out_tokens || !out_count || (!data && len > 0)) return -1;
+  m1_dispatch_init();
   *out_tokens = NULL;
   *out_count = 0;
   if(len == 0) return 0;
@@ -796,7 +814,7 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
      !wire_read_u32(bytes, payload_len, &off, &bpe_len) ||
      target_vocab < M1_FIXED_VOCAB_SIZE ||
      target_vocab > M1_DEFAULT_VOCAB_SIZE ||
-     off + bpe_len != payload_len) {
+     bpe_len != payload_len - off) {
     free(bytes);
     return -1;
   }

@@ -668,8 +668,8 @@ bool token_load(Tokenizer *t, const void *bytes, size_t length, char error[256])
     }
     for (uint32_t i = 0; i < n_special; ++i) {
         uint32_t n;
-        if (!wire_read_u32(body, body_len, &pos, &n) || pos + n > body_len) { if (error) snprintf(error, 256, "token: truncated special"); goto done; }
-        t->special[i] = malloc(n + 1);
+        if (!wire_read_u32(body, body_len, &pos, &n) || n > body_len - pos) { if (error) snprintf(error, 256, "token: truncated special"); goto done; }
+        t->special[i] = malloc((size_t)n + 1u);
         if (!t->special[i]) { if (error) snprintf(error, 256, "token: OOM"); goto done; }
         memcpy(t->special[i], body + pos, n);
         t->special[i][n] = 0;
