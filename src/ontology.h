@@ -1,0 +1,133 @@
+#ifndef OYEZ_ONTOLOGY_H
+#define OYEZ_ONTOLOGY_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+enum {
+  WORLD_REGION_COUNT = 11,
+  NEWS_TYPE_COUNT = 10,
+  ONTOLOGY_NODE_COUNT = 24,
+  MAX_EXTRACTED_COUNTRIES = 12,
+  MAX_EXTRACTED_ORGS = 12,
+  MAX_LEXICAL_TOKENS = 256
+};
+
+typedef enum {
+  REGION_NORTH_AMERICA = 0,
+  REGION_LATIN_AMERICA = 1,
+  REGION_EUROPE = 2,
+  REGION_MIDDLE_EAST = 3,
+  REGION_AFRICA = 4,
+  REGION_SOUTH_ASIA = 5,
+  REGION_EAST_ASIA = 6,
+  REGION_SOUTHEAST_ASIA = 7,
+  REGION_CENTRAL_ASIA = 8,
+  REGION_OCEANIA = 9,
+  REGION_GLOBAL = 10
+} WorldRegion;
+
+typedef enum {
+  NEWS_TYPE_BREAKING_DISPATCH = 0,
+  NEWS_TYPE_INVESTIGATIVE_REPORT = 1,
+  NEWS_TYPE_POLICY_AND_LEGISLATIVE = 2,
+  NEWS_TYPE_SCIENTIFIC_RESEARCH = 3,
+  NEWS_TYPE_MARKET_AND_ECONOMIC = 4,
+  NEWS_TYPE_OPINION_AND_EDITORIAL = 5,
+  NEWS_TYPE_EXPLAINER_AND_ANALYSIS = 6,
+  NEWS_TYPE_PRESS_AND_OFFICIAL = 7,
+  NEWS_TYPE_CULTURAL_AND_FEATURE = 8,
+  NEWS_TYPE_GENERAL_REPORT = 9
+} NewsType;
+
+typedef enum {
+  ONTO_ROOT = 0,
+  ONTO_PUBLIC_AFFAIRS = 1,
+  ONTO_KNOWLEDGE_ECONOMY = 2,
+  ONTO_PLANETARY_SYSTEMS = 3,
+  ONTO_SOCIETY = 4,
+  ONTO_POLITICS = 5,
+  ONTO_GEOPOLITICS = 6,
+  ONTO_LAW = 7,
+  ONTO_SECURITY = 8,
+  ONTO_DEFENSE = 9,
+  ONTO_CYBER = 10,
+  ONTO_ECONOMY = 11,
+  ONTO_FINANCE = 12,
+  ONTO_TECHNOLOGY = 13,
+  ONTO_AI = 14,
+  ONTO_SCIENCE = 15,
+  ONTO_SPACE = 16,
+  ONTO_HEALTH = 17,
+  ONTO_CLIMATE = 18,
+  ONTO_ENERGY = 19,
+  ONTO_HUMAN_RIGHTS = 20,
+  ONTO_LABOR = 21,
+  ONTO_CULTURE = 22,
+  ONTO_SPORTS = 23
+} OntologyNodeId;
+
+typedef struct {
+  OntologyNodeId id;
+  const char *slug;
+  const char *label;
+  uint32_t parents_mask;
+  uint32_t upward_mask;   /* Principal filter ^u: all v with u <= v */
+  uint32_t downward_mask; /* Principal ideal  vu: all v with v <= u */
+} OntologyNode;
+
+typedef struct {
+  char countries[MAX_EXTRACTED_COUNTRIES][4];
+  size_t country_count;
+  char organizations[MAX_EXTRACTED_ORGS][24];
+  size_t org_count;
+  uint32_t direct_ontology_mask;
+  uint32_t closure_ontology_mask;
+  NewsType news_type;
+} ExtractedEntities;
+
+typedef struct {
+  char term[32];
+  uint64_t hash;
+  float weight;
+  uint32_t tf;
+} LexicalTerm;
+
+const char *world_region_slug(WorldRegion region);
+int world_region_from_slug(const char *slug, WorldRegion *out);
+
+const char *news_type_slug(NewsType type);
+int news_type_from_slug(const char *slug, NewsType *out);
+NewsType news_type_classify(const char *title,
+                            const char *summary,
+                            const char *content,
+                            const char *feed_category);
+
+void ontology_init(void);
+const OntologyNode *ontology_node(OntologyNodeId id);
+int ontology_from_slug(const char *slug, OntologyNodeId *out);
+int ontology_has_morphism(OntologyNodeId sub, OntologyNodeId sup);
+uint32_t ontology_upward_closure(uint32_t mask);
+uint32_t ontology_downward_closure(uint32_t mask);
+OntologyNodeId ontology_join(OntologyNodeId a, OntologyNodeId b);
+uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b);
+void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores);
+
+void entities_extract(const char *title,
+                      const char *summary,
+                      const char *content,
+                      const char *feed_category,
+                      const char *const *tags,
+                      size_t tag_count,
+                      ExtractedEntities *out);
+
+size_t lexical_analyze(const char *text,
+                       float field_weight,
+                       LexicalTerm *terms,
+                       size_t current_count,
+                       size_t max_terms,
+                       uint32_t *out_word_tokens);
+uint64_t simhash64_compute(const LexicalTerm *terms, size_t count);
+uint32_t simhash64_distance(uint64_t a, uint64_t b);
+
+#endif
