@@ -426,6 +426,78 @@ int http_handle_request(ServerContext *ctx,
 
   OyezEngine *eng = ctx->engine;
 
+  if(strcmp(method, "GET") == 0 && (strcmp(path, "/console") == 0 || strcmp(path, "/index.html") == 0)) {
+    static const char *const k_console_html_head =
+      "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+      "<title>Oyez // C23 Category-Theoretic Intelligence Console</title>"
+      "<style>"
+      "body{margin:0;background:#080b11;color:#e2e8f0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}"
+      "header{padding:14px 20px;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;background:#0b111e}"
+      "h1{margin:0;font-size:15px;color:#38bdf8;letter-spacing:.04em}"
+      ".grid{display:grid;grid-template-columns:360px 1fr;gap:14px;padding:14px}"
+      ".card{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:12px;margin-bottom:12px}"
+      ".card h2{margin:0 0 8px;font-size:12px;text-transform:uppercase;color:#94a3b8;letter-spacing:.06em}"
+      ".stat-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #162032}"
+      "input,select,button{background:#1e293b;color:#f8fafc;border:1px solid #334155;padding:6px 10px;border-radius:4px;font:inherit}"
+      "button{background:#0284c7;border-color:#0369a1;cursor:pointer}"
+      ".art{padding:10px;border-bottom:1px solid #1e293b}"
+      ".art a{color:#38bdf8;text-decoration:none;font-weight:600}"
+      ".badge{display:inline-block;padding:1px 6px;border-radius:3px;background:#1e293b;color:#7dd3fc;font-size:11px;margin-right:4px}"
+      "</style></head><body>"
+      "<header><h1>OYEZ // C23 TOPOS &amp; SHEAF INTELLIGENCE CONSOLE</h1>"
+      "<div id=\"hdr-meta\">Loading C23 Topos Engine...</div></header>"
+      "<div class=\"grid\"><div>"
+      "<div class=\"card\"><h2>Category C &amp; Hodge Invariants</h2><div id=\"onto-stats\"></div></div>"
+      "<div class=\"card\"><h2>Persistent Homology Barcode (beta_0, beta_1)</h2><div id=\"ph-stats\"></div></div>"
+      "<div class=\"card\"><h2>Grothendieck Cartesian Lifts (int_C F)</h2><div id=\"fib-list\"></div></div>"
+      "</div><div>"
+      "<div class=\"card\"><h2>BM25+ &amp; Poset Presheaf Fiber Search</h2>"
+      "<div style=\"display:flex;gap:8px;margin-bottom:10px\">"
+      "<input id=\"q\" placeholder=\"Search terms, CVEs, AI models, tickers...\" style=\"flex:1\">"
+      "<select id=\"cat\"><option value=\"all-news\">all-news (Terminal)</option>"
+      "<option value=\"ai\">ai</option><option value=\"cyber\">cyber</option>"
+      "<option value=\"cryptography\">cryptography</option><option value=\"finance\">finance</option>"
+      "<option value=\"semiconductors\">semiconductors</option><option value=\"sports\">sports</option></select>"
+      "<button onclick=\"runSearch()\">Query Presheaf</button></div>"
+      "<div id=\"results\"></div></div></div></div>";
+    static const char *const k_console_html_script =
+      "<script>"
+      "async function init(){"
+      "const [st,on,tm,fb]=await Promise.all([fetch('/api/v1/stats').then(r=>r.json()),"
+      "fetch('/api/v1/ontology').then(r=>r.json()),fetch('/api/v1/temporal').then(r=>r.json()),"
+      "fetch('/api/v1/fibration').then(r=>r.json())]);"
+      "document.getElementById('hdr-meta').textContent="
+      "`Feeds: ${st.feeds} | Articles: ${st.articles} | Terms: ${st.inverted_terms} | M1 Vocab: ${st.tokenizer_vocab_size}`;"
+      "document.getElementById('onto-stats').innerHTML="
+      "`<div class='stat-row'><span>Leinster Magnitude |C|_L</span><b>${on.leinster_magnitude}</b></div>"
+      "<div class='stat-row'><span>Euler Characteristic chi(N(C))</span><b>${on.euler_characteristic}</b></div>"
+      "<div class='stat-row'><span>Fiedler Eigenvalue l_2(L_0)</span><b>${on.fiedler_eigenvalue}</b></div>"
+      "<div class='stat-row'><span>Hodge Gradient Norm ||d_0 phi||</span><b>${on.hodge_gradient_norm}</b></div>"
+      "<div class='stat-row'><span>Hodge Solenoidal Norm</span><b>${on.hodge_solenoidal_norm}</b></div>"
+      "<div class='stat-row'><span>Cochain Exactness ||d_1 d_0||</span><b>${on.cochain_exactness_norm}</b></div>"
+      "<div class='stat-row'><span>Kleisli Monad Entropy</span><b>${tm.adjunction_monad.kleisli_entropy}</b></div>"
+      "<div class='stat-row'><span>Fastest Emerging Stalk</span><b>${tm.temporal_sheaf.fastest_emerging_category}</b></div>`;"
+      "document.getElementById('ph-stats').innerHTML=tm.persistent_homology.filtration_steps.map(s=>"
+      "`<div class='stat-row'><span>eps=${s.threshold_eps.toFixed(2)} (V=${s.f_vector[0]},E=${s.f_vector[1]})</span>"
+      "<b>b0=${s.betti_0}, b1=${s.betti_1}</b></div>`).join('');"
+      "document.getElementById('fib-list').innerHTML=(fb.cartesian_lifts||[]).slice(0,5).map(l=>"
+      "`<div class='stat-row'><span>${l.sub_category} -> ${l.sup_category}</span>"
+      "<span class='badge'>${l.transport_witness}</span></div>`).join('');"
+      "runSearch();}"
+      "async function runSearch(){"
+      "const q=encodeURIComponent(document.getElementById('q').value);"
+      "const c=encodeURIComponent(document.getElementById('cat').value);"
+      "const r=await fetch(`/api/v1/articles?q=${q}&category=${c}&limit=20`).then(x=>x.json());"
+      "document.getElementById('results').innerHTML=(r.articles||[]).map(a=>"
+      "`<div class='art'><a href='${a.url}' target='_blank'>${a.title}</a>"
+      "<div><span class='badge'>${a.feed_country}</span><span class='badge'>${a.news_type}</span>"
+      "<span class='badge'>${a.ai_tier}</span><span class='badge'>${a.clearance}</span></div></div>`).join('');}"
+      "init();</script></body></html>";
+    buffer_text(out_json, k_console_html_head);
+    buffer_text(out_json, k_console_html_script);
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/health") == 0)) {
     size_t cat_count = 0;
     catalog_entries(&cat_count);
@@ -787,6 +859,164 @@ int http_handle_request(ServerContext *ctx,
       buffer_text(out_json, "}");
     }
     buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/temporal") == 0) {
+    double raw_scores[ONTOLOGY_NODE_COUNT];
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      raw_scores[i] = (double)bitset_popcount(&eng->by_direct_ontology[i]);
+    }
+    PersistenceBarcode barcode;
+    ontology_persistent_homology(raw_scores, &barcode);
+
+    AdjunctionMonadState monad;
+    ontology_adjunction_monad(raw_scores, &monad);
+
+    TemporalSheafState temp;
+    engine_temporal_sheaf(eng, &temp);
+
+    buffer_format(out_json,
+                  "{\"persistent_homology\":{\"total_persistence_l1\":%.4f,\"max_void_lifetime\":%.4f,"
+                  "\"persistent_core\":",
+                  barcode.total_persistence_l1,
+                  barcode.max_void_lifetime);
+    serialize_ontology_mask_array(out_json, barcode.persistent_core_mask);
+    buffer_text(out_json, ",\"filtration_steps\":[");
+    for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
+      if(s > 0) buffer_text(out_json, ",");
+      buffer_format(out_json,
+                    "{\"threshold_eps\":%.2f,\"f_vector\":[%u,%u,%u],"
+                    "\"betti_0\":%u,\"betti_1\":%u,\"euler_char\":%d}",
+                    barcode.steps[s].threshold_eps,
+                    barcode.steps[s].f_vector[0],
+                    barcode.steps[s].f_vector[1],
+                    barcode.steps[s].f_vector[2],
+                    barcode.steps[s].betti_0,
+                    barcode.steps[s].betti_1,
+                    barcode.steps[s].euler_char);
+    }
+    buffer_format(out_json,
+                  "]},\"adjunction_monad\":{\"zig_zag_triangle_defect\":%.6e,"
+                  "\"kleisli_entropy\":%.4f,\"eilenberg_moore_fixed_points\":",
+                  monad.zig_zag_triangle_defect,
+                  monad.kleisli_entropy);
+    serialize_ontology_mask_array(out_json, monad.eilenberg_moore_mask);
+    buffer_format(out_json,
+                  "},\"temporal_sheaf\":{\"stalk_count\":%d,\"connection_laplacian_norm\":%.4f,"
+                  "\"regime_shift_energy\":%.4f,\"fastest_emerging_category\":\"%s\","
+                  "\"highest_acceleration_category\":\"%s\",\"top_velocities\":{",
+                  TEMPORAL_STALK_COUNT,
+                  temp.connection_laplacian_norm,
+                  temp.regime_shift_energy,
+                  ontology_node(temp.fastest_emerging_node)->slug,
+                  ontology_node(temp.highest_acceleration_node)->slug);
+    for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
+      if(c > 1u) buffer_text(out_json, ",");
+      json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
+      buffer_format(out_json, ":%.2f", temp.velocity[c]);
+    }
+    buffer_text(out_json, "}}}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/operad") == 0) {
+    char r1[64], r2[64], r3[64];
+    if(!query_param(qs, "r1", r1, sizeof(r1)) || !r1[0]) strcpy(r1, "east-asia");
+    if(!query_param(qs, "r2", r2, sizeof(r2)) || !r2[0]) strcpy(r2, "north-america");
+    if(!query_param(qs, "r3", r3, sizeof(r3)) || !r3[0]) strcpy(r3, "europe");
+
+    OperadChain chains[16];
+    size_t count = engine_operad_compose(eng, r1, r2, r3, chains, 16u);
+    buffer_format(out_json,
+                  "{\"stage_regions\":[\"%s\",\"%s\",\"%s\"],\"total\":%zu,\"operad_chains\":[",
+                  r1, r2, r3, count);
+    for(size_t i = 0; i < count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_text(out_json, "{\"witness_ab\":");
+      json_cstr(out_json, chains[i].witness_ab);
+      buffer_text(out_json, ",\"witness_bc\":");
+      json_cstr(out_json, chains[i].witness_bc);
+      buffer_format(out_json,
+                    ",\"total_lawvere_geodesic\":%.4f,\"operad_composition_score\":%.4f,\"composite_topics\":",
+                    chains[i].total_lawvere_geodesic,
+                    chains[i].operad_composition_score);
+      serialize_ontology_mask_array(out_json, chains[i].composite_ontology_mask);
+      buffer_text(out_json, ",\"stage_a\":");
+      serialize_article(out_json, chains[i].stage_a, chains[i].operad_composition_score, 0);
+      buffer_text(out_json, ",\"stage_b\":");
+      serialize_article(out_json, chains[i].stage_b, chains[i].operad_composition_score, 0);
+      buffer_text(out_json, ",\"stage_c\":");
+      serialize_article(out_json, chains[i].stage_c, chains[i].operad_composition_score, 0);
+      buffer_text(out_json, "}");
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/feed.xml") == 0) {
+    char q_str[128], cat[64], reg[64];
+    query_param(qs, "q", q_str, sizeof(q_str));
+    query_param(qs, "category", cat, sizeof(cat));
+    query_param(qs, "region", reg, sizeof(reg));
+
+    ArticleQuery aq;
+    memset(&aq, 0, sizeof(aq));
+    aq.query = q_str[0] ? q_str : NULL;
+    aq.category = cat[0] ? cat : NULL;
+    aq.region = reg[0] ? reg : NULL;
+    aq.use_category_morphism = 1;
+    aq.limit = 25u;
+
+    SearchResponse res;
+    engine_search(eng, &aq, &res);
+
+    buffer_text(out_json,
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                "<feed xmlns=\"http://www.w3.org/2005/Atom\">\n"
+                "  <title>Oyez Category-Theoretic Intelligence Stream</title>\n"
+                "  <id>urn:oyez:topos:feed</id>\n"
+                "  <updated>2026-11-03T06:00:00Z</updated>\n");
+    for(size_t i = 0; i < res.count; ++i) {
+      const ArticleRecord *a = res.hits[i].article;
+      buffer_format(out_json,
+                    "  <entry>\n"
+                    "    <id>urn:oyez:article:%u</id>\n"
+                    "    <title><![CDATA[%s]]></title>\n"
+                    "    <link href=\"%s\"/>\n"
+                    "    <updated>%s</updated>\n"
+                    "    <summary><![CDATA[%s]]></summary>\n"
+                    "  </entry>\n",
+                    a->id,
+                    a->title ? a->title : "",
+                    a->url ? a->url : "",
+                    a->published_at ? a->published_at : "2026-11-03T00:00:00Z",
+                    a->summary ? a->summary : "");
+    }
+    buffer_text(out_json, "</feed>\n");
+    search_response_free(&res);
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/stream") == 0) {
+    TemporalSheafState temp;
+    engine_temporal_sheaf(eng, &temp);
+    buffer_format(out_json,
+                  "event: topology\n"
+                  "data: {\"feeds\":%zu,\"articles\":%zu,\"leinster_magnitude\":%.4f,"
+                  "\"connection_laplacian\":%.4f,\"emerging_category\":\"%s\"}\n\n",
+                  eng->feed_count,
+                  eng->article_count,
+                  ontology_leinster_magnitude(),
+                  temp.connection_laplacian_norm,
+                  ontology_node(temp.fastest_emerging_node)->slug);
+    size_t emit = eng->article_count < 5u ? eng->article_count : 5u;
+    for(size_t i = 0; i < emit; ++i) {
+      const ArticleRecord *a = &eng->articles[eng->article_count - 1u - i];
+      buffer_text(out_json, "event: article\ndata: ");
+      serialize_article(out_json, a, 1.0, 0);
+      buffer_text(out_json, "\n\n");
+    }
     return 0;
   }
 
@@ -1310,6 +1540,105 @@ static const char *status_reason(int code) {
   }
 }
 
+typedef struct {
+  ServerContext *ctx;
+  int client_fd;
+} ClientConnTask;
+
+static const char *detect_content_type(const char *target) {
+  if(strncmp(target, "/console", 8u) == 0 || strncmp(target, "/index.html", 11u) == 0) {
+    return "text/html; charset=utf-8";
+  }
+  if(strncmp(target, "/api/v1/feed.xml", 16u) == 0) {
+    return "application/atom+xml; charset=utf-8";
+  }
+  if(strncmp(target, "/api/v1/stream", 14u) == 0) {
+    return "text/event-stream; charset=utf-8";
+  }
+  return "application/json; charset=utf-8";
+}
+
+static void *http_client_worker(void *arg) {
+  ClientConnTask *task = (ClientConnTask *)arg;
+  ServerContext *ctx = task->ctx;
+  int client = task->client_fd;
+  free(task);
+
+  /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection */
+  for(int req_idx = 0; req_idx < 16; ++req_idx) {
+    char req[65536];
+    ssize_t n = recv(client, req, sizeof(req) - 1u, 0);
+    if(n <= 0) break;
+    req[n] = '\0';
+
+    char method[16] = {0};
+    char target[1024] = {0};
+    if(sscanf(req, "%15s %1023s", method, target) != 2) break;
+
+    int want_close = (strstr(req, "Connection: close") != NULL ||
+                      strstr(req, "connection: close") != NULL);
+
+    if(strcmp(method, "OPTIONS") == 0) {
+      const char *cors =
+          "HTTP/1.1 204 No Content\r\n"
+          "Access-Control-Allow-Origin: *\r\n"
+          "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
+          "Access-Control-Allow-Headers: Content-Type\r\n"
+          "Connection: keep-alive\r\n\r\n";
+      send(client, cors, strlen(cors), 0);
+      if(want_close) break;
+      continue;
+    }
+
+    const char *body = strstr(req, "\r\n\r\n");
+    size_t body_len = 0;
+    if(body) {
+      body += 4u;
+      body_len = (size_t)((req + n) - body);
+    } else {
+      body = "";
+    }
+
+    int is_write = (strcmp(method, "POST") == 0 &&
+                    (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
+                     strncmp(target, "/api/v1/feeds/poll", 18u) == 0));
+    if(is_write) engine_write_lock(ctx->engine);
+    else engine_read_lock(ctx->engine);
+
+    int status = 200;
+    Buffer payload;
+    http_handle_request(ctx, method, target, body, body_len, &status, &payload);
+
+    engine_unlock(ctx->engine);
+
+    const char *ctype = detect_content_type(target);
+    Buffer resp;
+    buffer_init(&resp);
+    buffer_format(&resp,
+                  "HTTP/1.1 %d %s\r\n"
+                  "Content-Type: %s\r\n"
+                  "Content-Length: %zu\r\n"
+                  "Access-Control-Allow-Origin: *\r\n"
+                  "Connection: %s\r\n\r\n",
+                  status,
+                  status_reason(status),
+                  ctype,
+                  payload.len,
+                  want_close ? "close" : "keep-alive");
+    if(payload.len > 0) buffer_append(&resp, payload.data, payload.len);
+
+    if(resp.data && resp.len > 0) {
+      send(client, resp.data, resp.len, 0);
+    }
+    buffer_free(&payload);
+    buffer_free(&resp);
+    if(want_close) break;
+  }
+
+  close(client);
+  return NULL;
+}
+
 int http_server_listen(ServerContext *ctx) {
   if(!ctx) return -1;
   int srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -1328,7 +1657,7 @@ int http_server_listen(ServerContext *ctx) {
     close(srv);
     return -1;
   }
-  if(listen(srv, 64) < 0) {
+  if(listen(srv, 128) < 0) {
     close(srv);
     return -1;
   }
@@ -1343,64 +1672,19 @@ int http_server_listen(ServerContext *ctx) {
     int client = accept(srv, NULL, NULL);
     if(client < 0) continue;
 
-    char req[65536];
-    ssize_t n = recv(client, req, sizeof(req) - 1u, 0);
-    if(n <= 0) {
+    ClientConnTask *task = malloc(sizeof(ClientConnTask));
+    if(!task) {
       close(client);
       continue;
     }
-    req[n] = '\0';
+    task->ctx = ctx;
+    task->client_fd = client;
 
-    char method[16] = {0};
-    char target[1024] = {0};
-    if(sscanf(req, "%15s %1023s", method, target) != 2) {
-      close(client);
-      continue;
-    }
-
-    if(strcmp(method, "OPTIONS") == 0) {
-      const char *cors =
-          "HTTP/1.1 204 No Content\r\n"
-          "Access-Control-Allow-Origin: *\r\n"
-          "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
-          "Access-Control-Allow-Headers: Content-Type\r\n"
-          "Connection: close\r\n\r\n";
-      send(client, cors, strlen(cors), 0);
-      close(client);
-      continue;
-    }
-
-    const char *body = strstr(req, "\r\n\r\n");
-    size_t body_len = 0;
-    if(body) {
-      body += 4u;
-      body_len = (size_t)((req + n) - body);
+    pthread_t tid;
+    if(pthread_create(&tid, NULL, http_client_worker, task) == 0) {
+      pthread_detach(tid);
     } else {
-      body = "";
+      http_client_worker(task);
     }
-
-    int status = 200;
-    Buffer json;
-    http_handle_request(ctx, method, target, body, body_len, &status, &json);
-
-    Buffer resp;
-    buffer_init(&resp);
-    buffer_format(&resp,
-                  "HTTP/1.1 %d %s\r\n"
-                  "Content-Type: application/json; charset=utf-8\r\n"
-                  "Content-Length: %zu\r\n"
-                  "Access-Control-Allow-Origin: *\r\n"
-                  "Connection: close\r\n\r\n",
-                  status,
-                  status_reason(status),
-                  json.len);
-    if(json.len > 0) buffer_append(&resp, json.data, json.len);
-
-    if(resp.data && resp.len > 0) {
-      send(client, resp.data, resp.len, 0);
-    }
-    buffer_free(&json);
-    buffer_free(&resp);
-    close(client);
   }
 }
