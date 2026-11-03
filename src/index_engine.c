@@ -100,9 +100,9 @@ int bitset_or_inplace(BitSet *dst, const BitSet *other) {
 
 static BitSet *country_fiber_get(CountryFiber *table, size_t cap, const char *code, int create) {
   if(!code || code[0] == '\0') return NULL;
-  char norm[8];
+  char norm[24];
   size_t k = 0;
-  while(code[k] && k < 7u) {
+  while(code[k] && k < 23u) {
     norm[k] = (char)toupper((unsigned char)code[k]);
     k++;
   }
@@ -259,6 +259,7 @@ void engine_free(OyezEngine *engine) {
   for(size_t i = 0; i < WORLD_REGION_COUNT; ++i) bitset_free(&engine->by_region[i]);
   for(size_t i = 0; i < NEWS_TYPE_COUNT; ++i) bitset_free(&engine->by_news_type[i]);
   for(size_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) bitset_free(&engine->by_clearance[i]);
+  for(size_t i = 0; i < FISCAL_STANCE_COUNT; ++i) bitset_free(&engine->by_fiscal_stance[i]);
   for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
@@ -266,6 +267,10 @@ void engine_free(OyezEngine *engine) {
   for(size_t i = 0; i < 128u; ++i) {
     if(engine->by_source_country[i].occupied) bitset_free(&engine->by_source_country[i].bits);
     if(engine->by_mentioned_country[i].occupied) bitset_free(&engine->by_mentioned_country[i].bits);
+    if(engine->by_asset[i].occupied) bitset_free(&engine->by_asset[i].bits);
+  }
+  for(size_t i = 0; i < 64u; ++i) {
+    if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
   }
   for(size_t i = 0; i < engine->inv_cap; ++i) {
     if(engine->inv_table[i].occupied) {
@@ -368,6 +373,9 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   if((unsigned)a->clearance < CLEARANCE_LEVEL_COUNT) {
     bitset_set(&engine->by_clearance[a->clearance], slot);
   }
+  if((unsigned)a->fiscal_stance < FISCAL_STANCE_COUNT) {
+    bitset_set(&engine->by_fiscal_stance[a->fiscal_stance], slot);
+  }
   for(uint32_t node = 0; node < ONTOLOGY_NODE_COUNT; ++node) {
     if(a->direct_ontology_mask & (1u << node)) {
       bitset_set(&engine->by_direct_ontology[node], slot);
@@ -383,6 +391,14 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   for(size_t i = 0; i < a->mentioned_country_count; ++i) {
     BitSet *m_cb = country_fiber_get(engine->by_mentioned_country, 128u, a->mentioned_countries[i], 1);
     if(m_cb) bitset_set(m_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_asset_count; ++i) {
+    BitSet *a_cb = country_fiber_get(engine->by_asset, 128u, a->mentioned_assets[i], 1);
+    if(a_cb) bitset_set(a_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_fiscal_event_count; ++i) {
+    BitSet *e_cb = country_fiber_get(engine->by_fiscal_event, 64u, a->mentioned_fiscal_events[i], 1);
+    if(e_cb) bitset_set(e_cb, slot);
   }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
@@ -496,11 +512,19 @@ int engine_ingest_article(OyezEngine *engine,
   a->news_type = ent.news_type;
   a->clearance = ent.clearance;
   a->opsec_score = ent.opsec_score;
+  a->fiscal_stance = ent.fiscal_stance;
+  a->macro_score = ent.macro_score;
   a->direct_ontology_mask = ent.direct_ontology_mask;
   a->closure_ontology_mask = ent.closure_ontology_mask;
 
   for(size_t i = 0; i < ent.cve_count && a->mentioned_cve_count < MAX_EXTRACTED_CVES; ++i) {
     strcpy(a->mentioned_cves[a->mentioned_cve_count++], ent.cves[i]);
+  }
+  for(size_t i = 0; i < ent.asset_count && a->mentioned_asset_count < MAX_EXTRACTED_ASSETS; ++i) {
+    strcpy(a->mentioned_assets[a->mentioned_asset_count++], ent.assets[i]);
+  }
+  for(size_t i = 0; i < ent.fiscal_event_count && a->mentioned_fiscal_event_count < MAX_EXTRACTED_EVENTS; ++i) {
+    strcpy(a->mentioned_fiscal_events[a->mentioned_fiscal_event_count++], ent.fiscal_events[i]);
   }
 
   /* Always include feed country if valid 2-letter ISO code */
@@ -605,6 +629,34 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     if(clearance_level_from_slug(q->clearance, &cl) == 0) {
       bitset_and_inplace(&candidates, &engine->by_clearance[cl]);
     } else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->fiscal_stance && q->fiscal_stance[0]) {
+    FiscalStance fs;
+    if(fiscal_stance_from_slug(q->fiscal_stance, &fs) == 0) {
+      bitset_and_inplace(&candidates, &engine->by_fiscal_stance[fs]);
+    } else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->asset && q->asset[0]) {
+    const BitSet *ab = country_fiber_get((CountryFiber *)engine->by_asset, 128u, q->asset, 0);
+    if(ab) bitset_and_inplace(&candidates, ab);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->fiscal_event && q->fiscal_event[0]) {
+    const BitSet *eb = country_fiber_get((CountryFiber *)engine->by_fiscal_event, 64u, q->fiscal_event, 0);
+    if(eb) bitset_and_inplace(&candidates, eb);
+    else {
       bitset_free(&candidates);
       return 0;
     }

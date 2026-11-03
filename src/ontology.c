@@ -40,6 +40,14 @@ static const char *const k_clearance_slugs[CLEARANCE_LEVEL_COUNT] = {
     "strategic-high-clearance",
 };
 
+static const char *const k_fiscal_stance_slugs[FISCAL_STANCE_COUNT] = {
+    "neutral-baseline",
+    "hawkish-tightening",
+    "dovish-easing",
+    "bullish-expansion",
+    "bearish-contraction",
+};
+
 #define BIT(x) (1u << (uint32_t)(x))
 
 static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
@@ -151,6 +159,22 @@ int clearance_level_from_slug(const char *slug, ClearanceLevel *out) {
   for(uint32_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) {
     if(strcmp(slug, k_clearance_slugs[i]) == 0) {
       *out = (ClearanceLevel)i;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+const char *fiscal_stance_slug(FiscalStance stance) {
+  if((unsigned)stance >= FISCAL_STANCE_COUNT) return "neutral-baseline";
+  return k_fiscal_stance_slugs[stance];
+}
+
+int fiscal_stance_from_slug(const char *slug, FiscalStance *out) {
+  if(!slug || !out) return -1;
+  for(uint32_t i = 0; i < FISCAL_STANCE_COUNT; ++i) {
+    if(strcmp(slug, k_fiscal_stance_slugs[i]) == 0) {
+      *out = (FiscalStance)i;
       return 0;
     }
   }
@@ -659,6 +683,72 @@ static const OrgRule k_org_rules[] = {
     {"WHATWG", {"whatwg", "html living standard", NULL, NULL}},
     {"IETF", {"ietf", "internet engineering task force", "quic", "privacy pass"}},
     {"Tor Project", {"tor project", "onion service", "pluggable transport", NULL}},
+    {"BoE", {"bank of england", "mpc", NULL, NULL}},
+    {"BoJ", {"bank of japan", "ueda", NULL, NULL}},
+    {"PBOC", {"people's bank of china", "pboc", NULL, NULL}},
+    {"RBI", {"reserve bank of india", "rbi", NULL, NULL}},
+    {"SNB", {"swiss national bank", "snb", NULL, NULL}},
+    {"SEC", {"securities and exchange commission", "sec filing", "10-k", NULL}},
+    {"CFTC", {"commodity futures trading commission", "cftc", NULL, NULL}},
+    {"BIS", {"bank for international settlements", NULL, NULL, NULL}},
+    {"CBO", {"congressional budget office", "cbo", NULL, NULL}},
+};
+
+typedef struct {
+  const char *symbol;
+  const char *const terms[5];
+} AssetRule;
+
+static const AssetRule k_asset_rules[] = {
+    /* Currencies (G10 & Major EM FX) */
+    {"USD", {"u.s. dollar", "greenback", "dxy", "dollar index", NULL}},
+    {"EUR", {"eurozone", "eur/usd", "single currency", "euro", NULL}},
+    {"JPY", {"japanese yen", "usd/jpy", "yen carry", "yen", NULL}},
+    {"GBP", {"pound sterling", "gbp/usd", "sterling", "british pound", NULL}},
+    {"CHF", {"swiss franc", "usd/chf", "eur/chf", NULL, NULL}},
+    {"CNY", {"renminbi", "yuan", "usd/cny", "usd/cnh", NULL}},
+    {"INR", {"indian rupee", "usd/inr", "rupee", NULL, NULL}},
+    {"BRL", {"brazilian real", "usd/brl", "selic", NULL, NULL}},
+    {"CAD", {"canadian dollar", "loonie", "usd/cad", NULL, NULL}},
+    {"AUD", {"australian dollar", "aussie dollar", "aud/usd", NULL, NULL}},
+    {"MXN", {"mexican peso", "usd/mxn", "super peso", NULL, NULL}},
+    {"ZAR", {"south african rand", "usd/zar", NULL, NULL, NULL}},
+    {"TRY", {"turkish lira", "usd/try", NULL, NULL, NULL}},
+    /* Equity Indices, Sovereign Bonds & Commodities */
+    {"SPX", {"s&p 500", "wall street", "sp500", NULL, NULL}},
+    {"NDX", {"nasdaq", "nasdaq-100", NULL, NULL, NULL}},
+    {"DJI", {"dow jones", "djia", NULL, NULL, NULL}},
+    {"NIKKEI", {"nikkei 225", "topix", "tokyo stock exchange", NULL, NULL}},
+    {"FTSE", {"ftse 100", "london stock exchange", NULL, NULL, NULL}},
+    {"DAX", {"dax 40", "frankfurt stock", NULL, NULL, NULL}},
+    {"NIFTY", {"nifty 50", "sensex", "bse", NULL, NULL}},
+    {"UST10Y", {"treasury yield", "10-year yield", "10-year treasury", "sovereign bond", "gilt yield"}},
+    {"BRENT", {"brent crude", "wti crude", "crude oil", "opec+", NULL}},
+    {"XAU", {"gold bullion", "gold price", "spot gold", "precious metal", NULL}},
+    {"COPPER", {"copper price", "lme copper", "comex copper", NULL, NULL}},
+    {"LITHIUM", {"lithium carbonate", "lithium spodumene", "battery metal", NULL, NULL}},
+    {"NVDA", {"nvidia", "blackwell", "h100", NULL, NULL}},
+    {"TSMC", {"tsmc", "taiwan semiconductor", NULL, NULL, NULL}},
+    {"ASML", {"asml", "extreme ultraviolet", NULL, NULL, NULL}},
+    {"BTC", {"bitcoin", "btc", "spot etf", NULL, NULL}},
+};
+
+typedef struct {
+  const char *event_name;
+  const char *const terms[5];
+} FiscalEventRule;
+
+static const FiscalEventRule k_fiscal_event_rules[] = {
+    {"rate-decision", {"interest rate", "basis points", "rate hike", "rate cut", "policy rate"}},
+    {"inflation-print", {"cpi", "core inflation", "pce deflator", "hicp", "producer price"}},
+    {"labor-payrolls", {"nonfarm payrolls", "unemployment rate", "jobless claims", "labor market", NULL}},
+    {"gdp-release", {"real gdp", "gdp growth", "economic contraction", "recession", NULL}},
+    {"sovereign-debt-auction", {"treasury auction", "bond auction", "quarterly refunding", "debt ceiling", "eurobond"}},
+    {"fiscal-budget", {"federal budget", "budget deficit", "fiscal stimulus", "austerity", "autumn budget"}},
+    {"earnings-guidance", {"quarterly earnings", "eps beat", "revenue guidance", "10-k", "share buyback"}},
+    {"fx-intervention", {"fx intervention", "currency swap", "capital controls", "devaluation", "foreign exchange reserves"}},
+    {"trade-tariff", {"import tariff", "export control", "customs duty", "trade war", "countervailing"}},
+    {"sovereign-restructuring", {"sovereign default", "imf bailout", "debt restructuring", "credit rating downgrade", NULL}},
 };
 
 static void extract_cve_identifiers(const char *lower_text, size_t len, ExtractedEntities *out) {
@@ -801,6 +891,63 @@ void entities_extract(const char *title,
 
   out->clearance = level;
   out->opsec_score = opsec;
+
+  /* Extract Market Assets / Currencies & Fiscal Events */
+  for(size_t i = 0; i < sizeof(k_asset_rules) / sizeof(k_asset_rules[0]); ++i) {
+    if(out->asset_count >= MAX_EXTRACTED_ASSETS) break;
+    for(size_t t = 0; t < 5u && k_asset_rules[i].terms[t]; ++t) {
+      if(text_contains_word(lower, len, k_asset_rules[i].terms[t])) {
+        strncpy(out->assets[out->asset_count], k_asset_rules[i].symbol, 15u);
+        out->assets[out->asset_count][15] = '\0';
+        out->asset_count++;
+        break;
+      }
+    }
+  }
+
+  for(size_t i = 0; i < sizeof(k_fiscal_event_rules) / sizeof(k_fiscal_event_rules[0]); ++i) {
+    if(out->fiscal_event_count >= MAX_EXTRACTED_EVENTS) break;
+    for(size_t t = 0; t < 5u && k_fiscal_event_rules[i].terms[t]; ++t) {
+      if(text_contains_word(lower, len, k_fiscal_event_rules[i].terms[t])) {
+        strncpy(out->fiscal_events[out->fiscal_event_count], k_fiscal_event_rules[i].event_name, 23u);
+        out->fiscal_events[out->fiscal_event_count][23] = '\0';
+        out->fiscal_event_count++;
+        break;
+      }
+    }
+  }
+
+  double hawk = 0.0, dove = 0.0, bull = 0.0, bear = 0.0;
+  if(text_contains_word(lower, len, "rate hike") || text_contains_word(lower, len, "hawkish") ||
+     text_contains_word(lower, len, "quantitative tightening") || text_contains_word(lower, len, "raises interest rate") ||
+     text_contains_word(lower, len, "inflation surge") || text_contains_word(lower, len, "austerity")) {
+    hawk += 3.5;
+  }
+  if(text_contains_word(lower, len, "rate cut") || text_contains_word(lower, len, "dovish") ||
+     text_contains_word(lower, len, "quantitative easing") || text_contains_word(lower, len, "fiscal stimulus") ||
+     text_contains_word(lower, len, "liquidity injection") || text_contains_word(lower, len, "cuts interest rate")) {
+    dove += 3.5;
+  }
+  if(text_contains_word(lower, len, "rally") || text_contains_word(lower, len, "bullish") ||
+     text_contains_word(lower, len, "record high") || text_contains_word(lower, len, "earnings beat") ||
+     text_contains_word(lower, len, "gdp expansion") || text_contains_word(lower, len, "surges")) {
+    bull += 3.0;
+  }
+  if(text_contains_word(lower, len, "recession") || text_contains_word(lower, len, "bearish") ||
+     text_contains_word(lower, len, "selloff") || text_contains_word(lower, len, "sovereign default") ||
+     text_contains_word(lower, len, "debt crisis") || text_contains_word(lower, len, "plunges")) {
+    bear += 3.2;
+  }
+
+  FiscalStance stance = FISCAL_NEUTRAL;
+  double best_macro = 0.5;
+  if(hawk > best_macro) { best_macro = hawk; stance = FISCAL_HAWKISH; }
+  if(dove > best_macro) { best_macro = dove; stance = FISCAL_DOVISH; }
+  if(bull > best_macro) { best_macro = bull; stance = FISCAL_BULLISH; }
+  if(bear > best_macro) { best_macro = bear; stance = FISCAL_BEARISH; }
+
+  out->fiscal_stance = stance;
+  out->macro_score = (double)out->asset_count * 1.4 + (double)out->fiscal_event_count * 2.2 + best_macro;
 }
 
 static const char *const k_stopwords[] = {

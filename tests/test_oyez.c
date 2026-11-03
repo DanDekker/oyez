@@ -237,6 +237,20 @@ static void test_category_theory_and_ontology(void) {
   assert(sec_ent.clearance == CLEARANCE_STRATEGIC);
   assert(sec_ent.opsec_score > 10.0);
   assert((sec_ent.direct_ontology_mask & (1u << ONTO_CRYPTOGRAPHY)) != 0u);
+
+  /* Macro, FX, Equities & Fiscal Event extraction */
+  ExtractedEntities fin_ent;
+  entities_extract("Federal Reserve announces hawkish rate hike of 50 basis points as S&P 500 and Japanese Yen react",
+                   "Treasury auction and CPI core inflation print push 10-year yield higher.",
+                   "U.S. dollar (DXY) and Brent crude oil trade alongside nonfarm payrolls.",
+                   "finance",
+                   NULL,
+                   0,
+                   &fin_ent);
+  assert(fin_ent.fiscal_stance == FISCAL_HAWKISH);
+  assert(fin_ent.asset_count >= 4u);
+  assert(fin_ent.fiscal_event_count >= 3u);
+  assert(fin_ent.macro_score > 10.0);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
@@ -244,7 +258,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 435u);
+  assert(seeded >= 475u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",

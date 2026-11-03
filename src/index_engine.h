@@ -63,8 +63,14 @@ typedef struct {
   size_t mentioned_org_count;
   char mentioned_cves[MAX_EXTRACTED_CVES][20];
   size_t mentioned_cve_count;
+  char mentioned_assets[MAX_EXTRACTED_ASSETS][16];
+  size_t mentioned_asset_count;
+  char mentioned_fiscal_events[MAX_EXTRACTED_EVENTS][24];
+  size_t mentioned_fiscal_event_count;
   ClearanceLevel clearance;
   double opsec_score;
+  FiscalStance fiscal_stance;
+  double macro_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -99,7 +105,7 @@ typedef struct {
 } StoryCluster;
 
 typedef struct {
-  char key[8];
+  char key[24];
   BitSet bits;
   int occupied;
 } CountryFiber;
@@ -120,11 +126,14 @@ typedef struct {
   BitSet by_region[WORLD_REGION_COUNT];
   BitSet by_news_type[NEWS_TYPE_COUNT];
   BitSet by_clearance[CLEARANCE_LEVEL_COUNT];
+  BitSet by_fiscal_stance[FISCAL_STANCE_COUNT];
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
   CountryFiber by_source_country[128];
   CountryFiber by_mentioned_country[128];
+  CountryFiber by_asset[128];
+  CountryFiber by_fiscal_event[64];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -140,6 +149,9 @@ typedef struct {
   int use_category_morphism;
   const char *news_type;
   const char *clearance;
+  const char *fiscal_stance;
+  const char *asset;
+  const char *fiscal_event;
   const char *region;
   const char *country;
   const char *mentioned_country;

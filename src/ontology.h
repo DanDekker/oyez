@@ -9,9 +9,12 @@ enum {
   NEWS_TYPE_COUNT = 10,
   ONTOLOGY_NODE_COUNT = 32,
   CLEARANCE_LEVEL_COUNT = 5,
+  FISCAL_STANCE_COUNT = 5,
   MAX_EXTRACTED_COUNTRIES = 12,
   MAX_EXTRACTED_ORGS = 12,
   MAX_EXTRACTED_CVES = 8,
+  MAX_EXTRACTED_ASSETS = 10,
+  MAX_EXTRACTED_EVENTS = 8,
   MAX_LEXICAL_TOKENS = 256
 };
 
@@ -22,6 +25,14 @@ typedef enum {
   CLEARANCE_ZERO_DAY = 3,     /* Exploit chains, 0-day vulnerability & cryptographic breaks */
   CLEARANCE_STRATEGIC = 4     /* High-clearance national security, C4ISR, SIGINT & deterrence */
 } ClearanceLevel;
+
+typedef enum {
+  FISCAL_NEUTRAL = 0,         /* Non-market or balanced macro baseline */
+  FISCAL_HAWKISH = 1,         /* Rate hikes, QT, fiscal austerity, inflation tightening */
+  FISCAL_DOVISH = 2,          /* Rate cuts, QE, fiscal stimulus, liquidity injection */
+  FISCAL_BULLISH = 3,         /* Risk-on rally, earnings beat, GDP expansion, IPO surge */
+  FISCAL_BEARISH = 4          /* Risk-off selloff, recession, sovereign default, debt distress */
+} FiscalStance;
 
 typedef enum {
   REGION_NORTH_AMERICA = 0,
@@ -108,11 +119,17 @@ typedef struct {
   size_t org_count;
   char cves[MAX_EXTRACTED_CVES][20];
   size_t cve_count;
+  char assets[MAX_EXTRACTED_ASSETS][16];
+  size_t asset_count;
+  char fiscal_events[MAX_EXTRACTED_EVENTS][24];
+  size_t fiscal_event_count;
   uint32_t direct_ontology_mask;
   uint32_t closure_ontology_mask;
   NewsType news_type;
   ClearanceLevel clearance;
   double opsec_score;
+  FiscalStance fiscal_stance;
+  double macro_score;
 } ExtractedEntities;
 
 typedef struct {
@@ -134,6 +151,9 @@ NewsType news_type_classify(const char *title,
 
 const char *clearance_level_slug(ClearanceLevel level);
 int clearance_level_from_slug(const char *slug, ClearanceLevel *out);
+
+const char *fiscal_stance_slug(FiscalStance stance);
+int fiscal_stance_from_slug(const char *slug, FiscalStance *out);
 
 void ontology_init(void);
 const OntologyNode *ontology_node(OntologyNodeId id);

@@ -222,10 +222,22 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_text(buf, "\"news_type\":"); json_cstr(buf, news_type_slug(a->news_type)); buffer_text(buf, ",");
   buffer_text(buf, "\"clearance\":"); json_cstr(buf, clearance_level_slug(a->clearance)); buffer_text(buf, ",");
   buffer_format(buf, "\"opsec_score\":%.2f,", a->opsec_score);
+  buffer_text(buf, "\"fiscal_stance\":"); json_cstr(buf, fiscal_stance_slug(a->fiscal_stance)); buffer_text(buf, ",");
+  buffer_format(buf, "\"macro_score\":%.2f,", a->macro_score);
   buffer_text(buf, "\"mentioned_cves\":[");
   for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
     json_cstr(buf, a->mentioned_cves[i]);
+  }
+  buffer_text(buf, "],\"mentioned_assets\":[");
+  for(size_t i = 0; i < a->mentioned_asset_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_assets[i]);
+  }
+  buffer_text(buf, "],\"mentioned_fiscal_events\":[");
+  for(size_t i = 0; i < a->mentioned_fiscal_event_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_fiscal_events[i]);
   }
   buffer_text(buf, "],\"mentioned_topics\":");
   serialize_ontology_mask_array(buf, a->direct_ontology_mask);
@@ -330,6 +342,12 @@ int http_handle_request(ServerContext *ctx,
       if(cl > 0) buffer_text(out_json, ",");
       json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
+    }
+    buffer_text(out_json, "},\"fiscal_stances\":{");
+    for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
+      if(fs > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
     }
     buffer_text(out_json, "},\"categories_presheaf\":{");
     for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
@@ -561,14 +579,49 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/markets") == 0) {
+    buffer_text(out_json, "{\"fiscal_stances\":{");
+    for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
+      if(fs > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
+    }
+    buffer_text(out_json, "},\"assets\":{");
+    int first_a = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_asset[i].occupied) {
+        if(!first_a) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_asset[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_asset[i].bits));
+        first_a = 0;
+      }
+    }
+    buffer_text(out_json, "},\"fiscal_events\":{");
+    int first_e = 1;
+    for(size_t i = 0; i < 64u; ++i) {
+      if(eng->by_fiscal_event[i].occupied) {
+        if(!first_e) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_fiscal_event[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_event[i].bits));
+        first_e = 0;
+      }
+    }
+    buffer_text(out_json, "}}");
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
-    char q_str[256], cat[64], morph[16], ntype[64], clr[64], reg[64], ctry[16], mctry[16], lang[16], tier[32];
+    char q_str[256], cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
+    char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
     query_param(qs, "category", cat, sizeof(cat));
     query_param(qs, "category_morphism", morph, sizeof(morph));
     query_param(qs, "news_type", ntype, sizeof(ntype));
     query_param(qs, "clearance", clr, sizeof(clr));
+    query_param(qs, "fiscal_stance", fst, sizeof(fst));
+    query_param(qs, "asset", asset, sizeof(asset));
+    query_param(qs, "fiscal_event", fev, sizeof(fev));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -587,6 +640,9 @@ int http_handle_request(ServerContext *ctx,
     aq.use_category_morphism = (strcmp(morph, "0") != 0 && strcmp(morph, "false") != 0);
     aq.news_type = ntype[0] ? ntype : NULL;
     aq.clearance = clr[0] ? clr : NULL;
+    aq.fiscal_stance = fst[0] ? fst : NULL;
+    aq.asset = asset[0] ? asset : NULL;
+    aq.fiscal_event = fev[0] ? fev : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;
