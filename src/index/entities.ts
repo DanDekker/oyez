@@ -111,7 +111,9 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   ],
   "semiconductors-and-hardware": [
     "semiconductor",
+    "semiconductors",
     "microchip",
+    "microchips",
     "wafer",
     "tsmc",
     "nvidia",
@@ -134,7 +136,6 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
     "phishing",
     "encryption",
     "exploit",
-    "cve-",
     "botnet",
   ],
   "climate-and-environment": [
@@ -166,6 +167,7 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   "macroeconomics-and-finance": [
     "inflation",
     "interest rate",
+    "interest rates",
     "central bank",
     "federal reserve",
     "gdp",
@@ -205,6 +207,7 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   ],
   "elections-and-democracy": [
     "election",
+    "elections",
     "ballot",
     "parliament",
     "coalition government",
@@ -244,15 +247,17 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   ],
   "trade-and-supply-chain": [
     "tariff",
+    "tariffs",
     "supply chain",
+    "supply chains",
     "export control",
+    "export controls",
     "free trade",
     "wto",
     "shipping lane",
     "freight",
     "customs",
     "import duty",
-    "semiconductor export",
   ],
   "open-source-and-software": [
     "open source",
@@ -358,25 +363,62 @@ const PROPER_NOUN_SKIP = new Set([
   "Opinion",
 ]);
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+interface PhraseMatchHit {
+  countries?: string[];
+  topics?: string[];
+  orgs?: string[];
 }
 
-const COUNTRY_PATTERNS: Array<{ code: string; regex: RegExp }> = Object.entries(
-  COUNTRY_GAZETTEER
-).map(([code, terms]) => {
-  const joined = terms.map(escapeRegex).join("|");
-  return {
-    code,
-    regex: new RegExp(`\\b(?:${joined})\\b`, "i"),
-  };
-});
+/**
+ * Precompiled Single-Pass N-Gram Phrase Automaton (1..4 word window)
+ * Eliminates 130+ regex scans per article in favor of O(L) hash table lookups.
+ */
+const PHRASE_TABLE = new Map<string, PhraseMatchHit>();
+const FIRST_WORD_MAX_LEN = new Map<string, number>();
 
-const ORG_PATTERNS: Array<{ name: string; regex: RegExp }> =
-  KNOWN_ORGANIZATIONS.map((name) => ({
-    name,
-    regex: new RegExp(`\\b${escapeRegex(name)}\\b`, "i"),
-  }));
+function registerPhrase(
+  rawPhrase: string,
+  kind: "country" | "topic" | "org",
+  value: string
+): void {
+  const words = rawPhrase
+    .toLowerCase()
+    .split(/[^a-z0-9.]+/)
+    .filter(Boolean);
+  if (words.length === 0) return;
+  const key = words.join(" ");
+  const firstWord = words[0];
+  const prevMax = FIRST_WORD_MAX_LEN.get(firstWord) ?? 0;
+  if (words.length > prevMax) {
+    FIRST_WORD_MAX_LEN.set(firstWord, words.length);
+  }
+
+  let hit = PHRASE_TABLE.get(key);
+  if (!hit) {
+    hit = {};
+    PHRASE_TABLE.set(key, hit);
+  }
+  if (kind === "country") {
+    hit.countries = hit.countries ?? [];
+    if (!hit.countries.includes(value)) hit.countries.push(value);
+  } else if (kind === "topic") {
+    hit.topics = hit.topics ?? [];
+    if (!hit.topics.includes(value)) hit.topics.push(value);
+  } else {
+    hit.orgs = hit.orgs ?? [];
+    if (!hit.orgs.includes(value)) hit.orgs.push(value);
+  }
+}
+
+for (const [code, phrases] of Object.entries(COUNTRY_GAZETTEER)) {
+  for (const p of phrases) registerPhrase(p, "country", code);
+}
+for (const [topic, phrases] of Object.entries(TOPIC_KEYWORDS)) {
+  for (const p of phrases) registerPhrase(p, "topic", topic);
+}
+for (const org of KNOWN_ORGANIZATIONS) {
+  registerPhrase(org, "org", org);
+}
 
 /**
  * Classify the epistemic / journalistic genre (NewsType) of an article
@@ -481,31 +523,49 @@ export function extractArticleEntities(
   extraCategories: string[] = []
 ): ArticleEntities {
   const combined = `${title}\n${summary}\n${contentText.slice(0, 4000)}`;
-  const lower = combined.toLowerCase();
+  const words = combined
+    .toLowerCase()
+    .split(/[^a-z0-9.]+/)
+    .filter(Boolean);
 
-  // 1. Mentioned countries
   const mentionedSet = new Set<string>();
   if (sourceCountry && sourceCountry !== "INT" && sourceCountry.length === 2) {
     mentionedSet.add(sourceCountry.toUpperCase());
   }
-  for (const { code, regex } of COUNTRY_PATTERNS) {
-    if (regex.test(lower)) {
-      mentionedSet.add(code);
-    }
-  }
-
-  // 2. Semantic topics
   const topicsSet = new Set<string>();
-  for (const [topic, keywords] of Object.entries(TOPIC_KEYWORDS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw)) {
-        topicsSet.add(topic);
-        break;
+  const entitiesSet = new Set<string>();
+
+  // Single linear O(L) scan over word tokens
+  const len = words.length;
+  for (let i = 0; i < len; i++) {
+    const w0 = words[i].replace(/\.+$/, "");
+    const maxWindow = Math.max(
+      FIRST_WORD_MAX_LEN.get(words[i]) ?? 0,
+      FIRST_WORD_MAX_LEN.get(w0) ?? 0
+    );
+    if (maxWindow === 0) continue;
+
+    let phrase = "";
+    const limit = Math.min(maxWindow, len - i);
+    for (let k = 0; k < limit; k++) {
+      const wk = k === limit - 1 ? words[i + k].replace(/\.+$/, "") : words[i + k];
+      phrase = k === 0 ? wk : `${phrase} ${wk}`;
+      const hit = PHRASE_TABLE.get(phrase) ?? (k === 0 ? PHRASE_TABLE.get(words[i]) : undefined);
+      if (hit) {
+        if (hit.countries) {
+          for (const c of hit.countries) mentionedSet.add(c);
+        }
+        if (hit.topics) {
+          for (const t of hit.topics) topicsSet.add(t);
+        }
+        if (hit.orgs) {
+          for (const o of hit.orgs) entitiesSet.add(o);
+        }
       }
     }
   }
 
-  // 3. Functorial upward closure in the News Ontology Poset Category C
+  // Functorial upward closure in the News Ontology Poset Category C
   const seedNodes = [
     ...(feedCategory ? [feedCategory] : []),
     ...extraCategories,
@@ -513,22 +573,15 @@ export function extractArticleEntities(
   ];
   const ontologyClosure = OYEZ_NEWS_ONTOLOGY.upwardClosureOf(seedNodes);
 
-  // 4. Organizations and multi-word Proper Noun phrases
-  const entitiesSet = new Set<string>();
-  for (const { name, regex } of ORG_PATTERNS) {
-    if (regex.test(combined)) {
-      entitiesSet.add(name);
-    }
-  }
-
+  // Extract capitalized 2-to-3 word proper noun sequences from title & summary
   const titleAndSummary = `${title} . ${summary}`;
   const properPhraseRegex =
     /\b([A-Z][a-z]{2,15}(?:\s+[A-Z][a-z]{2,15}){1,2})\b/g;
   let match: RegExpExecArray | null;
   while ((match = properPhraseRegex.exec(titleAndSummary)) !== null) {
     const phrase = match[1].trim();
-    const words = phrase.split(/\s+/);
-    if (words.some((w) => PROPER_NOUN_SKIP.has(w))) continue;
+    const pWords = phrase.split(/\s+/);
+    if (pWords.some((w) => PROPER_NOUN_SKIP.has(w))) continue;
     entitiesSet.add(phrase);
     if (entitiesSet.size >= 14) break;
   }
