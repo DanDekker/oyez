@@ -20,6 +20,7 @@ enum {
   MAX_EXTRACTED_AI_MODELS = 12,
   MAX_EXTRACTED_AI_INFRA = 12,
   MAX_EXTRACTED_HF_REPOS = 8,
+  MAX_EXTRACTED_SPORTS = 8,
   MAX_LEXICAL_TOKENS = 256
 };
 
@@ -131,12 +132,21 @@ typedef struct {
   double sheaf_section[ONTOLOGY_NODE_COUNT];        /* Glued sheaf section over C */
   double cohomology_defect[ONTOLOGY_NODE_COUNT];    /* Local-to-global H^1 obstruction */
   double total_cohomology_norm;
-  /* Simplicial Nerve N(C) of the Poset Category C & Hodge Laplacian Spectrum */
+  /* Simplicial Nerve N(C) of the Poset Category C & Hodge Cochain Complex */
   uint32_t nerve_f_vector[6];                       /* (f_0..f_5) k-simplices of strict chains u_0 < ... < u_k */
   int32_t euler_characteristic;                     /* chi(N(C)) = sum_{k=0}^5 (-1)^k f_k == 1 */
+  uint32_t betti_numbers[2];                        /* (beta_0, beta_1) = (1, 0) of contractible nerve N(C) */
+  uint32_t mobius_total_variation;                  /* sum_{u <= v} |mu(u, v)| over Rota's incidence algebra */
   double laplacian_trace;                           /* Tr(L_0) of weighted poset graph Laplacian */
   double spectral_radius;                           /* lambda_max(L_0) via power iteration */
+  double fiedler_eigenvalue;                        /* lambda_2(L_0) algebraic connectivity of Poset C */
   double dirichlet_energy;                          /* <f, L_0 f> = sum_{u < v} w(u,v) (f(u) - f(v))^2 */
+  double cochain_exactness_norm;                    /* ||delta_1(delta_0(f))||_2 == 0 over N_2(C) 2-simplices */
+  double hodge_1_curl_norm;                         /* ||delta_1(F)||_2^2 1-cochain simplicial curl over N_2(C) */
+  double hodge_gradient_norm;                       /* ||delta_0(phi)||_2^2 exact Hodge potential flow component */
+  double hodge_solenoidal_norm;                     /* ||F - delta_0(phi)||_2^2 divergence-free solenoidal residual */
+  double leinster_magnitude;                        /* Mag(C) = sum_{u,v} (Z^{-1})_{u,v} over Lawvere metric */
+  double monad_closure_defect;                      /* ||T(f) - f||_2 where T = iota^* Lan_iota is Left Kan monad */
 } SheafCohomology;
 
 typedef struct {
@@ -156,6 +166,8 @@ typedef struct {
   size_t ai_infra_count;
   char hf_repos[MAX_EXTRACTED_HF_REPOS][64];
   size_t hf_repo_count;
+  char sports[MAX_EXTRACTED_SPORTS][24];
+  size_t sport_count;
   uint32_t direct_ontology_mask;
   uint32_t closure_ontology_mask;
   NewsType news_type;
@@ -167,6 +179,7 @@ typedef struct {
   double ai_compute_score;
   AiWeightLicense ai_license;
   double openness_score;
+  double sports_score;
 } ExtractedEntities;
 
 typedef struct {
@@ -209,9 +222,19 @@ uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b);
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores);
 void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores);
 void ontology_mobius_invert(const double *upper_section, double *out_fundamental);
+int ontology_mobius_value(OntologyNodeId u, OntologyNodeId v);
 double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b);
+double ontology_lawvere_distance(uint32_t mask_from, uint32_t mask_to);
+double ontology_profunctor_coend(const double *presheaf_f, const double *copresheaf_g);
+double ontology_leinster_magnitude(void);
+double ontology_node_magnitude_weight(OntologyNodeId u);
+double ontology_yoneda_lemma_eval(OntologyNodeId c, const double *presheaf_f);
+void ontology_yoneda_kan_transform(const double *presheaf_f, double *out_yoneda_envelope);
 uint32_t ontology_heyting_implication(uint32_t upper_a, uint32_t upper_b);
 uint32_t ontology_heyting_negation(uint32_t upper_a);
+uint32_t ontology_lawvere_tierney_sheafify(uint32_t sub_mask_a);
+int ontology_is_grothendieck_dense(uint32_t sub_mask_a);
+double ontology_information_specificity(uint32_t mask);
 void ontology_sheaf_cohomology(const double *raw_fiber_counts,
                                const double *closure_fiber_counts,
                                SheafCohomology *out);

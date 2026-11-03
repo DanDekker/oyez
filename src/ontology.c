@@ -103,11 +103,38 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
 
 static int g_ontology_ready = 0;
 static int8_t g_mobius[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static uint32_t g_mobius_tv = 0u;
 static uint32_t g_nerve_f[6] = {0};
 static int32_t g_euler_char = 0;
 static double g_laplacian[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static double g_laplacian_trace = 0.0;
 static double g_spectral_radius = 0.0;
+static double g_fiedler_value = 0.0;
+static double g_lawvere_dist[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static double g_leinster_sim[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static double g_leinster_weight[ONTOLOGY_NODE_COUNT];
+static double g_leinster_magnitude = 0.0;
+
+static double fast_sqrt_nr(double x) {
+  if(x <= 1e-18) return 0.0;
+  double r = x > 1.0 ? (x * 0.5) : 1.0;
+  for(int nr = 0; nr < 14; ++nr) r = 0.5 * (r + x / r);
+  return r;
+}
+
+static double fast_exp_neg(double x) {
+  if(x <= 0.0) return 1.0;
+  if(x >= 28.0) return 0.0;
+  /* Scale-and-square exp(-x) = (exp(-x/16))^16 via [3/3] Pade approximant */
+  double s = x * 0.0625;
+  double s2 = s * s;
+  double s3 = s2 * s;
+  double num = 1.0 - 0.5 * s + 0.1 * s2 - (1.0 / 120.0) * s3;
+  double den = 1.0 + 0.5 * s + 0.1 * s2 + (1.0 / 120.0) * s3;
+  double r = num / den;
+  r *= r; r *= r; r *= r; r *= r;
+  return r;
+}
 
 void ontology_init(void) {
   if(g_ontology_ready) return;
@@ -161,6 +188,13 @@ void ontology_init(void) {
         }
         g_mobius[u][v] = (int8_t)(-sum);
       }
+    }
+  }
+  g_mobius_tv = 0u;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+      int m = g_mobius[u][v];
+      g_mobius_tv += (uint32_t)(m < 0 ? -m : m);
     }
   }
 
@@ -239,18 +273,110 @@ void ontology_init(void) {
       norm_sq += s * s;
     }
     if(norm_sq <= 1e-18) break;
-    double inv_norm = 1.0;
-    /* Newton-Raphson reciprocal square root without <math.h> dependency in ontology.c */
-    double x = norm_sq;
-    double r = 1.0;
-    for(int nr = 0; nr < 12; ++nr) r = 0.5 * (r + x / r);
+    double r = fast_sqrt_nr(norm_sq);
     eig = r;
-    inv_norm = 1.0 / r;
+    double inv_norm = 1.0 / r;
     for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
       vec[i] = next_v[i] * inv_norm;
     }
   }
   g_spectral_radius = eig;
+
+  /* Deflated power iteration on M = lambda_max * I - L_0 orthogonal to ker(L_0) = span(1)
+   * to obtain Fiedler algebraic connectivity eigenvalue lambda_2(L_0) > 0 */
+  for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    vec[i] = (double)((int)i - 16);
+  }
+  double mu_max = 0.0;
+  for(int it = 0; it < 45; ++it) {
+    double mean = 0.0;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) mean += vec[i];
+    mean /= (double)ONTOLOGY_NODE_COUNT;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) vec[i] -= mean;
+
+    double norm_sq = 0.0;
+    double mean_next = 0.0;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      double l_v = 0.0;
+      for(uint32_t j = 0; j < ONTOLOGY_NODE_COUNT; ++j) {
+        l_v += g_laplacian[i][j] * vec[j];
+      }
+      next_v[i] = g_spectral_radius * vec[i] - l_v;
+      mean_next += next_v[i];
+    }
+    mean_next /= (double)ONTOLOGY_NODE_COUNT;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      next_v[i] -= mean_next;
+      norm_sq += next_v[i] * next_v[i];
+    }
+    if(norm_sq <= 1e-18) break;
+    double r = fast_sqrt_nr(norm_sq);
+    mu_max = r;
+    double inv_r = 1.0 / r;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      vec[i] = next_v[i] * inv_r;
+    }
+  }
+  g_fiedler_value = (g_spectral_radius > mu_max) ? (g_spectral_radius - mu_max) : 0.15;
+
+  /* Lawvere Enriched Category Geodesic Quasimetric d_L(u, v) over Cost Quantale ([0, inf], >=, +, 0)
+   * via Tropical Min-Plus Semiring Kleene Star (Floyd-Warshall):
+   * - Covariant specialization u -> p has cost w(u -> p) = 0.5 + (|down(p)| - |down(u)|) / |down(p)|
+   * - Contravariant generalization p -> u has asymmetric cost 2.25 * w(u -> p) */
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+      g_lawvere_dist[u][v] = (u == v) ? 0.0 : 1e9;
+    }
+  }
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    double du = (double)popcnt64((uint64_t)g_ontology[u].downward_mask);
+    uint32_t pmask = g_ontology[u].parents_mask;
+    while(pmask) {
+      uint32_t p = ctz64((uint64_t)pmask);
+      pmask &= (pmask - 1u);
+      if(p < ONTOLOGY_NODE_COUNT && p != u) {
+        double dp = (double)popcnt64((uint64_t)g_ontology[p].downward_mask);
+        double w_cov = 0.5 + ((dp > du && dp > 0.0) ? ((dp - du) / dp) : 0.25);
+        double w_contra = 2.25 * w_cov;
+        if(w_cov < g_lawvere_dist[u][p]) g_lawvere_dist[u][p] = w_cov;
+        if(w_contra < g_lawvere_dist[p][u]) g_lawvere_dist[p][u] = w_contra;
+      }
+    }
+  }
+  for(uint32_t k = 0; k < ONTOLOGY_NODE_COUNT; ++k) {
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+        double cand = g_lawvere_dist[u][k] + g_lawvere_dist[k][v];
+        if(cand < g_lawvere_dist[u][v]) {
+          g_lawvere_dist[u][v] = cand;
+        }
+      }
+    }
+  }
+
+  /* Leinster Similarity Matrix Z(u, v) = exp(-d_L(u, v)) & Enriched Category Magnitude:
+   * Solve sum_v Z(u, v) w(v) = 1 via damped Gauss-Seidel relaxation to obtain the
+   * canonical Leinster Weighting w(u) and Magnitude |C|_L = sum_u w(u). */
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    g_leinster_weight[u] = 1.0 / (double)ONTOLOGY_NODE_COUNT;
+    for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+      g_leinster_sim[u][v] = fast_exp_neg(g_lawvere_dist[u][v]);
+    }
+  }
+  for(int it = 0; it < 50; ++it) {
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      double off_diag = 0.0;
+      for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+        if(v != u) off_diag += g_leinster_sim[u][v] * g_leinster_weight[v];
+      }
+      double target_w = 1.0 - off_diag;
+      g_leinster_weight[u] = 0.45 * g_leinster_weight[u] + 0.55 * target_w;
+    }
+  }
+  g_leinster_magnitude = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    g_leinster_magnitude += g_leinster_weight[u];
+  }
 
   g_ontology_ready = 1;
 }
@@ -489,6 +615,12 @@ void ontology_mobius_invert(const double *kan_section, double *out_fundamental) 
   }
 }
 
+int ontology_mobius_value(OntologyNodeId u, OntologyNodeId v) {
+  ontology_init();
+  if((unsigned)u >= ONTOLOGY_NODE_COUNT || (unsigned)v >= ONTOLOGY_NODE_COUNT) return 0;
+  return (int)g_mobius[u][v];
+}
+
 double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b) {
   ontology_init();
   uint32_t ua = ontology_upward_closure(mask_a);
@@ -505,6 +637,110 @@ double ontology_wasserstein_distance(uint32_t mask_a, uint32_t mask_b) {
     if(sym_diff & BIT(u)) diff_mass += w;
   }
   return total_mass > 0.0 ? (diff_mass / total_mass) : 0.0;
+}
+
+double ontology_lawvere_distance(uint32_t mask_from, uint32_t mask_to) {
+  ontology_init();
+  if(mask_from == 0u || mask_to == 0u) return 0.0;
+  /* Directed Hausdorff-Lawvere Quasimetric over the Cost Quantale ([0, inf], >=, +, 0):
+   *   d_L(A, B) = sup_{u in A} inf_{v in B} d_L(u, v)
+   * Reduces to g_lawvere_dist[u][v] on singletons (1u << u, 1u << v) and
+   * satisfies d_L(A, A) = 0 and d_L(A, C) <= d_L(A, B) + d_L(B, C). */
+  double sup_dist = 0.0;
+  uint32_t scan_a = mask_from;
+  while(scan_a) {
+    uint32_t u = ctz64((uint64_t)scan_a);
+    scan_a &= (scan_a - 1u);
+    if(u >= ONTOLOGY_NODE_COUNT) continue;
+    double inf_dist = 1e9;
+    uint32_t scan_b = mask_to;
+    while(scan_b) {
+      uint32_t v = ctz64((uint64_t)scan_b);
+      scan_b &= (scan_b - 1u);
+      if(v >= ONTOLOGY_NODE_COUNT) continue;
+      if(g_lawvere_dist[u][v] < inf_dist) {
+        inf_dist = g_lawvere_dist[u][v];
+      }
+    }
+    if(inf_dist > sup_dist) {
+      sup_dist = inf_dist;
+    }
+  }
+  return sup_dist;
+}
+
+double ontology_profunctor_coend(const double *presheaf_f, const double *copresheaf_g) {
+  /* Categorical Coend int^{c in C} F(c) * G(c) over the Poset Category C:
+   * Quotients duplicate weight along morphism chains u <= c via Rota's
+   * Incidence Algebra Mobius inverse mu(u, c) = zeta^{-1}(u, c):
+   *   int^{c in C} F(c) G(c) = sum_{c in C} |sum_{u <= c} F(u) * mu(u, c)| * G(c)
+   * When F = Lan_iota f is a Left Kan extension of f >= 0, sum_{u <= c} F(u) mu(u, c) = f(c). */
+  if(!presheaf_f || !copresheaf_g) return 0.0;
+  ontology_init();
+  double coend = 0.0;
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    uint32_t ideal = g_ontology[c].downward_mask;
+    double mob_f = 0.0;
+    while(ideal) {
+      uint32_t u = ctz64((uint64_t)ideal);
+      ideal &= (ideal - 1u);
+      mob_f += presheaf_f[u] * (double)g_mobius[u][c];
+    }
+    coend += (mob_f < 0.0 ? -mob_f : mob_f) * copresheaf_g[c];
+  }
+  return coend;
+}
+
+double ontology_leinster_magnitude(void) {
+  ontology_init();
+  return g_leinster_magnitude;
+}
+
+double ontology_node_magnitude_weight(OntologyNodeId u) {
+  ontology_init();
+  if((unsigned)u >= ONTOLOGY_NODE_COUNT) return 0.0;
+  return g_leinster_weight[u];
+}
+
+double ontology_yoneda_lemma_eval(OntologyNodeId c, const double *presheaf_f) {
+  /* Constructive Yoneda Lemma Isomorphism Nat(Y(c), F) ~= F(c):
+   * Y(c)(u) = Hom_C(u, c) = [u <= c] is the representable presheaf at c.
+   * Pairing Y(c) with the Mobius-inverted density (mu * F)(u) = sum_{x <= u} F(x) mu(x, u)
+   * over u in C yields:
+   *   <Y(c), F>_Y = sum_{u in C} Y(c)(u) sum_{x <= u} F(x) mu(x, u)
+   *               = sum_{x <= c} F(x) sum_{x <= u <= c} mu(x, u) = F(c). */
+  if(!presheaf_f || (unsigned)c >= ONTOLOGY_NODE_COUNT) return 0.0;
+  ontology_init();
+  uint32_t y_c = g_ontology[c].downward_mask;
+  double nat_pairing = 0.0;
+  while(y_c) {
+    uint32_t u = ctz64((uint64_t)y_c);
+    y_c &= (y_c - 1u);
+    uint32_t ideal_u = g_ontology[u].downward_mask;
+    double mob_u = 0.0;
+    while(ideal_u) {
+      uint32_t x = ctz64((uint64_t)ideal_u);
+      ideal_u &= (ideal_u - 1u);
+      mob_u += presheaf_f[x] * (double)g_mobius[x][u];
+    }
+    nat_pairing += mob_u;
+  }
+  return nat_pairing;
+}
+
+void ontology_yoneda_kan_transform(const double *presheaf_f, double *out_yoneda_envelope) {
+  /* Enriched Lawvere-Yoneda Left Kan Extension (Tropical Infimal Convolution):
+   *   (Lan_Y F)(c) = sup_{u in C} F(u) * exp(-d_L(u, c)) */
+  if(!presheaf_f || !out_yoneda_envelope) return;
+  ontology_init();
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    double sup_val = 0.0;
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      double v = presheaf_f[u] * g_leinster_sim[u][c];
+      if(v > sup_val) sup_val = v;
+    }
+    out_yoneda_envelope[c] = sup_val;
+  }
 }
 
 uint32_t ontology_heyting_implication(uint32_t sub_mask_a, uint32_t sub_mask_b) {
@@ -527,6 +763,41 @@ uint32_t ontology_heyting_implication(uint32_t sub_mask_a, uint32_t sub_mask_b) 
 
 uint32_t ontology_heyting_negation(uint32_t sub_mask_a) {
   return ontology_heyting_implication(sub_mask_a, 0u);
+}
+
+uint32_t ontology_lawvere_tierney_sheafify(uint32_t sub_mask_a) {
+  /* Lawvere-Tierney Double-Negation Topology j: Omega -> Omega in the Presheaf Topos Set^{C^op}:
+   *   j(A) = ~~A = ((A => 0) => 0)
+   * Satisfies the three Lawvere-Tierney modal closure axioms:
+   *   1. A <= j(A)
+   *   2. j(j(A)) == j(A)
+   *   3. j(A ^ B) == j(A) ^ j(B)
+   * By Glivenko's Theorem, j-closed ideals form a complete Boolean subtopos Sh_{~~}(C). */
+  uint32_t neg_a = ontology_heyting_negation(sub_mask_a);
+  return ontology_heyting_negation(neg_a);
+}
+
+int ontology_is_grothendieck_dense(uint32_t sub_mask_a) {
+  return ontology_lawvere_tierney_sheafify(sub_mask_a) == 0xFFFFFFFFu;
+}
+
+double ontology_information_specificity(uint32_t mask) {
+  ontology_init();
+  uint32_t m = mask & ~BIT(ONTO_ROOT);
+  if(m == 0u) return 1.0;
+  double best_spec = 1.0;
+  while(m) {
+    uint32_t u = ctz64((uint64_t)m);
+    m &= (m - 1u);
+    if(u < ONTOLOGY_NODE_COUNT) {
+      /* Deeper / more specialized nodes have larger upward filter |^u| and smaller ideal |vu| */
+      uint32_t up_cnt = popcnt64((uint64_t)g_ontology[u].upward_mask);
+      uint32_t down_cnt = popcnt64((uint64_t)g_ontology[u].downward_mask);
+      double spec = 1.0 + 0.08 * (double)up_cnt + (1.0 / (double)(down_cnt ? down_cnt : 1u)) * 0.25;
+      if(spec > best_spec) best_spec = spec;
+    }
+  }
+  return best_spec;
 }
 
 void ontology_sheaf_cohomology(const double *raw_fiber_counts,
@@ -558,8 +829,12 @@ void ontology_sheaf_cohomology(const double *raw_fiber_counts,
   out->total_cohomology_norm = total_norm;
   for(int k = 0; k < 6; ++k) out->nerve_f_vector[k] = g_nerve_f[k];
   out->euler_characteristic = g_euler_char;
+  out->betti_numbers[0] = 1u;
+  out->betti_numbers[1] = 0u;
+  out->mobius_total_variation = g_mobius_tv;
   out->laplacian_trace = g_laplacian_trace;
   out->spectral_radius = g_spectral_radius;
+  out->fiedler_eigenvalue = g_fiedler_value;
 
   /* Compute Dirichlet harmonic energy <f, L_0 f> = sum_{u < v} (f(u) - f(v))^2 */
   double energy = 0.0;
@@ -577,48 +852,164 @@ void ontology_sheaf_cohomology(const double *raw_fiber_counts,
     }
   }
   out->dirichlet_energy = energy;
-}
 
-static void compute_char_mask(const char *s, size_t len, uint32_t *out_alpha_mask) {
-  uint32_t m = 0u;
-  for(size_t i = 0; i < len; ++i) {
-    unsigned char ch = (unsigned char)s[i];
-    if(ch >= 'a' && ch <= 'z') {
-      m |= (1u << (ch - 'a'));
+  /* Simplicial Cochain Complex C^0(C) --delta_0--> C^1(C) --delta_1--> C^2(C) over Nerve N_2(C):
+   * 1. Exact 1-cochain (delta_0 f)(u, v) = f(v) - f(u) has (delta_1 o delta_0 f)(u0 < u1 < u2) == 0.
+   * 2. Lawvere-weighted 1-cochain F(u, v) = d_L(u, v) * (f(u) + 0.5 * f(v)) has non-zero
+   *    simplicial curl (delta_1 F)(u0, u1, u2) = F(u1, u2) - F(u0, u2) + F(u0, u1).
+   * 3. Discrete Helmholtz-Hodge Decomposition: solve L_0 * phi = delta_0^T F to decompose
+   *    F = delta_0(phi) (gradient) + R (divergence-free solenoidal curl + harmonic). */
+  double exact_norm = 0.0;
+  double curl_norm = 0.0;
+  double div_f[ONTOLOGY_NODE_COUNT] = {0};
+  for(uint32_t u0 = 0; u0 < ONTOLOGY_NODE_COUNT; ++u0) {
+    double f0 = raw_fiber_counts ? raw_fiber_counts[u0] : 0.0;
+    uint32_t p1_mask = g_ontology[u0].parents_mask;
+    while(p1_mask) {
+      uint32_t u1 = ctz64((uint64_t)p1_mask);
+      p1_mask &= (p1_mask - 1u);
+      if(u1 == u0 || u1 >= ONTOLOGY_NODE_COUNT) continue;
+      double f1 = raw_fiber_counts ? raw_fiber_counts[u1] : 0.0;
+      double d0_01 = f1 - f0;
+      double F_01 = g_lawvere_dist[u0][u1] * (f0 + 0.5 * f1);
+      /* Codifferential (delta_0^T F)(v) accumulates net incoming minus outgoing 1-cochain flow */
+      div_f[u1] += F_01;
+      div_f[u0] -= F_01;
+
+      uint32_t p2_mask = g_ontology[u1].parents_mask;
+      while(p2_mask) {
+        uint32_t u2 = ctz64((uint64_t)p2_mask);
+        p2_mask &= (p2_mask - 1u);
+        if(u2 == u1 || u2 >= ONTOLOGY_NODE_COUNT) continue;
+        double f2 = raw_fiber_counts ? raw_fiber_counts[u2] : 0.0;
+        double d0_12 = f2 - f1;
+        double d0_02 = f2 - f0;
+        double coboundary_exact = d0_12 - d0_02 + d0_01;
+        exact_norm += coboundary_exact * coboundary_exact;
+
+        double F_12 = g_lawvere_dist[u1][u2] * (f1 + 0.5 * f2);
+        double F_02 = g_lawvere_dist[u0][u2] * (f0 + 0.5 * f2);
+        double curl = F_12 - F_02 + F_01;
+        curl_norm += curl * curl;
+      }
     }
   }
-  *out_alpha_mask = m;
+  out->cochain_exactness_norm = exact_norm;
+  out->hodge_1_curl_norm = curl_norm;
+  out->leinster_magnitude = g_leinster_magnitude;
+
+  /* Solve Hodge-Poisson equation L_0 * phi = div_f orthogonal to ker(L_0) = span(1) */
+  double phi[ONTOLOGY_NODE_COUNT] = {0};
+  for(int it = 0; it < 20; ++it) {
+    double mean_phi = 0.0;
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+      double deg = g_laplacian[u][u];
+      if(deg <= 0.0) continue;
+      double nb_sum = 0.0;
+      for(uint32_t v = 0; v < ONTOLOGY_NODE_COUNT; ++v) {
+        if(v != u && g_laplacian[u][v] != 0.0) {
+          nb_sum += (-g_laplacian[u][v]) * phi[v];
+        }
+      }
+      phi[u] = (div_f[u] + nb_sum) / deg;
+      mean_phi += phi[u];
+    }
+    mean_phi /= (double)ONTOLOGY_NODE_COUNT;
+    for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) phi[u] -= mean_phi;
+  }
+
+  double grad_norm = 0.0;
+  double sol_norm = 0.0;
+  for(uint32_t u0 = 0; u0 < ONTOLOGY_NODE_COUNT; ++u0) {
+    double f0 = raw_fiber_counts ? raw_fiber_counts[u0] : 0.0;
+    uint32_t p1_mask = g_ontology[u0].parents_mask;
+    while(p1_mask) {
+      uint32_t u1 = ctz64((uint64_t)p1_mask);
+      p1_mask &= (p1_mask - 1u);
+      if(u1 == u0 || u1 >= ONTOLOGY_NODE_COUNT) continue;
+      double f1 = raw_fiber_counts ? raw_fiber_counts[u1] : 0.0;
+      double F_01 = g_lawvere_dist[u0][u1] * (f0 + 0.5 * f1);
+      double g_01 = phi[u1] - phi[u0];
+      double r_01 = F_01 - g_01;
+      grad_norm += g_01 * g_01;
+      sol_norm += r_01 * r_01;
+    }
+  }
+  out->hodge_gradient_norm = grad_norm;
+  out->hodge_solenoidal_norm = sol_norm;
+  out->monad_closure_defect = fast_sqrt_nr(total_norm);
+}
+
+typedef struct {
+  uint64_t wb_filter[8];
+  uint64_t char0_mask;
+  uint16_t head[32];
+  uint16_t next[2048];
+  uint16_t pos[2048];
+  uint32_t word_count;
+} WordBloomIndex;
+
+static void compute_char_mask(const char *s, size_t len, WordBloomIndex *wb) {
+  memset(wb->wb_filter, 0, sizeof(wb->wb_filter));
+  wb->char0_mask = 0ULL;
+  memset(wb->head, 0xFF, sizeof(wb->head));
+  wb->word_count = 0u;
+
+  for(size_t i = 0; i < len; ++i) {
+    if(i > 0 && isalnum((unsigned char)s[i - 1u])) continue;
+    unsigned char c0 = (unsigned char)s[i];
+    if(!isalnum(c0)) continue;
+    wb->char0_mask |= (1ULL << (c0 & 63u));
+    if(wb->word_count < 2048u) {
+      uint32_t b = c0 & 31u;
+      uint32_t w = wb->word_count++;
+      wb->pos[w] = (uint16_t)i;
+      wb->next[w] = wb->head[b];
+      wb->head[b] = (uint16_t)w;
+    }
+    if(i + 1u < len) {
+      unsigned char c1 = (unsigned char)s[i + 1u];
+      uint32_t h2 = ((uint32_t)c0 * 37u + (uint32_t)c1) & 255u;
+      wb->wb_filter[h2 >> 6u] |= (1ULL << (h2 & 63u));
+      if(i + 2u < len) {
+        unsigned char c2 = (unsigned char)s[i + 2u];
+        uint32_t h3 = ((uint32_t)c0 * 131u + (uint32_t)c1 * 37u + (uint32_t)c2) & 255u;
+        wb->wb_filter[4u + (h3 >> 6u)] |= (1ULL << (h3 & 63u));
+      }
+    }
+  }
 }
 
 static int text_contains_word_fast(const char *lower_text,
                                    size_t len,
-                                   uint32_t text_alpha_mask,
+                                   const WordBloomIndex *wb,
                                    const char *needle) {
-  unsigned char first = (unsigned char)needle[0];
-  if(first >= 'a' && first <= 'z') {
-    if((text_alpha_mask & (1u << (first - 'a'))) == 0u) return 0;
+  unsigned char c0 = (unsigned char)needle[0];
+  if(c0 == '\0') return 0;
+  if((wb->char0_mask & (1ULL << (c0 & 63u))) == 0ULL) return 0;
+  unsigned char c1 = (unsigned char)needle[1];
+  if(c1 != '\0') {
+    uint32_t h2 = ((uint32_t)c0 * 37u + (uint32_t)c1) & 255u;
+    if((wb->wb_filter[h2 >> 6u] & (1ULL << (h2 & 63u))) == 0ULL) return 0;
+    unsigned char c2 = (unsigned char)needle[2];
+    if(c2 != '\0') {
+      uint32_t h3 = ((uint32_t)c0 * 131u + (uint32_t)c1 * 37u + (uint32_t)c2) & 255u;
+      if((wb->wb_filter[4u + (h3 >> 6u)] & (1ULL << (h3 & 63u))) == 0ULL) return 0;
+    }
   }
   size_t nlen = strlen(needle);
-  if(nlen == 0 || len < nlen) return 0;
-  unsigned char last = (unsigned char)needle[nlen - 1u];
-  if(last >= 'a' && last <= 'z') {
-    if((text_alpha_mask & (1u << (last - 'a'))) == 0u) return 0;
-  }
-  const char *p = lower_text;
-  const char *end = lower_text + len;
-  while(p + nlen <= end) {
-    const char *hit = strstr(p, needle);
-    if(!hit) return 0;
-    int left_ok = (hit == lower_text) || !isalnum((unsigned char)hit[-1]);
-    int right_ok = (hit + nlen >= end) || !isalnum((unsigned char)hit[nlen]);
-    if(left_ok && right_ok) return 1;
-    p = hit + 1u;
+  if(len < nlen) return 0;
+  uint32_t b = c0 & 31u;
+  for(uint16_t w = wb->head[b]; w != 0xFFFFu; w = wb->next[w]) {
+    size_t off = (size_t)wb->pos[w];
+    if(off + nlen <= len && (unsigned char)lower_text[off] == c0 &&
+       memcmp(lower_text + off, needle, nlen) == 0) {
+      if(off + nlen >= len || !isalnum((unsigned char)lower_text[off + nlen])) {
+        return 1;
+      }
+    }
   }
   return 0;
-}
-
-static int text_contains_word(const char *lower_text, size_t len, const char *needle) {
-  return text_contains_word_fast(lower_text, len, 0xFFFFFFFFu, needle);
 }
 
 static void build_lowercase_window(const char *a,
@@ -641,14 +1032,11 @@ static void build_lowercase_window(const char *a,
   *out_len = pos;
 }
 
-NewsType news_type_classify(const char *title,
-                            const char *summary,
-                            const char *content,
-                            const char *feed_category) {
-  char lower[4096];
-  size_t len = 0;
-  build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
-
+static NewsType news_type_classify_precomputed(const char *title,
+                                               const char *lower,
+                                               size_t len,
+                                               const WordBloomIndex *alpha_mask,
+                                               const char *feed_category) {
   char tlower[512];
   size_t tlen = 0;
   build_lowercase_window(title, NULL, NULL, tlower, sizeof(tlower), &tlen);
@@ -659,24 +1047,33 @@ NewsType news_type_classify(const char *title,
      strstr(tlower, "live updates") || strstr(tlower, "just in")) {
     scores[NEWS_TYPE_BREAKING_DISPATCH] += 5.0;
   }
-  if(text_contains_word(lower, len, "breaking") || text_contains_word(lower, len, "developing")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "breaking") ||
+     text_contains_word_fast(lower, len, alpha_mask, "developing")) {
     scores[NEWS_TYPE_BREAKING_DISPATCH] += 2.0;
   }
 
   if(feed_category && strcmp(feed_category, "investigative") == 0) {
     scores[NEWS_TYPE_INVESTIGATIVE_REPORT] += 4.5;
   }
-  if(text_contains_word(lower, len, "investigation") || text_contains_word(lower, len, "investigative") ||
-     text_contains_word(lower, len, "whistleblower") || text_contains_word(lower, len, "leaked") ||
-     text_contains_word(lower, len, "uncovered") || text_contains_word(lower, len, "audit")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "investigation") ||
+     text_contains_word_fast(lower, len, alpha_mask, "investigative") ||
+     text_contains_word_fast(lower, len, alpha_mask, "whistleblower") ||
+     text_contains_word_fast(lower, len, alpha_mask, "leaked") ||
+     text_contains_word_fast(lower, len, alpha_mask, "uncovered") ||
+     text_contains_word_fast(lower, len, alpha_mask, "audit")) {
     scores[NEWS_TYPE_INVESTIGATIVE_REPORT] += 3.5;
   }
 
-  if(text_contains_word(lower, len, "parliament") || text_contains_word(lower, len, "senate") ||
-     text_contains_word(lower, len, "congress") || text_contains_word(lower, len, "legislation") ||
-     text_contains_word(lower, len, "supreme court") || text_contains_word(lower, len, "ruling") ||
-     text_contains_word(lower, len, "treaty") || text_contains_word(lower, len, "sanctions") ||
-     text_contains_word(lower, len, "regulation") || text_contains_word(lower, len, "decree")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "parliament") ||
+     text_contains_word_fast(lower, len, alpha_mask, "senate") ||
+     text_contains_word_fast(lower, len, alpha_mask, "congress") ||
+     text_contains_word_fast(lower, len, alpha_mask, "legislation") ||
+     text_contains_word_fast(lower, len, alpha_mask, "supreme court") ||
+     text_contains_word_fast(lower, len, alpha_mask, "ruling") ||
+     text_contains_word_fast(lower, len, alpha_mask, "treaty") ||
+     text_contains_word_fast(lower, len, alpha_mask, "sanctions") ||
+     text_contains_word_fast(lower, len, alpha_mask, "regulation") ||
+     text_contains_word_fast(lower, len, alpha_mask, "decree")) {
     scores[NEWS_TYPE_POLICY_AND_LEGISLATIVE] += 3.2;
   }
 
@@ -684,24 +1081,36 @@ NewsType news_type_classify(const char *title,
                        strcmp(feed_category, "space") == 0)) {
     scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 2.6;
   }
-  if(text_contains_word(lower, len, "peer-reviewed") || text_contains_word(lower, len, "arxiv") ||
-     text_contains_word(lower, len, "biorxiv") || text_contains_word(lower, len, "medrxiv") ||
-     text_contains_word(lower, len, "chemrxiv") || text_contains_word(lower, len, "preprint") ||
-     text_contains_word(lower, len, "theorem") || text_contains_word(lower, len, "synchrotron") ||
-     text_contains_word(lower, len, "tokamak") || text_contains_word(lower, len, "qubit") ||
-     text_contains_word(lower, len, "researchers") || text_contains_word(lower, len, "scientists") ||
-     text_contains_word(lower, len, "clinical trial") || text_contains_word(lower, len, "genome") ||
-     text_contains_word(lower, len, "quantum") || text_contains_word(lower, len, "telescope")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "peer-reviewed") ||
+     text_contains_word_fast(lower, len, alpha_mask, "arxiv") ||
+     text_contains_word_fast(lower, len, alpha_mask, "biorxiv") ||
+     text_contains_word_fast(lower, len, alpha_mask, "medrxiv") ||
+     text_contains_word_fast(lower, len, alpha_mask, "chemrxiv") ||
+     text_contains_word_fast(lower, len, alpha_mask, "preprint") ||
+     text_contains_word_fast(lower, len, alpha_mask, "theorem") ||
+     text_contains_word_fast(lower, len, alpha_mask, "synchrotron") ||
+     text_contains_word_fast(lower, len, alpha_mask, "tokamak") ||
+     text_contains_word_fast(lower, len, alpha_mask, "qubit") ||
+     text_contains_word_fast(lower, len, alpha_mask, "researchers") ||
+     text_contains_word_fast(lower, len, alpha_mask, "scientists") ||
+     text_contains_word_fast(lower, len, alpha_mask, "clinical trial") ||
+     text_contains_word_fast(lower, len, alpha_mask, "genome") ||
+     text_contains_word_fast(lower, len, alpha_mask, "quantum") ||
+     text_contains_word_fast(lower, len, alpha_mask, "telescope")) {
     scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 3.6;
   }
 
   if(feed_category && strcmp(feed_category, "economy") == 0) {
     scores[NEWS_TYPE_MARKET_AND_ECONOMIC] += 2.5;
   }
-  if(text_contains_word(lower, len, "inflation") || text_contains_word(lower, len, "central bank") ||
-     text_contains_word(lower, len, "interest rate") || text_contains_word(lower, len, "basis points") ||
-     text_contains_word(lower, len, "gdp") || text_contains_word(lower, len, "earnings") ||
-     text_contains_word(lower, len, "ipo") || text_contains_word(lower, len, "yields")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "inflation") ||
+     text_contains_word_fast(lower, len, alpha_mask, "central bank") ||
+     text_contains_word_fast(lower, len, alpha_mask, "interest rate") ||
+     text_contains_word_fast(lower, len, alpha_mask, "basis points") ||
+     text_contains_word_fast(lower, len, alpha_mask, "gdp") ||
+     text_contains_word_fast(lower, len, alpha_mask, "earnings") ||
+     text_contains_word_fast(lower, len, alpha_mask, "ipo") ||
+     text_contains_word_fast(lower, len, alpha_mask, "yields")) {
     scores[NEWS_TYPE_MARKET_AND_ECONOMIC] += 3.3;
   }
 
@@ -715,17 +1124,21 @@ NewsType news_type_classify(const char *title,
     scores[NEWS_TYPE_EXPLAINER_AND_ANALYSIS] += 3.4;
   }
 
-  if(text_contains_word(lower, len, "communique") || text_contains_word(lower, len, "press release") ||
-     text_contains_word(lower, len, "ministry of") || text_contains_word(lower, len, "official statement")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "communique") ||
+     text_contains_word_fast(lower, len, alpha_mask, "press release") ||
+     text_contains_word_fast(lower, len, alpha_mask, "ministry of") ||
+     text_contains_word_fast(lower, len, alpha_mask, "official statement")) {
     scores[NEWS_TYPE_PRESS_AND_OFFICIAL] += 3.1;
   }
 
   if(feed_category && (strcmp(feed_category, "culture") == 0 || strcmp(feed_category, "sports") == 0)) {
     scores[NEWS_TYPE_CULTURAL_AND_FEATURE] += 2.8;
   }
-  if(text_contains_word(lower, len, "festival") || text_contains_word(lower, len, "exhibition") ||
-     text_contains_word(lower, len, "cinema") || text_contains_word(lower, len, "tournament") ||
-     text_contains_word(lower, len, "championship")) {
+  if(text_contains_word_fast(lower, len, alpha_mask, "festival") ||
+     text_contains_word_fast(lower, len, alpha_mask, "exhibition") ||
+     text_contains_word_fast(lower, len, alpha_mask, "cinema") ||
+     text_contains_word_fast(lower, len, alpha_mask, "tournament") ||
+     text_contains_word_fast(lower, len, alpha_mask, "championship")) {
     scores[NEWS_TYPE_CULTURAL_AND_FEATURE] += 3.0;
   }
 
@@ -738,6 +1151,18 @@ NewsType news_type_classify(const char *title,
     }
   }
   return best;
+}
+
+NewsType news_type_classify(const char *title,
+                            const char *summary,
+                            const char *content,
+                            const char *feed_category) {
+  char lower[4096];
+  size_t len = 0;
+  build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
+  WordBloomIndex alpha_mask;
+  compute_char_mask(lower, len, &alpha_mask);
+  return news_type_classify_precomputed(title, lower, len, &alpha_mask, feed_category);
 }
 
 typedef struct {
@@ -1094,7 +1519,8 @@ static const OrgRule k_org_rules[] = {
     {"Tor Project", {"tor project", "onion service", "pluggable transport", NULL}},
     {"OpenAI", {"openai", "chatgpt", "sam altman", NULL}},
     {"Anthropic", {"anthropic", "dario amodei", "constitutional ai", NULL}},
-    {"Google DeepMind", {"deepmind", "google deepmind", "demis hassabis", NULL}},
+    {"Google DeepMind", {"deepmind", "google deepmind", "demis hassabis", "alphafold"}},
+    {"Isomorphic Labs", {"isomorphic labs", "alphaproteo", NULL, NULL}},
     {"Meta AI", {"meta ai", "fair lab", "llama-3", "llama 3"}},
     {"Mistral AI", {"mistral ai", "le chat", "mixtral", NULL}},
     {"xAI", {"xai", "colossus cluster", "grok-3", "grok 3"}},
@@ -1104,6 +1530,14 @@ static const OrgRule k_org_rules[] = {
     {"CoreWeave", {"coreweave", NULL, NULL, NULL}},
     {"Scale AI", {"scale ai", "seal leaderboard", NULL, NULL}},
     {"SSI", {"safe superintelligence", "ilya sutskever", NULL, NULL}},
+    {"US Treasury", {"u.s. treasury", "treasury department", "ofac", NULL}},
+    {"DOJ/FTC", {"department of justice", "federal trade commission", "antitrust division", NULL}},
+    {"SCOTUS", {"u.s. supreme court", "scotus", "chief justice", NULL}},
+    {"Pentagon", {"pentagon", "department of defense", "centcom", "indopacom"}},
+    {"FIFA", {"fifa", "world cup qualifier", NULL, NULL}},
+    {"UEFA", {"uefa", "champions league", "europa league", NULL}},
+    {"IOC", {"international olympic committee", "olympic games", NULL, NULL}},
+    {"FIA", {"fia", "formula 1", "formula one", "grand prix"}},
 };
 
 typedef struct {
@@ -1151,6 +1585,9 @@ static const AssetRule k_asset_rules[] = {
     {"NIFTY", {"nifty 50", "sensex", "bse", NULL, NULL}},
     {"BOVESPA", {"bovespa", "ibovespa", NULL, NULL, NULL}},
     {"UST10Y", {"treasury yield", "10-year yield", "10-year treasury", "sovereign bond", "gilt yield"}},
+    {"US2Y", {"2-year treasury", "2-year yield", "two-year yield", "yield curve inversion", NULL}},
+    {"SOFR", {"sofr", "secured overnight financing", "euribor", "fed funds futures", NULL}},
+    {"MOVE", {"move index", "bond volatility", "cdx spread", "credit default swap", NULL}},
     {"BUND10Y", {"german bund", "bund yield", "btp spread", NULL, NULL}},
     {"JGB10Y", {"jgb yield", "japanese government bond", "yield curve control", NULL, NULL}},
     {"BRENT", {"brent crude", "wti crude", "crude oil", "opec+", NULL}},
@@ -1161,6 +1598,11 @@ static const AssetRule k_asset_rules[] = {
     {"LITHIUM", {"lithium carbonate", "lithium spodumene", "battery metal", NULL, NULL}},
     {"URANIUM", {"uranium", "yellowcake", "u3o8", NULL, NULL}},
     {"NVDA", {"nvidia", "blackwell", "h100", "cuda", "gb200"}},
+    {"GOOGL", {"alphabet inc", "google cloud", "waymo", "deepmind", NULL}},
+    {"MSFT", {"microsoft", "azure cloud", "github copilot", NULL, NULL}},
+    {"META", {"meta platforms", "reality labs", NULL, NULL, NULL}},
+    {"AAPL", {"apple inc", "apple silicon", "iphone", NULL, NULL}},
+    {"AMZN", {"amazon web services", "aws bedrock", "amazon.com", NULL, NULL}},
     {"TSMC", {"tsmc", "taiwan semiconductor", "cowos", NULL, NULL}},
     {"ASML", {"asml", "extreme ultraviolet", "high-na euv", NULL, NULL}},
     {"AMD", {"amd", "instinct mi300", "mi300x", "mi325x", "epyc"}},
@@ -1170,8 +1612,10 @@ static const AssetRule k_asset_rules[] = {
     {"SMCI", {"supermicro", "super micro computer", NULL, NULL, NULL}},
     {"MU", {"micron technology", "hbm3e", NULL, NULL, NULL}},
     {"SKHYNIX", {"sk hynix", "hbm4", NULL, NULL, NULL}},
+    {"JPM/GS", {"jpmorgan", "goldman sachs", "morgan stanley", "blackrock", "citadel"}},
     {"BTC", {"bitcoin", "btc", "spot etf", NULL, NULL}},
     {"ETH", {"ethereum", "ether", NULL, NULL, NULL}},
+    {"SOL", {"solana", "sol token", NULL, NULL, NULL}},
 };
 
 typedef struct {
@@ -1184,9 +1628,15 @@ static const AiModelRule k_ai_model_rules[] = {
     /* Closed-Source Proprietary Frontier APIs */
     {"GPT-4o/o1/o3", AI_LICENSE_CLOSED_PROPRIETARY, {"gpt-4", "gpt-4o", "openai o1", "openai o3", "gpt-5", "o3-mini"}},
     {"Claude-3.5/3.7", AI_LICENSE_CLOSED_PROPRIETARY, {"claude 3", "claude 3.5", "claude 3.7", "claude sonnet", "claude opus", "claude haiku"}},
-    {"Gemini-2.0/1.5", AI_LICENSE_CLOSED_PROPRIETARY, {"gemini 1.5", "gemini 2.0", "gemini pro", "gemini flash", "gemini ultra", "deep think"}},
+    {"Gemini-2.5/2.0", AI_LICENSE_CLOSED_PROPRIETARY, {"gemini 1.5", "gemini 2.0", "gemini 2.5", "gemini pro", "gemini flash", "deep think"}},
     {"Grok-2/3", AI_LICENSE_CLOSED_PROPRIETARY, {"grok-2", "grok 2", "grok-3", "grok 3", "xai grok", NULL}},
-    {"Sora/Veo-2", AI_LICENSE_CLOSED_PROPRIETARY, {"openai sora", "veo 2", "runway gen-3", "kling", "luma dream", NULL}},
+    {"Sora/Veo-2", AI_LICENSE_CLOSED_PROPRIETARY, {"openai sora", "veo 2", "imagen 3", "runway gen-3", "kling", "luma dream"}},
+    /* Google DeepMind Scientific, Mathematical, RL & World-Model Breakthroughs */
+    {"AlphaFold-3/Proteo", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"alphafold", "alphafold 3", "alphafold3", "alphaproteo", "alphamissense", "isomorphic labs"}},
+    {"AlphaProof/Geometry", AI_LICENSE_CLOSED_PROPRIETARY, {"alphaproof", "alphageometry", "alphageometry2", "funsearch", "alphatensor", "alphadev"}},
+    {"AlphaZero/MuZero", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"alphazero", "muzero", "alphago", "alphastar", "graphcast", "gencast"}},
+    {"Genie-2/SIMA/RT-X", AI_LICENSE_CLOSED_PROPRIETARY, {"genie 2", "deepmind sima", "rt-x", "robocat", "aloha", "astra"}},
+    {"Chinchilla/Griffin", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"chinchilla", "griffin", "hawk", "synthid", "ferret", "gnomad"}},
     /* Open-Weights under Community / Custom / Usage-Cap / Non-Commercial Licenses */
     {"Llama-3/4", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"llama 3", "llama-3", "llama 3.1", "llama 3.3", "llama 4", "codellama"}},
     {"Gemma-2/PaliGemma", AI_LICENSE_OPEN_WEIGHTS_RESTRICTED, {"gemma 2", "gemma-2", "codegemma", "paligemma", "recurrentgemma", "shieldgemma"}},
@@ -1206,7 +1656,7 @@ static const AiModelRule k_ai_model_rules[] = {
     {"DBRX/Arctic/Liquid", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"dbrx", "snowflake-arctic", "liquid lfm", "granite-3", "modernbert", "deberta"}},
     {"Whisper/Kokoro/Moshi", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"whisper-large", "kokoro-82m", "moshi", "parler-tts", "f5-tts", "elevenlabs"}},
     {"BGE-M3/Nomic-Embed", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"bge-m3", "nomic-embed", "jina-embeddings", "e5-mistral", "colpali", "gliner"}},
-    {"AlphaFold-3/ESM3", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"alphafold", "alphafold 3", "esm3", "evo 2", "boltz-1", "chai-1"}},
+    {"ESM3/Evo-2/Boltz", AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE, {"esm3", "evo 2", "boltz-1", "chai-1", "rfdiffusion", "progen2"}},
     /* Full OSI Open-Source AI (Weights + Open Pretraining Dataset + Training Code) */
     {"OLMo-2/StarCoder", AI_LICENSE_OPEN_SCIENCE_OSI, {"olmo", "olmo 2", "olmo-2", "tulu-3", "starcoder2", "starcoder"}},
     {"Pythia/MAP-Neo/DCLM", AI_LICENSE_OPEN_SCIENCE_OSI, {"pythia", "map-neo", "dclm", "amber-7b", "bloom-176b", "openlm"}},
@@ -1239,6 +1689,7 @@ static const AiInfraRule k_ai_infra_rules[] = {
     {"llama.cpp/GGUF", {"llama.cpp", "gguf", "ggml", "ollama", "apple mlx", "exllamav2"}},
     {"FlashAttention", {"flashattention", "flashattention-2", "flashattention-3", "flash-decoding", NULL, NULL}},
     {"FlashInfer/Triton", {"flashinfer", "openai triton", "triton kernel", "cutlass", "thunderkittens", "torch.compile"}},
+    {"JAX/Flax/Pathways", {"jax", "flax", "optax", "pallas kernel", "pathways", "haiku"}},
     {"Speculative-Decode", {"speculative decoding", "medusa head", "eagle decoding", "multi-token prediction", "draft model", NULL}},
     {"KV-Cache/Disagg", {"kv cache", "kv-cache", "prefill-decode", "disaggregated serving", "mooncake", "prefix caching"}},
     {"FP8/AWQ/GPTQ", {"fp8", "fp4", "awq", "gptq", "int4 quantization", "qlora"}},
@@ -1269,41 +1720,96 @@ typedef struct {
 
 static const FiscalEventRule k_fiscal_event_rules[] = {
     {"rate-decision", {"interest rate", "basis points", "rate hike", "rate cut", "policy rate"}},
+    {"fomc-dot-plot", {"dot plot", "beige book", "fomc minutes", "jackson hole", "reverse repo"}},
     {"inflation-print", {"cpi", "core inflation", "pce deflator", "hicp", "producer price"}},
     {"labor-payrolls", {"nonfarm payrolls", "unemployment rate", "jobless claims", "labor market", NULL}},
     {"gdp-release", {"real gdp", "gdp growth", "economic contraction", "recession", NULL}},
     {"sovereign-debt-auction", {"treasury auction", "bond auction", "quarterly refunding", "debt ceiling", "eurobond"}},
+    {"yield-curve-shift", {"yield curve", "steepening", "inverted yield curve", "term premium", "credit spread"}},
     {"fiscal-budget", {"federal budget", "budget deficit", "fiscal stimulus", "austerity", "autumn budget"}},
     {"earnings-guidance", {"quarterly earnings", "eps beat", "revenue guidance", "10-k", "share buyback"}},
+    {"m&a-ipo-deal", {"merger", "acquisition", "leveraged buyout", "ipo filing", "s-1 filing"}},
     {"fx-intervention", {"fx intervention", "currency swap", "capital controls", "devaluation", "foreign exchange reserves"}},
     {"trade-tariff", {"import tariff", "export control", "customs duty", "trade war", "countervailing"}},
+    {"sanctions-package", {"ofac sanctions", "secondary sanctions", "entity list", "asset freeze", "price cap"}},
     {"sovereign-restructuring", {"sovereign default", "imf bailout", "debt restructuring", "credit rating downgrade", NULL}},
+    {"election-ballot", {"general election", "presidential election", "parliamentary election", "referendum", "exit poll"}},
+    {"legislative-vote", {"appropriations bill", "continuing resolution", "no-confidence vote", "coalition government", "omnibus bill"}},
+    {"supreme-court-ruling", {"supreme court", "constitutional court", "judicial review", "antitrust ruling", "injunction"}},
 };
 
-static void extract_cve_identifiers(const char *lower_text, size_t len, ExtractedEntities *out) {
+typedef struct {
+  const char *league_name;
+  const char *const terms[6];
+} SportsRule;
+
+static const SportsRule k_sports_rules[] = {
+    /* Global Football / Soccer */
+    {"UEFA-Champions-League", {"champions league", "ucl knockout", "uefa champions", "europa league", "ballon d'or", NULL}},
+    {"Premier-League", {"premier league", "epl", "manchester city", "arsenal", "liverpool fc", "chelsea fc"}},
+    {"LaLiga", {"la liga", "laliga", "real madrid", "fc barcelona", "atletico madrid", "el clasico"}},
+    {"Serie-A", {"serie a", "scudetto", "inter milan", "ac milan", "juventus", "napoli"}},
+    {"Bundesliga", {"bundesliga", "bayern munich", "borussia dortmund", "bayer leverkusen", "dfb-pokal", NULL}},
+    {"Ligue-1", {"ligue 1", "paris saint-germain", "psg", "olympique marseille", NULL, NULL}},
+    {"Copa-Libertadores", {"copa libertadores", "conmebol", "copa america", "flamengo", "river plate", "boca juniors"}},
+    {"MLS/Liga-MX", {"major league soccer", "mls cup", "liga mx", "inter miami", "concacaf", NULL}},
+    {"FIFA-World-Cup", {"fifa world cup", "world cup qualifier", "euro 2028", "afcon", "asian cup", "womens world cup"}},
+    /* North American Major Leagues & Collegiate */
+    {"NFL", {"nfl", "super bowl", "touchdown", "quarterback", "nfl draft", "nfl playoffs"}},
+    {"NBA", {"nba", "nba finals", "western conference", "eastern conference", "triple-double", "wnba"}},
+    {"MLB", {"major league baseball", "world series", "home run", "pitcher", "spring training", "mlb"}},
+    {"NHL", {"nhl", "stanley cup", "ice hockey", "hat trick", "power play", NULL}},
+    {"NCAA", {"ncaa", "march madness", "college football", "cfp", "final four", "heisman"}},
+    /* Motorsport */
+    {"Formula-1", {"formula 1", "formula one", "f1 grand prix", "red bull racing", "scuderia ferrari", "mclaren f1"}},
+    {"MotoGP/WEC/Indy", {"motogp", "24 hours of le mans", "indy 500", "indycar", "nascar", "world rally"}},
+    /* Tennis & Golf */
+    {"ATP/WTA-Grand-Slam", {"wimbledon", "roland garros", "us open tennis", "australian open", "atp tour", "wta tour"}},
+    {"PGA/Golf-Majors", {"pga tour", "masters tournament", "ryder cup", "open championship", "liv golf", "lpga"}},
+    /* Global Cricket & Rugby */
+    {"IPL/ICC-Cricket", {"indian premier league", "ipl", "icc cricket", "test cricket", "twenty20", "the ashes"}},
+    {"Rugby-Six-Nations", {"six nations", "rugby world cup", "all blacks", "springboks", "super rugby", "premiership rugby"}},
+    /* Olympic, Combat, Cycling & Mind/Esports */
+    {"Olympic-Games", {"olympic games", "winter olympics", "summer olympics", "paralympics", "gold medal", "world athletics"}},
+    {"UFC/MMA/Boxing", {"ufc", "mixed martial arts", "heavyweight title", "undisputed champion", "knockout", "boxing"}},
+    {"TourDeFrance/UCI", {"tour de france", "giro d'italia", "uci worldtour", "peloton", "vuelta a espana", NULL}},
+    {"Chess-FIDE", {"fide", "world chess championship", "grandmaster", "candidates tournament", "magnus carlsen", "gukesh"}},
+    {"Esports-LoL/CS2", {"league of legends worlds", "valorant champions", "counter-strike 2", "dota 2 international", "esports", NULL}},
+};
+
+static void extract_cve_identifiers(const char *lower_text,
+                                    size_t len,
+                                    const uint64_t wb_filter[8],
+                                    ExtractedEntities *out) {
   if(!lower_text || len < 9u) return;
-  size_t i = 0;
-  while(i + 9u <= len && out->cve_count < MAX_EXTRACTED_CVES) {
-    if(memcmp(lower_text + i, "cve-", 4u) == 0 &&
-       isdigit((unsigned char)lower_text[i + 4u]) &&
-       isdigit((unsigned char)lower_text[i + 5u]) &&
-       isdigit((unsigned char)lower_text[i + 6u]) &&
-       isdigit((unsigned char)lower_text[i + 7u]) &&
-       lower_text[i + 8u] == '-') {
-      size_t j = i + 9u;
-      while(j < len && isdigit((unsigned char)lower_text[j]) && (j - i) < 18u) j++;
-      if(j > i + 9u) {
-        size_t clen = j - i;
+  uint32_t h2 = ((uint32_t)'c' * 37u + (uint32_t)'v') & 255u;
+  if((wb_filter[h2 >> 6u] & (1ULL << (h2 & 63u))) == 0ULL) return;
+  uint32_t h3 = ((uint32_t)'c' * 131u + (uint32_t)'v' * 37u + (uint32_t)'e') & 255u;
+  if((wb_filter[4u + (h3 >> 6u)] & (1ULL << (h3 & 63u))) == 0ULL) return;
+  const char *p = lower_text;
+  const char *end = lower_text + len;
+  while(p + 9u <= end && out->cve_count < MAX_EXTRACTED_CVES) {
+    const char *hit = strstr(p, "cve-");
+    if(!hit || hit + 9u > end) break;
+    if(isdigit((unsigned char)hit[4u]) &&
+       isdigit((unsigned char)hit[5u]) &&
+       isdigit((unsigned char)hit[6u]) &&
+       isdigit((unsigned char)hit[7u]) &&
+       hit[8u] == '-') {
+      const char *j = hit + 9u;
+      while(j < end && isdigit((unsigned char)*j) && (size_t)(j - hit) < 18u) j++;
+      if(j > hit + 9u) {
+        size_t clen = (size_t)(j - hit);
         for(size_t k = 0; k < clen; ++k) {
-          out->cves[out->cve_count][k] = (char)toupper((unsigned char)lower_text[i + k]);
+          out->cves[out->cve_count][k] = (char)toupper((unsigned char)hit[k]);
         }
         out->cves[out->cve_count][clen] = '\0';
         out->cve_count++;
-        i = j;
+        p = j;
         continue;
       }
     }
-    i++;
+    p = hit + 4u;
   }
 }
 
@@ -1330,6 +1836,7 @@ static void push_hf_repo(ExtractedEntities *out, const char *repo, size_t rlen) 
 
 static void extract_hf_repo_ids(const char *lower_text, size_t len, ExtractedEntities *out) {
   if(!lower_text || len < 6u) return;
+  if(memchr(lower_text, '/', len) == NULL) return;
   static const char *const k_hf_orgs[] = {
       "deepseek-ai/",         "meta-llama/",          "qwen/",
       "mistralai/",           "allenai/",             "bigcode/",
@@ -1339,9 +1846,10 @@ static void extract_hf_repo_ids(const char *lower_text, size_t len, ExtractedEnt
       "tiiuae/",              "baai/",                "nomic-ai/",
       "eleutherai/",          "openbmb/",             "ibm-granite/",
       "sentence-transformers/","unsloth/",            "zyphra/",
-      "liquidai/",            "google/gemma",         "google/paligemma",
-      "microsoft/phi",        "nvidia/llama",         "nvidia/nemotron",
-      "openai/whisper",       "openai/clip",          "apple/mlx",
+      "liquidai/",            "google-deepmind/",     "google/gemma",
+      "google/paligemma",     "microsoft/phi",        "nvidia/llama",
+      "nvidia/nemotron",      "openai/whisper",       "openai/clip",
+      "apple/mlx",
   };
   for(size_t k = 0; k < sizeof(k_hf_orgs) / sizeof(k_hf_orgs[0]); ++k) {
     if(out->hf_repo_count >= MAX_EXTRACTED_HF_REPOS) break;
@@ -1382,13 +1890,14 @@ void entities_extract(const char *title,
   char lower[4096];
   size_t len = 0;
   build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
-  uint32_t alpha_mask = 0u;
+  WordBloomIndex alpha_mask;
   compute_char_mask(lower, len, &alpha_mask);
+#define HAS_WORD(w) text_contains_word_fast(lower, len, &alpha_mask, (w))
 
   for(size_t i = 0; i < sizeof(k_geo_rules) / sizeof(k_geo_rules[0]); ++i) {
     if(out->country_count >= MAX_EXTRACTED_COUNTRIES) break;
     for(size_t t = 0; t < 5u && k_geo_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_geo_rules[i].terms[t])) {
+      if(HAS_WORD(k_geo_rules[i].terms[t])) {
         strncpy(out->countries[out->country_count], k_geo_rules[i].iso2, 3u);
         out->countries[out->country_count][3] = '\0';
         out->country_count++;
@@ -1400,7 +1909,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_org_rules) / sizeof(k_org_rules[0]); ++i) {
     if(out->org_count >= MAX_EXTRACTED_ORGS) break;
     for(size_t t = 0; t < 4u && k_org_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_org_rules[i].terms[t])) {
+      if(HAS_WORD(k_org_rules[i].terms[t])) {
         strncpy(out->organizations[out->org_count], k_org_rules[i].name, 23u);
         out->organizations[out->org_count][23] = '\0';
         out->org_count++;
@@ -1426,7 +1935,7 @@ void entities_extract(const char *title,
 
   for(size_t i = 0; i < sizeof(k_topic_rules) / sizeof(k_topic_rules[0]); ++i) {
     for(size_t t = 0; t < 16u && k_topic_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_topic_rules[i].terms[t])) {
+      if(HAS_WORD(k_topic_rules[i].terms[t])) {
         direct |= BIT(k_topic_rules[i].node);
         break;
       }
@@ -1436,47 +1945,47 @@ void entities_extract(const char *title,
   if(direct == 0u) direct = BIT(ONTO_PUBLIC_AFFAIRS);
   out->direct_ontology_mask = direct;
   out->closure_ontology_mask = ontology_upward_closure(direct);
-  out->news_type = news_type_classify(title, summary, content, feed_category);
+  out->news_type = news_type_classify_precomputed(title, lower, len, &alpha_mask, feed_category);
 
-  extract_cve_identifiers(lower, len, out);
+  extract_cve_identifiers(lower, len, alpha_mask.wb_filter, out);
 
   /* Compute OPSEC / Tradecraft / High-Clearance score & classification */
   double opsec = 0.0;
   ClearanceLevel level = CLEARANCE_PUBLIC;
 
-  if(text_contains_word(lower, len, "osint") || text_contains_word(lower, len, "satellite imagery") ||
-     text_contains_word(lower, len, "geolocation") || text_contains_word(lower, len, "telemetry") ||
-     text_contains_word(lower, len, "sinkhole") || text_contains_word(lower, len, "bgp")) {
+  if(HAS_WORD("osint") || HAS_WORD("satellite imagery") ||
+     HAS_WORD("geolocation") || HAS_WORD("telemetry") ||
+     HAS_WORD("sinkhole") || HAS_WORD("bgp")) {
     opsec += 2.2;
     if(level < CLEARANCE_OSINT) level = CLEARANCE_OSINT;
   }
 
-  if(text_contains_word(lower, len, "opsec") || text_contains_word(lower, len, "anti-bot") ||
-     text_contains_word(lower, len, "turnstile") || text_contains_word(lower, len, "fingerprint") ||
-     text_contains_word(lower, len, "ja3") || text_contains_word(lower, len, "ja4") ||
-     text_contains_word(lower, len, "webauthn") || text_contains_word(lower, len, "passkey") ||
-     text_contains_word(lower, len, "webassembly") || text_contains_word(lower, len, "sandbox") ||
-     text_contains_word(lower, len, "onion") || text_contains_word(lower, len, "qubes") ||
-     text_contains_word(lower, len, "grapheneos") || text_contains_word(lower, len, "wireguard")) {
+  if(HAS_WORD("opsec") || HAS_WORD("anti-bot") ||
+     HAS_WORD("turnstile") || HAS_WORD("fingerprint") ||
+     HAS_WORD("ja3") || HAS_WORD("ja4") ||
+     HAS_WORD("webauthn") || HAS_WORD("passkey") ||
+     HAS_WORD("webassembly") || HAS_WORD("sandbox") ||
+     HAS_WORD("onion") || HAS_WORD("qubes") ||
+     HAS_WORD("grapheneos") || HAS_WORD("wireguard")) {
     opsec += 3.5;
     if(level < CLEARANCE_TRADECRAFT) level = CLEARANCE_TRADECRAFT;
   }
 
-  if(out->cve_count > 0 || text_contains_word(lower, len, "zero-day") ||
-     text_contains_word(lower, len, "0-day") || text_contains_word(lower, len, "exploit") ||
-     text_contains_word(lower, len, "shellcode") || text_contains_word(lower, len, "rootkit") ||
-     text_contains_word(lower, len, "bootkit") || text_contains_word(lower, len, "spyware") ||
-     text_contains_word(lower, len, "pegasus") || text_contains_word(lower, len, "heap") ||
-     text_contains_word(lower, len, "use-after-free") || text_contains_word(lower, len, "post-quantum")) {
+  if(out->cve_count > 0 || HAS_WORD("zero-day") ||
+     HAS_WORD("0-day") || HAS_WORD("exploit") ||
+     HAS_WORD("shellcode") || HAS_WORD("rootkit") ||
+     HAS_WORD("bootkit") || HAS_WORD("spyware") ||
+     HAS_WORD("pegasus") || HAS_WORD("heap") ||
+     HAS_WORD("use-after-free") || HAS_WORD("post-quantum")) {
     opsec += 4.8 + (double)out->cve_count * 1.5;
     if(level < CLEARANCE_ZERO_DAY) level = CLEARANCE_ZERO_DAY;
   }
 
-  if(text_contains_word(lower, len, "sigint") || text_contains_word(lower, len, "geoint") ||
-     text_contains_word(lower, len, "c4isr") || text_contains_word(lower, len, "reconnaissance") ||
-     text_contains_word(lower, len, "hypersonic") || text_contains_word(lower, len, "deterrence") ||
-     text_contains_word(lower, len, "classified") || text_contains_word(lower, len, "darpa") ||
-     text_contains_word(lower, len, "iarpa") || text_contains_word(lower, len, "nsa")) {
+  if(HAS_WORD("sigint") || HAS_WORD("geoint") ||
+     HAS_WORD("c4isr") || HAS_WORD("reconnaissance") ||
+     HAS_WORD("hypersonic") || HAS_WORD("deterrence") ||
+     HAS_WORD("classified") || HAS_WORD("darpa") ||
+     HAS_WORD("iarpa") || HAS_WORD("nsa")) {
     opsec += 5.2;
     if(level < CLEARANCE_STRATEGIC) level = CLEARANCE_STRATEGIC;
   }
@@ -1488,7 +1997,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_asset_rules) / sizeof(k_asset_rules[0]); ++i) {
     if(out->asset_count >= MAX_EXTRACTED_ASSETS) break;
     for(size_t t = 0; t < 5u && k_asset_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_asset_rules[i].terms[t])) {
+      if(HAS_WORD(k_asset_rules[i].terms[t])) {
         strncpy(out->assets[out->asset_count], k_asset_rules[i].symbol, 15u);
         out->assets[out->asset_count][15] = '\0';
         out->asset_count++;
@@ -1500,7 +2009,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_fiscal_event_rules) / sizeof(k_fiscal_event_rules[0]); ++i) {
     if(out->fiscal_event_count >= MAX_EXTRACTED_EVENTS) break;
     for(size_t t = 0; t < 5u && k_fiscal_event_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_fiscal_event_rules[i].terms[t])) {
+      if(HAS_WORD(k_fiscal_event_rules[i].terms[t])) {
         strncpy(out->fiscal_events[out->fiscal_event_count], k_fiscal_event_rules[i].event_name, 23u);
         out->fiscal_events[out->fiscal_event_count][23] = '\0';
         out->fiscal_event_count++;
@@ -1510,24 +2019,24 @@ void entities_extract(const char *title,
   }
 
   double hawk = 0.0, dove = 0.0, bull = 0.0, bear = 0.0;
-  if(text_contains_word(lower, len, "rate hike") || text_contains_word(lower, len, "hawkish") ||
-     text_contains_word(lower, len, "quantitative tightening") || text_contains_word(lower, len, "raises interest rate") ||
-     text_contains_word(lower, len, "inflation surge") || text_contains_word(lower, len, "austerity")) {
+  if(HAS_WORD("rate hike") || HAS_WORD("hawkish") ||
+     HAS_WORD("quantitative tightening") || HAS_WORD("raises interest rate") ||
+     HAS_WORD("inflation surge") || HAS_WORD("austerity")) {
     hawk += 3.5;
   }
-  if(text_contains_word(lower, len, "rate cut") || text_contains_word(lower, len, "dovish") ||
-     text_contains_word(lower, len, "quantitative easing") || text_contains_word(lower, len, "fiscal stimulus") ||
-     text_contains_word(lower, len, "liquidity injection") || text_contains_word(lower, len, "cuts interest rate")) {
+  if(HAS_WORD("rate cut") || HAS_WORD("dovish") ||
+     HAS_WORD("quantitative easing") || HAS_WORD("fiscal stimulus") ||
+     HAS_WORD("liquidity injection") || HAS_WORD("cuts interest rate")) {
     dove += 3.5;
   }
-  if(text_contains_word(lower, len, "rally") || text_contains_word(lower, len, "bullish") ||
-     text_contains_word(lower, len, "record high") || text_contains_word(lower, len, "earnings beat") ||
-     text_contains_word(lower, len, "gdp expansion") || text_contains_word(lower, len, "surges")) {
+  if(HAS_WORD("rally") || HAS_WORD("bullish") ||
+     HAS_WORD("record high") || HAS_WORD("earnings beat") ||
+     HAS_WORD("gdp expansion") || HAS_WORD("surges")) {
     bull += 3.0;
   }
-  if(text_contains_word(lower, len, "recession") || text_contains_word(lower, len, "bearish") ||
-     text_contains_word(lower, len, "selloff") || text_contains_word(lower, len, "sovereign default") ||
-     text_contains_word(lower, len, "debt crisis") || text_contains_word(lower, len, "plunges")) {
+  if(HAS_WORD("recession") || HAS_WORD("bearish") ||
+     HAS_WORD("selloff") || HAS_WORD("sovereign default") ||
+     HAS_WORD("debt crisis") || HAS_WORD("plunges")) {
     bear += 3.2;
   }
 
@@ -1548,7 +2057,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_ai_model_rules) / sizeof(k_ai_model_rules[0]); ++i) {
     if(out->ai_model_count >= MAX_EXTRACTED_AI_MODELS) break;
     for(size_t t = 0; t < 6u && k_ai_model_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_ai_model_rules[i].terms[t])) {
+      if(HAS_WORD(k_ai_model_rules[i].terms[t])) {
         strncpy(out->ai_models[out->ai_model_count], k_ai_model_rules[i].model_family, 23u);
         out->ai_models[out->ai_model_count][23] = '\0';
         out->ai_model_count++;
@@ -1563,7 +2072,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_ai_infra_rules) / sizeof(k_ai_infra_rules[0]); ++i) {
     if(out->ai_infra_count >= MAX_EXTRACTED_AI_INFRA) break;
     for(size_t t = 0; t < 6u && k_ai_infra_rules[i].terms[t]; ++t) {
-      if(text_contains_word_fast(lower, len, alpha_mask, k_ai_infra_rules[i].terms[t])) {
+      if(HAS_WORD(k_ai_infra_rules[i].terms[t])) {
         strncpy(out->ai_infra[out->ai_infra_count], k_ai_infra_rules[i].infra_name, 23u);
         out->ai_infra[out->ai_infra_count][23] = '\0';
         out->ai_infra_count++;
@@ -1581,27 +2090,27 @@ void entities_extract(const char *title,
   if(out->hf_repo_count > 0) {
     lic_scores[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE] += (double)out->hf_repo_count * 2.6;
   }
-  if(text_contains_word(lower, len, "closed-source") || text_contains_word(lower, len, "closed source") ||
-     text_contains_word(lower, len, "proprietary model") || text_contains_word(lower, len, "frontier api") ||
-     text_contains_word(lower, len, "walled garden") || text_contains_word(lower, len, "unreleased weights")) {
+  if(HAS_WORD("closed-source") || HAS_WORD("closed source") ||
+     HAS_WORD("proprietary model") || HAS_WORD("frontier api") ||
+     HAS_WORD("walled garden") || HAS_WORD("unreleased weights")) {
     lic_scores[AI_LICENSE_CLOSED_PROPRIETARY] += 4.2;
   }
-  if(text_contains_word(lower, len, "community license") || text_contains_word(lower, len, "non-commercial") ||
-     text_contains_word(lower, len, "custom license") || text_contains_word(lower, len, "gated model")) {
+  if(HAS_WORD("community license") || HAS_WORD("non-commercial") ||
+     HAS_WORD("custom license") || HAS_WORD("gated model")) {
     lic_scores[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED] += 4.0;
   }
-  if(text_contains_word(lower, len, "open-weights") || text_contains_word(lower, len, "open weights") ||
-     text_contains_word(lower, len, "apache-2.0") || text_contains_word(lower, len, "apache 2.0") ||
-     text_contains_word(lower, len, "mit license") || text_contains_word(lower, len, "safetensors") ||
-     text_contains_word(lower, len, "gguf") || text_contains_word(lower, len, "hugging face") ||
-     text_contains_word(lower, len, "huggingface")) {
+  if(HAS_WORD("open-weights") || HAS_WORD("open weights") ||
+     HAS_WORD("apache-2.0") || HAS_WORD("apache 2.0") ||
+     HAS_WORD("mit license") || HAS_WORD("safetensors") ||
+     HAS_WORD("gguf") || HAS_WORD("hugging face") ||
+     HAS_WORD("huggingface")) {
     lic_scores[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE] += 3.8;
   }
-  if(text_contains_word(lower, len, "open-source ai definition") || text_contains_word(lower, len, "osaid") ||
-     text_contains_word(lower, len, "open pretraining") || text_contains_word(lower, len, "reproducible pretraining") ||
-     text_contains_word(lower, len, "dolma") || text_contains_word(lower, len, "the-stack-v2") ||
-     text_contains_word(lower, len, "fineweb") || text_contains_word(lower, len, "fully open-source") ||
-     text_contains_word(lower, len, "open science ai") || text_contains_word(lower, len, "open-source osi")) {
+  if(HAS_WORD("open-source ai definition") || HAS_WORD("osaid") ||
+     HAS_WORD("open pretraining") || HAS_WORD("reproducible pretraining") ||
+     HAS_WORD("dolma") || HAS_WORD("the-stack-v2") ||
+     HAS_WORD("fineweb") || HAS_WORD("fully open-source") ||
+     HAS_WORD("open science ai") || HAS_WORD("open-source osi")) {
     lic_scores[AI_LICENSE_OPEN_SCIENCE_OSI] += 6.5;
   }
 
@@ -1628,52 +2137,79 @@ void entities_extract(const char *title,
                     (double)out->hf_repo_count * 3.0;
 
   if((out->direct_ontology_mask & BIT(ONTO_AI)) != 0u ||
-     text_contains_word(lower, len, "rag") || text_contains_word(lower, len, "vector database") ||
-     text_contains_word(lower, len, "embedding") || text_contains_word(lower, len, "prompt") ||
-     text_contains_word(lower, len, "copilot") || text_contains_word(lower, len, "agentic")) {
+     HAS_WORD("rag") || HAS_WORD("vector database") ||
+     HAS_WORD("embedding") || HAS_WORD("prompt") ||
+     HAS_WORD("copilot") || HAS_WORD("agentic")) {
     ai_score += 1.8;
     if(ai_tier < AI_TIER_APPLIED_RAG) ai_tier = AI_TIER_APPLIED_RAG;
   }
 
-  if(text_contains_word(lower, len, "inference") || text_contains_word(lower, len, "vllm") ||
-     text_contains_word(lower, len, "sglang") || text_contains_word(lower, len, "tensorrt-llm") ||
-     text_contains_word(lower, len, "kv cache") || text_contains_word(lower, len, "kv-cache") ||
-     text_contains_word(lower, len, "pagedattention") || text_contains_word(lower, len, "flashattention") ||
-     text_contains_word(lower, len, "speculative decoding") || text_contains_word(lower, len, "quantization") ||
-     text_contains_word(lower, len, "ttft") || text_contains_word(lower, len, "tpot") ||
-     text_contains_word(lower, len, "tokens per second") || text_contains_word(lower, len, "fp8") ||
-     text_contains_word(lower, len, "gguf") || text_contains_word(lower, len, "llama.cpp")) {
+  if(HAS_WORD("inference") || HAS_WORD("vllm") ||
+     HAS_WORD("sglang") || HAS_WORD("tensorrt-llm") ||
+     HAS_WORD("kv cache") || HAS_WORD("kv-cache") ||
+     HAS_WORD("pagedattention") || HAS_WORD("flashattention") ||
+     HAS_WORD("speculative decoding") || HAS_WORD("quantization") ||
+     HAS_WORD("ttft") || HAS_WORD("tpot") ||
+     HAS_WORD("tokens per second") || HAS_WORD("fp8") ||
+     HAS_WORD("gguf") || HAS_WORD("llama.cpp")) {
     ai_score += 3.6;
     if(ai_tier < AI_TIER_INFERENCE_STACK) ai_tier = AI_TIER_INFERENCE_STACK;
   }
 
-  if(text_contains_word(lower, len, "neocloud") || text_contains_word(lower, len, "coreweave") ||
-     text_contains_word(lower, len, "lambda labs") || text_contains_word(lower, len, "together ai") ||
-     text_contains_word(lower, len, "fireworks ai") || text_contains_word(lower, len, "crusoe") ||
-     text_contains_word(lower, len, "nebius") || text_contains_word(lower, len, "baseten") ||
-     text_contains_word(lower, len, "blackwell") || text_contains_word(lower, len, "gb200") ||
-     text_contains_word(lower, len, "nvl72") || text_contains_word(lower, len, "h100") ||
-     text_contains_word(lower, len, "h200") || text_contains_word(lower, len, "mi300x") ||
-     text_contains_word(lower, len, "groq") || text_contains_word(lower, len, "cerebras") ||
-     text_contains_word(lower, len, "infiniband") || text_contains_word(lower, len, "nvlink") ||
-     text_contains_word(lower, len, "gpu cluster")) {
+  if(HAS_WORD("neocloud") || HAS_WORD("coreweave") ||
+     HAS_WORD("lambda labs") || HAS_WORD("together ai") ||
+     HAS_WORD("fireworks ai") || HAS_WORD("crusoe") ||
+     HAS_WORD("nebius") || HAS_WORD("baseten") ||
+     HAS_WORD("blackwell") || HAS_WORD("gb200") ||
+     HAS_WORD("nvl72") || HAS_WORD("h100") ||
+     HAS_WORD("h200") || HAS_WORD("mi300x") ||
+     HAS_WORD("groq") || HAS_WORD("cerebras") ||
+     HAS_WORD("infiniband") || HAS_WORD("nvlink") ||
+     HAS_WORD("gpu cluster")) {
     ai_score += 4.5;
     if(ai_tier < AI_TIER_NEOCLOUD_CLUSTER) ai_tier = AI_TIER_NEOCLOUD_CLUSTER;
   }
 
-  if(text_contains_word(lower, len, "pretraining") || text_contains_word(lower, len, "pre-training") ||
-     text_contains_word(lower, len, "post-training") || text_contains_word(lower, len, "test-time compute") ||
-     text_contains_word(lower, len, "rlhf") || text_contains_word(lower, len, "grpo") ||
-     text_contains_word(lower, len, "dpo") || text_contains_word(lower, len, "mixture of experts") ||
-     text_contains_word(lower, len, "scaling laws") || text_contains_word(lower, len, "chinchilla") ||
-     text_contains_word(lower, len, "frontier model") || text_contains_word(lower, len, "chain-of-thought") ||
-     text_contains_word(lower, len, "reward model") || text_contains_word(lower, len, "open weights")) {
+  if(HAS_WORD("pretraining") || HAS_WORD("pre-training") ||
+     HAS_WORD("post-training") || HAS_WORD("test-time compute") ||
+     HAS_WORD("rlhf") || HAS_WORD("grpo") ||
+     HAS_WORD("dpo") || HAS_WORD("mixture of experts") ||
+     HAS_WORD("scaling laws") || HAS_WORD("chinchilla") ||
+     HAS_WORD("frontier model") || HAS_WORD("chain-of-thought") ||
+     HAS_WORD("reward model") || HAS_WORD("open weights") ||
+     HAS_WORD("alphafold") || HAS_WORD("alphaproof") ||
+     HAS_WORD("alphageometry") || HAS_WORD("funsearch") ||
+     HAS_WORD("alphazero") || HAS_WORD("muzero")) {
     ai_score += 5.2;
     if(ai_tier < AI_TIER_FRONTIER_PRETRAINING) ai_tier = AI_TIER_FRONTIER_PRETRAINING;
   }
 
   out->ai_tier = ai_tier;
   out->ai_compute_score = ai_score;
+
+  /* Extract Global Sports Leagues, Tournaments & Athletics Intelligence */
+  for(size_t i = 0; i < sizeof(k_sports_rules) / sizeof(k_sports_rules[0]); ++i) {
+    if(out->sport_count >= MAX_EXTRACTED_SPORTS) break;
+    for(size_t t = 0; t < 6u && k_sports_rules[i].terms[t]; ++t) {
+      if(HAS_WORD(k_sports_rules[i].terms[t])) {
+        strncpy(out->sports[out->sport_count], k_sports_rules[i].league_name, 23u);
+        out->sports[out->sport_count][23] = '\0';
+        out->sport_count++;
+        break;
+      }
+    }
+  }
+
+  double sp_score = (double)out->sport_count * 3.2;
+  if(out->sport_count > 0) {
+    out->direct_ontology_mask |= BIT(ONTO_SPORTS);
+    out->closure_ontology_mask = ontology_upward_closure(out->direct_ontology_mask);
+  }
+  if((out->direct_ontology_mask & BIT(ONTO_SPORTS)) != 0u) {
+    sp_score += 2.0;
+  }
+  out->sports_score = sp_score;
+#undef HAS_WORD
 }
 
 static const char *const k_stopwords[] = {
