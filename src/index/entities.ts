@@ -392,6 +392,14 @@ export function classifyNewsType(
   const urlLower = (url ?? "").toLowerCase();
 
   if (
+    /\b(?:breaking:|breaking news|just in:|live updates|urgent:|flash:|developing story)/.test(
+      text
+    )
+  ) {
+    return "breaking-dispatch";
+  }
+
+  if (
     feedCategory === "investigative" ||
     /\b(?:investigation|investigative|revealed|leaked|whistleblower|exclusive report|osint|bellingcat|propublica|icij)\b/.test(
       text
@@ -404,7 +412,7 @@ export function classifyNewsType(
     urlLower.includes("/opinion/") ||
     urlLower.includes("/editorial/") ||
     urlLower.includes("/commentisfree/") ||
-    /\b(?:opinion:|editorial:|op-ed|column:|commentary:|why we must|in my view)\b/.test(
+    /\b(?:opinion:|editorial:|op-ed|column:|commentary:|why we must|in my view)/.test(
       text
     )
   ) {
@@ -421,7 +429,7 @@ export function classifyNewsType(
   }
 
   if (
-    /\b(?:explained:|explainer:|what to know about|how does|everything you need to know|q&a:|deep dive|guide to)\b/.test(
+    /\b(?:explained:|explainer:|what to know about|how does|everything you need to know|q&a:|deep dive|guide to)/.test(
       text
     )
   ) {
@@ -450,14 +458,6 @@ export function classifyNewsType(
     )
   ) {
     return "press-and-official";
-  }
-
-  if (
-    /\b(?:breaking:|just in:|live updates:|urgent:|flash:|developing story)\b/.test(
-      text
-    )
-  ) {
-    return "breaking-dispatch";
   }
 
   if (
