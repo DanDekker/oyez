@@ -31,6 +31,7 @@ static const char *ci_find(const char *haystack, size_t hlen, const char *needle
 }
 
 static int append_utf8_codepoint(Buffer *out, uint32_t cp) {
+  if(cp == 0 || (cp >= 0xD800u && cp <= 0xDFFFu) || cp > 0x10FFFFu) return 0;
   char u[4];
   size_t n = 0;
   if(cp <= 0x7Fu) {
@@ -45,14 +46,12 @@ static int append_utf8_codepoint(Buffer *out, uint32_t cp) {
     u[1] = (char)(0x80u | ((cp >> 6u) & 0x3Fu));
     u[2] = (char)(0x80u | (cp & 0x3Fu));
     n = 3u;
-  } else if(cp <= 0x10FFFFu) {
+  } else {
     u[0] = (char)(0xF0u | ((cp >> 18u) & 0x07u));
     u[1] = (char)(0x80u | ((cp >> 12u) & 0x3Fu));
     u[2] = (char)(0x80u | ((cp >> 6u) & 0x3Fu));
     u[3] = (char)(0x80u | (cp & 0x3Fu));
     n = 4u;
-  } else {
-    return 0;
   }
   buffer_append(out, u, n);
   return 0;
@@ -102,6 +101,10 @@ int markup_decode_entities(const char *input, size_t len, Buffer *out) {
                 break;
               }
               cp = (cp << 4u) | d;
+              if(cp > 0x10FFFFu) {
+                valid = 0;
+                break;
+              }
             }
           } else {
             for(size_t k = 1u; k < elen; ++k) {
@@ -111,9 +114,13 @@ int markup_decode_entities(const char *input, size_t len, Buffer *out) {
                 break;
               }
               cp = cp * 10u + (uint32_t)(c - '0');
+              if(cp > 0x10FFFFu) {
+                valid = 0;
+                break;
+              }
             }
           }
-          if(valid && cp > 0) {
+          if(valid && cp > 0 && !(cp >= 0xD800u && cp <= 0xDFFFu) && cp <= 0x10FFFFu) {
             append_utf8_codepoint(out, cp);
             i = semi + 1u;
             continue;
@@ -582,6 +589,7 @@ uint64_t parse_timestamp_ms(const char *str) {
     if(!isdigit((unsigned char)*p)) return 0u;
     while(isdigit((unsigned char)*p)) {
       day = day * 10 + (*p - '0');
+      if(day > 99) return 0u;
       p++;
     }
     while(*p && (isspace((unsigned char)*p) || *p == '-')) p++;
@@ -592,6 +600,7 @@ uint64_t parse_timestamp_ms(const char *str) {
     while(*p && (isspace((unsigned char)*p) || *p == '-')) p++;
     while(isdigit((unsigned char)*p)) {
       year = year * 10 + (*p - '0');
+      if(year > 99999) return 0u;
       p++;
     }
     if(year > 0 && year < 100) year += (year >= 70 ? 1900 : 2000);
@@ -626,7 +635,10 @@ uint64_t parse_timestamp_ms(const char *str) {
     }
   }
 
-  if(year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) return 0u;
+  if(year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 ||
+     hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60) {
+    return 0u;
+  }
   int64_t days = days_from_civil(year, (unsigned)month, (unsigned)day);
   int64_t total_sec = days * 86400LL + (int64_t)hour * 3600LL + (int64_t)min * 60LL +
                       (int64_t)sec - (int64_t)tz_offset_sec;
@@ -695,6 +707,23 @@ static char *extract_json_string_field(const char *json, size_t len, const char 
   return buf.data;
 }
 
+static void parsed_feed_item_free(ParsedFeedItem *it) {
+  if(!it) return;
+  free(it->guid);
+  free(it->title);
+  free(it->url);
+  free(it->author);
+  free(it->summary);
+  free(it->content_html);
+  free(it->published_at);
+  free(it->image_url);
+  for(size_t k = 0; k < it->category_count; ++k) {
+    free(it->categories[k]);
+  }
+  free(it->categories);
+  memset(it, 0, sizeof(*it));
+}
+
 static int parse_json_feed(const char *raw, size_t len, const char *base_url, ParsedFeed *out) {
   out->format = FEED_FORMAT_JSON;
   out->title = extract_json_string_field(raw, len, "title");
@@ -716,9 +745,9 @@ static int parse_json_feed(const char *raw, size_t len, const char *base_url, Pa
 
   const char *items_key = ci_find(raw, len, "\"items\"");
   if(!items_key) return 0;
-  const char *arr = strchr(items_key, '[');
-  if(!arr) return 0;
   const char *end = raw + len;
+  const char *arr = (const char *)memchr(items_key, '[', (size_t)(end - items_key));
+  if(!arr) return 0;
   const char *p = arr + 1u;
 
   while(p < end) {
@@ -773,7 +802,10 @@ static int parse_json_feed(const char *raw, size_t len, const char *base_url, Pa
     item.image_url = extract_json_string_field(obj_start, obj_len, "image");
 
     ParsedFeedItem *grown = realloc(out->items, (out->item_count + 1u) * sizeof(ParsedFeedItem));
-    if(!grown) break;
+    if(!grown) {
+      parsed_feed_item_free(&item);
+      break;
+    }
     out->items = grown;
     out->items[out->item_count++] = item;
   }
@@ -856,7 +888,10 @@ int feed_parse(const char *raw, size_t len, const char *base_url, ParsedFeed *ou
     extract_item_categories(is, ilen, &item);
 
     ParsedFeedItem *grown = realloc(out->items, (out->item_count + 1u) * sizeof(ParsedFeedItem));
-    if(!grown) break;
+    if(!grown) {
+      parsed_feed_item_free(&item);
+      break;
+    }
     out->items = grown;
     out->items[out->item_count++] = item;
 
@@ -874,19 +909,7 @@ void feed_free(ParsedFeed *feed) {
   free(feed->site_url);
   free(feed->language);
   for(size_t i = 0; i < feed->item_count; ++i) {
-    ParsedFeedItem *it = &feed->items[i];
-    free(it->guid);
-    free(it->title);
-    free(it->url);
-    free(it->author);
-    free(it->summary);
-    free(it->content_html);
-    free(it->published_at);
-    free(it->image_url);
-    for(size_t k = 0; k < it->category_count; ++k) {
-      free(it->categories[k]);
-    }
-    free(it->categories);
+    parsed_feed_item_free(&feed->items[i]);
   }
   free(feed->items);
   memset(feed, 0, sizeof(*feed));
