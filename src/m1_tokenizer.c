@@ -896,9 +896,10 @@ uint64_t m1_structural_sketch64(const char *text,
     size_t consumed = 0;
     if(match_fixed_piece(bytes, len, pos, &tok, &consumed)) {
       int32_t w = 2;
-      if(tok >= M1_LANDMARK_BASE && tok < M1_CONTROL_BASE) {
-        w = 5;
+      if(tok >= M1_PRIMITIVE_BASE && tok < M1_CONTROL_BASE) {
         landmarks++;
+        if(tok >= M1_LANDMARK_BASE) w = 5;
+        else w = 3;
       }
       uint64_t h = (uint64_t)tok * 0x9E3779B97F4A7C15ULL;
       h ^= h >> 30u;

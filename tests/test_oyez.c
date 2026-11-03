@@ -304,6 +304,24 @@ static void test_category_theory_and_ontology(void) {
   assert(sheaf.hodge_gradient_norm > 0.0);
   assert(sheaf.hodge_solenoidal_norm >= 0.0);
 
+  /* Persistent Homology Barcode & Adjunction Monad/Comonad Triangle Identities */
+  PersistenceBarcode barcode;
+  ontology_persistent_homology(raw, &barcode);
+  assert(barcode.total_persistence_l1 > 0.5);
+  assert(barcode.steps[PERSISTENCE_FILTRATION_STEPS - 1].f_vector[0] == 32u);
+  assert(barcode.steps[PERSISTENCE_FILTRATION_STEPS - 1].betti_0 == 1u);
+
+  AdjunctionMonadState monad;
+  ontology_adjunction_monad(raw, &monad);
+  assert(monad.zig_zag_triangle_defect < 1e-12);
+  assert(monad.kleisli_entropy > 0.5);
+  assert(monad.eilenberg_moore_mask != 0u);
+
+  uint32_t m1_landmarks = 0;
+  uint64_t m1_sk = m1_structural_sketch64("DeepMind AlphaFold FlashAttention CVE-2026-1337 FOMC", 52u, &m1_landmarks);
+  assert(m1_sk != 0ULL);
+  assert(m1_landmarks >= 2u);
+
   /* Epistemic NewsType classification */
   assert(news_type_classify("BREAKING: Earthquake strikes Pacific trench", "", "", "climate") ==
          NEWS_TYPE_BREAKING_DISPATCH);
@@ -581,6 +599,42 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(status == 200);
   assert(strstr(json.data, "\"cartesian_lifts\":") != NULL);
   assert(strstr(json.data, "\"leinster_magnitude\":") != NULL);
+  buffer_free(&json);
+
+  TemporalSheafState temp_sh;
+  engine_temporal_sheaf(&eng, &temp_sh);
+  assert(temp_sh.connection_laplacian_norm > 0.0);
+
+  OperadChain op_chains[8];
+  size_t n_op = engine_operad_compose(&eng, "east-asia", "europe", "east-asia", op_chains, 8u);
+  assert(n_op >= 1u);
+  assert(op_chains[0].operad_composition_score > 0.0);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/temporal", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"persistent_homology\":") != NULL);
+  assert(strstr(json.data, "\"adjunction_monad\":") != NULL);
+  assert(strstr(json.data, "\"temporal_sheaf\":") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/operad?r1=east-asia&r2=europe&r3=east-asia", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"operad_chains\":") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/feed.xml?category=all-news", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "<feed xmlns=\"http://www.w3.org/2005/Atom\">") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/stream", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "event: topology") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/console", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "TOPOS &amp; SHEAF INTELLIGENCE CONSOLE") != NULL);
   buffer_free(&json);
 
   assert(http_handle_request(&ctx, "GET", "/api/v1/pushout?left_region=east-asia&right_region=europe&over=mentioned_country", "", 0, &status, &json) == 0);
