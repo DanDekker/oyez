@@ -8,6 +8,7 @@
 void *allocate(size_t count, size_t size)
 {
     if (!count || !size) return calloc(1, 1);
+    if (count > SIZE_MAX / size) return NULL;
     return calloc(count, size);
 }
 
@@ -141,6 +142,33 @@ void json_cstr(Buffer *buffer, const char *text)
         return;
     }
     json_string(buffer, text, strlen(text));
+}
+
+void xml_escape(Buffer *buffer, const char *text, size_t length)
+{
+    if (!buffer || !text || length == 0) return;
+    const unsigned char *p = (const unsigned char *)text;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = p[i];
+        switch (c) {
+        case '&':  buffer_append(buffer, "&amp;", 5); break;
+        case '<':  buffer_append(buffer, "&lt;", 4); break;
+        case '>':  buffer_append(buffer, "&gt;", 4); break;
+        case '"':  buffer_append(buffer, "&quot;", 6); break;
+        case '\'': buffer_append(buffer, "&apos;", 6); break;
+        default:
+            if (c >= 0x20 || c == '\t' || c == '\n' || c == '\r') {
+                buffer_append(buffer, &c, 1);
+            }
+            break;
+        }
+    }
+}
+
+void xml_cstr(Buffer *buffer, const char *text)
+{
+    if (!text) return;
+    xml_escape(buffer, text, strlen(text));
 }
 
 int64_t monotonic_ns(void)

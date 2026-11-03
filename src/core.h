@@ -32,6 +32,8 @@ void buffer_clear(Buffer *buffer);
 void buffer_free(Buffer *buffer);
 void json_string(Buffer *buffer, const char *text, size_t length);
 void json_cstr(Buffer *buffer, const char *text);
+void xml_escape(Buffer *buffer, const char *text, size_t length);
+void xml_cstr(Buffer *buffer, const char *text);
 
 int64_t monotonic_ms(void);
 int64_t monotonic_ns(void);
