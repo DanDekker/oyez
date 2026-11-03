@@ -10,6 +10,7 @@
 #include "wire.h"
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -737,12 +738,123 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_free(&eng);
 }
 
+typedef struct {
+  const OyezEngine *eng;
+  size_t iterations;
+  size_t hits_sum;
+} ConcurrentSearchWorkerArg;
+
+static void *concurrent_search_worker(void *arg) {
+  ConcurrentSearchWorkerArg *w = (ConcurrentSearchWorkerArg *)arg;
+  size_t acc = 0;
+  for(size_t i = 0; i < w->iterations; ++i) {
+    engine_read_lock(w->eng);
+    ArticleQuery q;
+    memset(&q, 0, sizeof(q));
+    q.query = (i & 1u) ? "semiconductor wafer" : "DeepSeek CoreWeave";
+    q.category = "all-news";
+    q.use_category_morphism = 1;
+    q.limit = 10u;
+    q.offset = i % 3u;
+    SearchResponse res;
+    if(engine_search(w->eng, &q, &res) == 0) {
+      acc += res.total;
+      search_response_free(&res);
+    }
+    engine_unlock(w->eng);
+  }
+  w->hits_sum = acc;
+  return NULL;
+}
+
+static void test_hardening_and_concurrency(void) {
+  /* 1. Overflow-safe allocate & XML escaping */
+  assert(allocate(SIZE_MAX, 2u) == NULL);
+
+  Buffer xbuf;
+  buffer_init(&xbuf);
+  xml_cstr(&xbuf, "a&b<c>\"d\"'e'\x01]]>");
+  assert(strcmp(xbuf.data, "a&amp;b&lt;c&gt;&quot;d&quot;&apos;e&apos;]]&gt;") == 0);
+  buffer_free(&xbuf);
+
+  /* 2. Malformed & surrogate HTML numeric entities */
+  Buffer ebuf;
+  buffer_init(&ebuf);
+  const char *bad_ent = "ok&#xD800;&#55296;&#x110000;&#99999999999999;&amp;";
+  assert(markup_decode_entities(bad_ent, strlen(bad_ent), &ebuf) == 0);
+  assert(strstr(ebuf.data, "ok") != NULL);
+  assert(strstr(ebuf.data, "&") != NULL);
+  buffer_free(&ebuf);
+
+  /* 3. Out-of-bounds RFC3339 & RFC2822 timestamps */
+  assert(parse_timestamp_ms("2026-11-03T25:00:00Z") == 0u);
+  assert(parse_timestamp_ms("2026-11-03T12:65:00Z") == 0u);
+  assert(parse_timestamp_ms("999999999999 Nov 2026 12:00:00 GMT") == 0u);
+  assert(parse_timestamp_ms("03 Nov 999999999999 12:00:00 GMT") == 0u);
+
+  /* 4. Adversarial XML & JSON escaping + 8-thread concurrent query_cache stress test */
+  OyezEngine eng;
+  engine_init(&eng);
+  uint32_t fid = 0;
+  CatalogEntry ce = {"Sec Feed", "https://sec.example/rss", "https://sec.example",
+                     "cyber", REGION_NORTH_AMERICA, "US", "North America", "en", "specialist", "Sec"};
+  engine_upsert_feed(&eng, &ce, &fid);
+
+  int ins = 0;
+  engine_ingest_article(&eng,
+                        fid,
+                        "adv-1",
+                        "Semiconductor wafer ]]> <script>&\"' alert</script>",
+                        "https://sec.example/a?x=1&y=2\"evil",
+                        "Sec",
+                        "DeepSeek CoreWeave ]]> summary & <tag>",
+                        "<p>Semiconductor wafer DeepSeek CoreWeave analysis.</p>",
+                        "2026-11-03T05:00:00Z",
+                        1762135000000ULL,
+                        "",
+                        NULL,
+                        0,
+                        NULL,
+                        &ins);
+  assert(ins == 1);
+
+  ServerContext ctx = {&eng, NULL, NULL, 0};
+  int status = 0;
+  Buffer out;
+  assert(http_handle_request(&ctx, "GET", "/api/v1/feed.xml", "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "]]&gt; &lt;script&gt;&amp;&quot;&apos;") != NULL);
+  assert(strstr(out.data, "href=\"https://sec.example/a?x=1&amp;y=2&quot;evil\"") != NULL);
+  buffer_free(&out);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/ontology?sub=ai%22evil&sup=cyber", "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "\"sub\":\"ai\\\"evil\"") != NULL);
+  buffer_free(&out);
+
+  pthread_t threads[8];
+  ConcurrentSearchWorkerArg args[8];
+  for(int t = 0; t < 8; ++t) {
+    args[t].eng = &eng;
+    args[t].iterations = 200u;
+    args[t].hits_sum = 0;
+    assert(pthread_create(&threads[t], NULL, concurrent_search_worker, &args[t]) == 0);
+  }
+  for(int t = 0; t < 8; ++t) {
+    pthread_join(threads[t], NULL);
+    assert(args[t].hits_sum == 200u);
+  }
+
+  engine_free(&eng);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
   test_markup_and_readability();
   test_category_theory_and_ontology();
   test_engine_search_and_categorical_endpoints();
+  test_hardening_and_concurrency();
   printf("ALL C23 OYEZ TESTS PASSED\n");
   return 0;
 }
