@@ -1634,9 +1634,36 @@ static void *http_client_worker(void *arg) {
   /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection */
   for(int req_idx = 0; req_idx < 16; ++req_idx) {
     char req[65536];
-    ssize_t n = recv(client, req, sizeof(req) - 1u, 0);
-    if(n <= 0) break;
-    req[n] = '\0';
+    size_t used = 0;
+    const char *hdr_end = NULL;
+    while(used + 1u < sizeof(req)) {
+      ssize_t n = recv(client, req + used, sizeof(req) - 1u - used, 0);
+      if(n <= 0) break;
+      used += (size_t)n;
+      req[used] = '\0';
+      hdr_end = strstr(req, "\r\n\r\n");
+      if(hdr_end) break;
+    }
+    if(used == 0 || !hdr_end) break;
+
+    size_t hdr_len = (size_t)((hdr_end + 4u) - req);
+    size_t expected_body = 0;
+    const char *cl_hdr = strstr(req, "Content-Length:");
+    if(!cl_hdr || (size_t)(cl_hdr - req) >= hdr_len) {
+      cl_hdr = strstr(req, "content-length:");
+    }
+    if(cl_hdr && (size_t)(cl_hdr - req) < hdr_len) {
+      expected_body = (size_t)strtoul(cl_hdr + 15u, NULL, 10);
+      if(expected_body > sizeof(req) - 1u - hdr_len) {
+        expected_body = sizeof(req) - 1u - hdr_len;
+      }
+    }
+    while(used - hdr_len < expected_body && used + 1u < sizeof(req)) {
+      ssize_t n = recv(client, req + used, sizeof(req) - 1u - used, 0);
+      if(n <= 0) break;
+      used += (size_t)n;
+      req[used] = '\0';
+    }
 
     char method[16] = {0};
     char target[1024] = {0};
@@ -1656,14 +1683,8 @@ static void *http_client_worker(void *arg) {
       continue;
     }
 
-    const char *body = strstr(req, "\r\n\r\n");
-    size_t body_len = 0;
-    if(body) {
-      body += 4u;
-      body_len = (size_t)((req + n) - body);
-    } else {
-      body = "";
-    }
+    const char *body = req + hdr_len;
+    size_t body_len = used - hdr_len;
 
     int is_write = (strcmp(method, "POST") == 0 &&
                     (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
