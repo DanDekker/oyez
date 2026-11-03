@@ -33,13 +33,18 @@ export function createOyezApp(
   router.get("/", () => {
     return jsonResponse({
       name: "Oyez",
-      tagline: "Oyez! Oyez! Oyez! A global news API, RSS aggregator, and deep search engine for the people.",
-      version: "0.2.0",
+      tagline:
+        "Oyez! Oyez! Oyez! A global news API, RSS aggregator, and category-theoretic deep search engine for the people.",
+      version: "0.3.0",
       endpoints: [
         "GET    /health",
         "GET    /api/v1/stats",
         "GET    /api/v1/facets",
         "GET    /api/v1/trending",
+        "GET    /api/v1/ontology",
+        "GET    /api/v1/concepts",
+        "GET    /api/v1/pullback",
+        "GET    /api/v1/centrality",
         "GET    /api/v1/catalog",
         "GET    /api/v1/feeds",
         "POST   /api/v1/feeds",
@@ -52,6 +57,7 @@ export function createOyezApp(
         "GET    /api/v1/articles",
         "GET    /api/v1/articles/:id",
         "GET    /api/v1/articles/:id/related",
+        "GET    /api/v1/articles/:id/duplicates",
         "DELETE /api/v1/articles/:id",
         "POST   /api/v1/articles/:id/extract",
         "POST   /api/v1/extract",
@@ -86,11 +92,72 @@ export function createOyezApp(
     const storyClusters = engine.discoverStoryClusters(limit);
     return jsonResponse({
       storyClusters,
+      topNewsTypes: facets.newsTypes,
       topTopics: facets.topics,
+      topOntologyCategories: facets.ontologyCategories,
       topEntities: facets.topEntities,
       topMentionedCountries: facets.mentionedCountries,
       coverageByRegion: facets.regions,
     });
+  });
+
+  router.get("/api/v1/ontology", ({ query }) => {
+    const u = query.get("u") ?? undefined;
+    const v = query.get("v") ?? undefined;
+    return jsonResponse(engine.getOntologyAnalysis(u, v));
+  });
+
+  router.get("/api/v1/concepts", ({ query }) => {
+    const minSupport = Math.max(1, Number(query.get("minSupport") ?? 2));
+    const limit = Math.min(Math.max(Number(query.get("limit") ?? 20), 1), 60);
+    const concepts = engine.getConceptLattice(minSupport, limit);
+    return jsonResponse({
+      totalConcepts: concepts.length,
+      minSupport,
+      concepts,
+    });
+  });
+
+  router.get("/api/v1/pullback", ({ query }) => {
+    const leftRegion = query.get("leftRegion") ?? undefined;
+    const rightRegion = query.get("rightRegion") ?? undefined;
+    const leftCountry = query.get("leftCountry") ?? undefined;
+    const rightCountry = query.get("rightCountry") ?? undefined;
+    const leftType = query.get("leftType") ?? undefined;
+    const rightType = query.get("rightType") ?? undefined;
+    const pivotRaw = query.get("pivot") ?? "topic";
+    const pivot =
+      pivotRaw === "topic" ||
+      pivotRaw === "mentionedCountry" ||
+      pivotRaw === "entity" ||
+      pivotRaw === "ontologyCategory"
+        ? pivotRaw
+        : "topic";
+    const limit = Math.min(Math.max(Number(query.get("limit") ?? 20), 1), 50);
+
+    const witnesses = engine.computePullback(
+      { region: leftRegion, country: leftCountry, newsType: leftType },
+      { region: rightRegion, country: rightCountry, newsType: rightType },
+      pivot,
+      limit
+    );
+
+    return jsonResponse({
+      pivotDimension: pivot,
+      leftFiber: { region: leftRegion, country: leftCountry, newsType: leftType },
+      rightFiber: {
+        region: rightRegion,
+        country: rightCountry,
+        newsType: rightType,
+      },
+      totalWitnesses: witnesses.length,
+      witnesses,
+    });
+  });
+
+  router.get("/api/v1/centrality", ({ query }) => {
+    const limit = Math.min(Math.max(Number(query.get("limit") ?? 15), 1), 50);
+    return jsonResponse(engine.getPageRankCentrality(limit));
   });
 
   router.get("/api/v1/catalog", ({ query }) => {
@@ -398,6 +465,7 @@ export function createOyezApp(
     const q = query.get("q") ?? undefined;
     const feedId = query.get("feedId") ?? undefined;
     const category = query.get("category") ?? undefined;
+    const newsType = query.get("newsType") ?? undefined;
     const region = query.get("region") ?? undefined;
     const country = query.get("country") ?? undefined;
     const mentionedCountry = query.get("mentionedCountry") ?? undefined;
@@ -405,6 +473,8 @@ export function createOyezApp(
     const topic = query.get("topic") ?? undefined;
     const entity = query.get("entity") ?? undefined;
     const domain = query.get("domain") ?? undefined;
+    const diversify = query.get("diversify") === "true";
+    const mmrLambdaRaw = query.get("mmrLambda");
     const includeFacets = query.get("facets") === "true";
     const fromRaw = query.get("from");
     const toRaw = query.get("to");
@@ -427,11 +497,13 @@ export function createOyezApp(
       sortRaw === "relevance" || sortRaw === "date" ? sortRaw : undefined;
     const limit = limitRaw ? Number(limitRaw) : 25;
     const offset = offsetRaw ? Number(offsetRaw) : 0;
+    const mmrLambda = mmrLambdaRaw ? Number(mmrLambdaRaw) : undefined;
 
     const searchResult = engine.search({
       q,
       feedId,
       category,
+      newsType,
       region,
       country,
       mentionedCountry,
@@ -439,6 +511,8 @@ export function createOyezApp(
       topic,
       entity,
       domain,
+      diversify,
+      mmrLambda,
       from: from && !Number.isNaN(from) ? from : undefined,
       to: to && !Number.isNaN(to) ? to : undefined,
       sort,
@@ -473,6 +547,22 @@ export function createOyezApp(
       title: article.title,
       relatedCount: related.length,
       related,
+    });
+  });
+
+  router.get("/api/v1/articles/:id/duplicates", ({ params, query }) => {
+    const article = engine.getArticle(params.id);
+    if (!article) {
+      return errorResponse(`Article not found: ${params.id}`, 404);
+    }
+    const maxDistance = Number(query.get("maxDistance") ?? 14);
+    const duplicates = engine.findNearDuplicates(article.id, maxDistance);
+    return jsonResponse({
+      articleId: article.id,
+      simhash64: article.simhash64,
+      maxHammingDistance: maxDistance,
+      count: duplicates.length,
+      duplicates,
     });
   });
 
