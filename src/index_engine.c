@@ -245,6 +245,12 @@ static void free_article_record(ArticleRecord *a) {
 
 void engine_free(OyezEngine *engine) {
   if(!engine) return;
+  for(size_t i = 0; i < 64u; ++i) {
+    if(engine->query_cache[i].valid) {
+      free(engine->query_cache[i].slots);
+      free(engine->query_cache[i].scores);
+    }
+  }
   for(size_t i = 0; i < engine->feed_count; ++i) {
     free_feed_record(&engine->feeds[i]);
   }
@@ -562,6 +568,16 @@ int engine_ingest_article(OyezEngine *engine,
 
   index_article_record(engine, a);
   feed->article_count++;
+  engine->index_generation++;
+  for(size_t c = 0; c < 64u; ++c) {
+    if(engine->query_cache[c].valid) {
+      free(engine->query_cache[c].slots);
+      free(engine->query_cache[c].scores);
+      engine->query_cache[c].slots = NULL;
+      engine->query_cache[c].scores = NULL;
+      engine->query_cache[c].valid = 0;
+    }
+  }
 
   if(out_article_id) *out_article_id = a->id;
   if(out_inserted) *out_inserted = 1;
@@ -594,10 +610,48 @@ static double article_similarity(const ArticleRecord *a, const ArticleRecord *b)
   return 0.45 * sim_hash + 0.35 * sim_onto + 0.20 * same_feed;
 }
 
+static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
+  uint64_t h = mix64(gen ^ 0x9E3779B97F4A7C15ULL);
+  h ^= mix64(fnv1a64_cstr(q->query ? q->query : "") + 1u);
+  h ^= mix64(fnv1a64_cstr(q->category ? q->category : "") + 2u);
+  h ^= mix64(fnv1a64_cstr(q->news_type ? q->news_type : "") + 3u);
+  h ^= mix64(fnv1a64_cstr(q->clearance ? q->clearance : "") + 4u);
+  h ^= mix64(fnv1a64_cstr(q->fiscal_stance ? q->fiscal_stance : "") + 5u);
+  h ^= mix64(fnv1a64_cstr(q->asset ? q->asset : "") + 6u);
+  h ^= mix64(fnv1a64_cstr(q->fiscal_event ? q->fiscal_event : "") + 7u);
+  h ^= mix64(fnv1a64_cstr(q->region ? q->region : "") + 8u);
+  h ^= mix64(fnv1a64_cstr(q->country ? q->country : "") + 9u);
+  h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
+  h ^= mix64(fnv1a64_cstr(q->language ? q->language : "") + 11u);
+  h ^= mix64(fnv1a64_cstr(q->source_tier ? q->source_tier : "") + 12u);
+  h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)q->use_category_morphism << 16u) |
+             (uint64_t)q->diversify_mmr);
+  h ^= mix64(((uint64_t)q->limit << 32u) | (uint64_t)q->offset);
+  return h;
+}
+
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out) {
   if(!engine || !q || !out) return -1;
   memset(out, 0, sizeof(*out));
   uint64_t t0 = monotonic_ns();
+
+  uint64_t qhash = hash_article_query(q, engine->index_generation);
+  size_t cslot = (size_t)(qhash & 63ULL);
+  if(engine->query_cache[cslot].valid && engine->query_cache[cslot].key_hash == qhash) {
+    size_t take = engine->query_cache[cslot].count;
+    out->total = engine->query_cache[cslot].total;
+    out->count = take;
+    if(take > 0) {
+      out->hits = malloc(take * sizeof(ScoredArticle));
+      if(!out->hits) return -1;
+      for(size_t i = 0; i < take; ++i) {
+        out->hits[i].article = &engine->articles[engine->query_cache[cslot].slots[i]];
+        out->hits[i].score = (double)engine->query_cache[cslot].scores[i];
+      }
+    }
+    out->query_time_ms = (double)(monotonic_ns() - t0) / 1e6;
+    return 0;
+  }
 
   BitSet candidates;
   if(bitset_clone(&engine->all_articles, &candidates) != 0) return -1;
@@ -826,6 +880,26 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   }
   memcpy(out->hits, pool + offset, take * sizeof(ScoredArticle));
   out->count = take;
+
+  /* Populate 64-entry query response cache */
+  OyezEngine *mut_eng = (OyezEngine *)engine;
+  if(mut_eng->query_cache[cslot].valid) {
+    free(mut_eng->query_cache[cslot].slots);
+    free(mut_eng->query_cache[cslot].scores);
+  }
+  mut_eng->query_cache[cslot].slots = malloc((take ? take : 1u) * sizeof(uint32_t));
+  mut_eng->query_cache[cslot].scores = malloc((take ? take : 1u) * sizeof(float));
+  if(mut_eng->query_cache[cslot].slots && mut_eng->query_cache[cslot].scores) {
+    for(size_t i = 0; i < take; ++i) {
+      mut_eng->query_cache[cslot].slots[i] = out->hits[i].article->slot;
+      mut_eng->query_cache[cslot].scores[i] = (float)out->hits[i].score;
+    }
+    mut_eng->query_cache[cslot].key_hash = qhash;
+    mut_eng->query_cache[cslot].count = take;
+    mut_eng->query_cache[cslot].total = pool_count;
+    mut_eng->query_cache[cslot].valid = 1;
+  }
+
   free(pool);
   out->query_time_ms = (double)(monotonic_ns() - t0) / 1e6;
   return 0;

@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,15 +118,110 @@ int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_insert
 }
 
 size_t engine_poll_all(OyezEngine *engine, size_t max_feeds) {
-  size_t limit = (max_feeds > 0 && max_feeds < engine->feed_count) ? max_feeds : engine->feed_count;
-  size_t total_inserted = 0;
-  for(size_t i = 0; i < limit; ++i) {
-    size_t ins = 0;
-    if(engine_refresh_feed(engine, engine->feeds[i].id, &ins) == 0) {
-      total_inserted += ins;
+  return engine_poll_concurrent(engine, max_feeds, 8u);
+}
+
+typedef struct {
+  OyezEngine *engine;
+  size_t limit;
+  size_t next_idx;
+  size_t total_inserted;
+  pthread_mutex_t idx_lock;
+  pthread_mutex_t eng_lock;
+} PollPool;
+
+static void *poll_worker_main(void *arg) {
+  PollPool *pool = (PollPool *)arg;
+  for(;;) {
+    pthread_mutex_lock(&pool->idx_lock);
+    size_t idx = pool->next_idx;
+    if(idx >= pool->limit) {
+      pthread_mutex_unlock(&pool->idx_lock);
+      break;
     }
+    pool->next_idx++;
+    uint32_t feed_id = pool->engine->feeds[idx].id;
+    const char *feed_url = pool->engine->feeds[idx].feed_url;
+    const char *site_url = pool->engine->feeds[idx].site_url;
+    pthread_mutex_unlock(&pool->idx_lock);
+
+    Buffer raw;
+    if(http_fetch_url(feed_url, &raw) != 0) {
+      pthread_mutex_lock(&pool->eng_lock);
+      pool->engine->feeds[idx].error_count++;
+      pthread_mutex_unlock(&pool->eng_lock);
+      continue;
+    }
+
+    ParsedFeed parsed;
+    if(feed_parse(raw.data, raw.len, site_url, &parsed) != 0) {
+      buffer_free(&raw);
+      pthread_mutex_lock(&pool->eng_lock);
+      pool->engine->feeds[idx].error_count++;
+      pthread_mutex_unlock(&pool->eng_lock);
+      continue;
+    }
+    buffer_free(&raw);
+
+    pthread_mutex_lock(&pool->eng_lock);
+    size_t ins_count = 0;
+    for(size_t i = 0; i < parsed.item_count; ++i) {
+      ParsedFeedItem *it = &parsed.items[i];
+      int ins = 0;
+      if(engine_ingest_article(pool->engine,
+                               feed_id,
+                               it->guid,
+                               it->title,
+                               it->url,
+                               it->author,
+                               it->summary,
+                               it->content_html,
+                               it->published_at,
+                               wall_time_ms(),
+                               it->image_url,
+                               (const char *const *)it->categories,
+                               it->category_count,
+                               NULL,
+                               &ins) == 0 &&
+         ins) {
+        ins_count++;
+      }
+    }
+    pool->engine->feeds[idx].fetch_count++;
+    pool->engine->feeds[idx].last_fetched_ms = wall_time_ms();
+    pool->total_inserted += ins_count;
+    pthread_mutex_unlock(&pool->eng_lock);
+
+    feed_free(&parsed);
   }
-  return total_inserted;
+  return NULL;
+}
+
+size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count) {
+  if(!engine || engine->feed_count == 0) return 0;
+  size_t limit = (max_feeds > 0 && max_feeds < engine->feed_count) ? max_feeds : engine->feed_count;
+  if(thread_count == 0) thread_count = 1u;
+  if(thread_count > 16u) thread_count = 16u;
+  if(thread_count > limit) thread_count = limit;
+
+  PollPool pool;
+  memset(&pool, 0, sizeof(pool));
+  pool.engine = engine;
+  pool.limit = limit;
+  pthread_mutex_init(&pool.idx_lock, NULL);
+  pthread_mutex_init(&pool.eng_lock, NULL);
+
+  pthread_t threads[16];
+  for(size_t t = 0; t < thread_count; ++t) {
+    pthread_create(&threads[t], NULL, poll_worker_main, &pool);
+  }
+  for(size_t t = 0; t < thread_count; ++t) {
+    pthread_join(threads[t], NULL);
+  }
+
+  pthread_mutex_destroy(&pool.idx_lock);
+  pthread_mutex_destroy(&pool.eng_lock);
+  return pool.total_inserted;
 }
 
 static void url_decode_Component(const char *src, size_t len, char *dst, size_t cap) {

@@ -141,6 +141,17 @@ typedef struct {
 
   /* 4-band x 16-bit Multi-Probe SimHash LSH index (4 * 4096 hash buckets) */
   SimHashBucket *lsh_bands[4];
+
+  /* 64-entry FNV-1a Open-Addressed Query Response Cache */
+  struct {
+    uint64_t key_hash;
+    uint32_t *slots;
+    float *scores;
+    size_t count;
+    size_t total;
+    int valid;
+  } query_cache[64];
+  uint64_t index_generation;
 } OyezEngine;
 
 typedef struct {

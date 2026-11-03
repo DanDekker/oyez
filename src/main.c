@@ -85,10 +85,11 @@ static int run_bench(void) {
   for(size_t i = 0; i < q_iters; ++i) {
     ArticleQuery aq;
     memset(&aq, 0, sizeof(aq));
-    aq.query = "semiconductor quantum";
-    aq.category = "knowledge-economy";
+    aq.query = (i & 1u) ? "semiconductor quantum" : "inflation central bank";
+    aq.category = (i & 1u) ? "knowledge-economy" : "public-affairs";
     aq.use_category_morphism = 1;
     aq.limit = 25u;
+    aq.offset = i % 8u; /* Vary offset across 16 distinct queries to measure both cold BM25 and hot cache */
     SearchResponse res;
     engine_search(&eng, &aq, &res);
     total_hits += res.total;
@@ -96,7 +97,7 @@ static int run_bench(void) {
   }
   uint64_t q1 = monotonic_ns();
   double q_us = ((double)(q1 - q0) / 1e3) / (double)q_iters;
-  printf("2. BM25 + Poset Presheaf Fiber + BitSet Search (%zu queries):\n", q_iters);
+  printf("2. BM25 + Poset Presheaf Fiber + BitSet + Cache Search (%zu queries):\n", q_iters);
   printf("   Avg Latency: %.2f us/query (%.0f queries/sec, hits=%zu)\n",
          q_us,
          1e6 / q_us,
