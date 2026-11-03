@@ -300,14 +300,19 @@ NewsType news_type_classify(const char *title,
     scores[NEWS_TYPE_POLICY_AND_LEGISLATIVE] += 3.2;
   }
 
-  if(feed_category && strcmp(feed_category, "science") == 0) {
-    scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 2.5;
+  if(feed_category && (strcmp(feed_category, "science") == 0 || strcmp(feed_category, "ai") == 0 ||
+                       strcmp(feed_category, "space") == 0)) {
+    scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 2.6;
   }
   if(text_contains_word(lower, len, "peer-reviewed") || text_contains_word(lower, len, "arxiv") ||
+     text_contains_word(lower, len, "biorxiv") || text_contains_word(lower, len, "medrxiv") ||
+     text_contains_word(lower, len, "chemrxiv") || text_contains_word(lower, len, "preprint") ||
+     text_contains_word(lower, len, "theorem") || text_contains_word(lower, len, "synchrotron") ||
+     text_contains_word(lower, len, "tokamak") || text_contains_word(lower, len, "qubit") ||
      text_contains_word(lower, len, "researchers") || text_contains_word(lower, len, "scientists") ||
      text_contains_word(lower, len, "clinical trial") || text_contains_word(lower, len, "genome") ||
      text_contains_word(lower, len, "quantum") || text_contains_word(lower, len, "telescope")) {
-    scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 3.4;
+    scores[NEWS_TYPE_SCIENTIFIC_RESEARCH] += 3.6;
   }
 
   if(feed_category && strcmp(feed_category, "economy") == 0) {
@@ -519,6 +524,17 @@ static const OrgRule k_org_rules[] = {
     {"ICC", {"international criminal court", "icj", NULL, NULL}},
     {"Fed", {"federal reserve", "fomc", NULL, NULL}},
     {"ECB", {"european central bank", "ecb", NULL, NULL}},
+    {"CERN", {"cern", "large hadron collider", "lhc", NULL}},
+    {"NASA", {"nasa", "jet propulsion laboratory", NULL, NULL}},
+    {"ESA", {"european space agency", "esa", NULL, NULL}},
+    {"ISRO", {"isro", "indian space research", NULL, NULL}},
+    {"JAXA", {"jaxa", "japan aerospace", NULL, NULL}},
+    {"CAS", {"chinese academy of sciences", NULL, NULL, NULL}},
+    {"CNRS", {"cnrs", NULL, NULL, NULL}},
+    {"Max Planck", {"max planck", NULL, NULL, NULL}},
+    {"RIKEN", {"riken", NULL, NULL, NULL}},
+    {"CSIRO", {"csiro", NULL, NULL, NULL}},
+    {"ITER", {"iter", "iter organization", NULL, NULL}},
 };
 
 void entities_extract(const char *title,
