@@ -417,9 +417,31 @@ void ontology_sheaf_cohomology(const double *raw_fiber_counts,
   out->total_cohomology_norm = total_norm;
 }
 
-static int text_contains_word(const char *lower_text, size_t len, const char *needle) {
+static void compute_char_mask(const char *s, size_t len, uint32_t *out_alpha_mask) {
+  uint32_t m = 0u;
+  for(size_t i = 0; i < len; ++i) {
+    unsigned char ch = (unsigned char)s[i];
+    if(ch >= 'a' && ch <= 'z') {
+      m |= (1u << (ch - 'a'));
+    }
+  }
+  *out_alpha_mask = m;
+}
+
+static int text_contains_word_fast(const char *lower_text,
+                                   size_t len,
+                                   uint32_t text_alpha_mask,
+                                   const char *needle) {
+  unsigned char first = (unsigned char)needle[0];
+  if(first >= 'a' && first <= 'z') {
+    if((text_alpha_mask & (1u << (first - 'a'))) == 0u) return 0;
+  }
   size_t nlen = strlen(needle);
   if(nlen == 0 || len < nlen) return 0;
+  unsigned char last = (unsigned char)needle[nlen - 1u];
+  if(last >= 'a' && last <= 'z') {
+    if((text_alpha_mask & (1u << (last - 'a'))) == 0u) return 0;
+  }
   const char *p = lower_text;
   const char *end = lower_text + len;
   while(p + nlen <= end) {
@@ -431,6 +453,10 @@ static int text_contains_word(const char *lower_text, size_t len, const char *ne
     p = hit + 1u;
   }
   return 0;
+}
+
+static int text_contains_word(const char *lower_text, size_t len, const char *needle) {
+  return text_contains_word_fast(lower_text, len, 0xFFFFFFFFu, needle);
 }
 
 static void build_lowercase_window(const char *a,
@@ -558,36 +584,52 @@ typedef struct {
 } GeoRule;
 
 static const GeoRule k_geo_rules[] = {
+    /* North America, Central America & Caribbean */
     {"US", {"united states", "u.s.", "washington", "pentagon", "white house"}},
-    {"CA", {"canada", "canadian", "ottawa", "toronto", NULL}},
-    {"MX", {"mexico", "mexican", "mexico city", NULL, NULL}},
+    {"CA", {"canada", "canadian", "ottawa", "toronto", "montreal"}},
+    {"MX", {"mexico", "mexican", "mexico city", "banxico", NULL}},
     {"GT", {"guatemala", "guatemalan", "guatemala city", NULL, NULL}},
+    {"HN", {"honduras", "honduran", "tegucigalpa", NULL, NULL}},
     {"SV", {"el salvador", "salvadoran", "san salvador", NULL, NULL}},
     {"NI", {"nicaragua", "nicaraguan", "managua", NULL, NULL}},
     {"CR", {"costa rica", "costa rican", "san jose", NULL, NULL}},
+    {"PA", {"panama", "panamanian", "panama city", "panama canal", NULL}},
     {"CU", {"cuba", "cuban", "havana", NULL, NULL}},
+    {"DO", {"dominican republic", "santo domingo", "dominican", NULL, NULL}},
+    {"HT", {"haiti", "haitian", "port-au-prince", NULL, NULL}},
     {"JM", {"jamaica", "jamaican", "kingston", NULL, NULL}},
     {"TT", {"trinidad", "tobago", "port of spain", NULL, NULL}},
-    {"BR", {"brazil", "brazilian", "brasilia", "sao paulo", NULL}},
+    {"BS", {"bahamas", "bahamian", "nassau", NULL, NULL}},
+    {"BB", {"barbados", "barbadian", "bridgetown", NULL, NULL}},
+    /* South America */
+    {"BR", {"brazil", "brazilian", "brasilia", "sao paulo", "rio de janeiro"}},
     {"AR", {"argentina", "argentine", "buenos aires", NULL, NULL}},
     {"UY", {"uruguay", "uruguayan", "montevideo", NULL, NULL}},
-    {"CO", {"colombia", "colombian", "bogota", NULL, NULL}},
-    {"CL", {"chile", "chilean", "santiago", NULL, NULL}},
+    {"PY", {"paraguay", "paraguayan", "asuncion", NULL, NULL}},
+    {"BO", {"bolivia", "bolivian", "la paz", "sucre", NULL}},
+    {"CO", {"colombia", "colombian", "bogota", "medellin", NULL}},
+    {"CL", {"chile", "chilean", "santiago", "atacama", NULL}},
     {"PE", {"peru", "peruvian", "lima", NULL, NULL}},
     {"EC", {"ecuador", "ecuadorian", "quito", "guayaquil", NULL}},
     {"VE", {"venezuela", "venezuelan", "caracas", NULL, NULL}},
+    {"GY", {"guyana", "guyanese", "georgetown", "essequibo", NULL}},
+    {"SR", {"suriname", "surinamese", "paramaribo", NULL, NULL}},
+    /* Europe */
     {"GB", {"united kingdom", "britain", "british", "london", "westminster"}},
     {"IE", {"ireland", "irish", "dublin", NULL, NULL}},
-    {"FR", {"france", "french", "paris", "macron", NULL}},
+    {"FR", {"france", "french", "paris", "macron", "elysee"}},
     {"DE", {"germany", "german", "berlin", "bundestag", "frankfurt"}},
     {"IT", {"italy", "italian", "rome", "milan", NULL}},
     {"ES", {"spain", "spanish", "madrid", "barcelona", NULL}},
     {"PT", {"portugal", "portuguese", "lisbon", NULL, NULL}},
-    {"NL", {"netherlands", "dutch", "amsterdam", "the hague", NULL}},
+    {"NL", {"netherlands", "dutch", "amsterdam", "the hague", "eindhoven"}},
     {"BE", {"belgium", "belgian", "brussels", "antwerp", NULL}},
-    {"CH", {"switzerland", "swiss", "geneva", "zurich", NULL}},
+    {"LU", {"luxembourg", "luxembourgish", NULL, NULL, NULL}},
+    {"CH", {"switzerland", "swiss", "geneva", "zurich", "bern"}},
+    {"AT", {"austria", "austrian", "vienna", NULL, NULL}},
     {"SE", {"sweden", "swedish", "stockholm", NULL, NULL}},
     {"NO", {"norway", "norwegian", "oslo", "barents", NULL}},
+    {"DK", {"denmark", "danish", "copenhagen", NULL, NULL}},
     {"FI", {"finland", "finnish", "helsinki", NULL, NULL}},
     {"IS", {"iceland", "icelandic", "reykjavik", NULL, NULL}},
     {"EE", {"estonia", "estonian", "tallinn", NULL, NULL}},
@@ -595,63 +637,97 @@ static const GeoRule k_geo_rules[] = {
     {"LT", {"lithuania", "lithuanian", "vilnius", NULL, NULL}},
     {"PL", {"poland", "polish", "warsaw", NULL, NULL}},
     {"CZ", {"czech", "prague", "czechia", NULL, NULL}},
+    {"SK", {"slovakia", "slovak", "bratislava", NULL, NULL}},
     {"HU", {"hungary", "hungarian", "budapest", NULL, NULL}},
     {"RO", {"romania", "romanian", "bucharest", NULL, NULL}},
+    {"BG", {"bulgaria", "bulgarian", "sofia", NULL, NULL}},
+    {"HR", {"croatia", "croatian", "zagreb", NULL, NULL}},
+    {"SI", {"slovenia", "slovenian", "ljubljana", NULL, NULL}},
     {"RS", {"serbia", "serbian", "belgrade", "balkans", NULL}},
+    {"BA", {"bosnia", "sarajevo", "herzegovina", NULL, NULL}},
+    {"AL", {"albania", "albanian", "tirana", NULL, NULL}},
+    {"MD", {"moldova", "moldovan", "chisinau", "transnistria", NULL}},
+    {"BY", {"belarus", "belarusian", "minsk", NULL, NULL}},
     {"UA", {"ukraine", "ukrainian", "kyiv", "kharkiv", "odesa"}},
     {"RU", {"russia", "russian", "moscow", "kremlin", NULL}},
-    {"TR", {"turkey", "turkish", "ankara", "istanbul", NULL}},
+    {"TR", {"turkey", "turkish", "ankara", "istanbul", "bosphorus"}},
     {"GR", {"greece", "greek", "athens", "aegean", NULL}},
+    {"CY", {"cyprus", "cypriot", "nicosia", NULL, NULL}},
+    /* Middle East & North Africa */
     {"IL", {"israel", "israeli", "jerusalem", "tel aviv", NULL}},
     {"PS", {"palestine", "palestinian", "gaza", "west bank", "ramallah"}},
     {"LB", {"lebanon", "lebanese", "beirut", NULL, NULL}},
     {"SY", {"syria", "syrian", "damascus", "aleppo", NULL}},
     {"JO", {"jordan", "jordanian", "amman", NULL, NULL}},
-    {"IR", {"iran", "iranian", "tehran", NULL, NULL}},
+    {"IR", {"iran", "iranian", "tehran", "isfahan", NULL}},
     {"IQ", {"iraq", "iraqi", "baghdad", "erbil", NULL}},
-    {"YE", {"yemen", "yemeni", "sanaa", "houthi", NULL}},
-    {"SA", {"saudi arabia", "saudi", "riyadh", NULL, NULL}},
+    {"YE", {"yemen", "yemeni", "sanaa", "houthi", "aden"}},
+    {"SA", {"saudi arabia", "saudi", "riyadh", "jeddah", NULL}},
     {"AE", {"united arab emirates", "uae", "dubai", "abu dhabi", NULL}},
     {"QA", {"qatar", "qatari", "doha", NULL, NULL}},
+    {"KW", {"kuwait", "kuwaiti", "kuwait city", NULL, NULL}},
+    {"OM", {"oman", "omani", "muscat", NULL, NULL}},
+    {"BH", {"bahrain", "bahraini", "manama", NULL, NULL}},
     {"EG", {"egypt", "egyptian", "cairo", "suez", NULL}},
     {"LY", {"libya", "libyan", "tripoli", "benghazi", NULL}},
     {"TN", {"tunisia", "tunisian", "tunis", NULL, NULL}},
+    {"DZ", {"algeria", "algerian", "algiers", NULL, NULL}},
     {"MA", {"morocco", "moroccan", "rabat", "casablanca", NULL}},
+    /* Sub-Saharan Africa */
     {"NG", {"nigeria", "nigerian", "lagos", "abuja", NULL}},
     {"ZA", {"south africa", "johannesburg", "cape town", "pretoria", NULL}},
-    {"KE", {"kenya", "kenyan", "nairobi", NULL, NULL}},
+    {"KE", {"kenya", "kenyan", "nairobi", "mombasa", NULL}},
     {"TZ", {"tanzania", "tanzanian", "dar es salaam", "dodoma", NULL}},
     {"UG", {"uganda", "ugandan", "kampala", NULL, NULL}},
+    {"RW", {"rwanda", "rwandan", "kigali", NULL, NULL}},
     {"CD", {"congo", "congolese", "kinshasa", "goma", NULL}},
     {"ET", {"ethiopia", "ethiopian", "addis ababa", NULL, NULL}},
+    {"ER", {"eritrea", "eritrean", "asmara", NULL, NULL}},
     {"SO", {"somalia", "somali", "mogadishu", "somaliland", NULL}},
-    {"SD", {"sudan", "sudanese", "khartoum", "darfur", NULL}},
+    {"SD", {"sudan", "sudanese", "khartoum", "darfur", "port sudan"}},
+    {"SS", {"south sudan", "juba", NULL, NULL, NULL}},
     {"GH", {"ghana", "ghanaian", "accra", NULL, NULL}},
+    {"CI", {"ivory coast", "cote d'ivoire", "ivorian", "abidjan", NULL}},
     {"SN", {"senegal", "senegalese", "dakar", NULL, NULL}},
+    {"ML", {"mali", "malian", "bamako", "sahel", NULL}},
+    {"NE", {"niger", "niamey", NULL, NULL, NULL}},
+    {"BF", {"burkina faso", "ouagadougou", NULL, NULL, NULL}},
+    {"CM", {"cameroon", "cameroonian", "yaounde", "douala", NULL}},
+    {"AO", {"angola", "angolan", "luanda", NULL, NULL}},
+    {"MZ", {"mozambique", "mozambican", "maputo", NULL, NULL}},
     {"ZW", {"zimbabwe", "zimbabwean", "harare", NULL, NULL}},
     {"ZM", {"zambia", "zambian", "lusaka", NULL, NULL}},
+    {"BW", {"botswana", "gaborone", NULL, NULL, NULL}},
     {"NA", {"namibia", "namibian", "windhoek", NULL, NULL}},
+    /* South Asia */
     {"IN", {"india", "indian", "new delhi", "mumbai", "bengaluru"}},
-    {"PK", {"pakistan", "pakistani", "islamabad", "karachi", NULL}},
+    {"PK", {"pakistan", "pakistani", "islamabad", "karachi", "lahore"}},
     {"BD", {"bangladesh", "bangladeshi", "dhaka", NULL, NULL}},
     {"LK", {"sri lanka", "colombo", "sri lankan", NULL, NULL}},
     {"NP", {"nepal", "nepali", "kathmandu", NULL, NULL}},
+    {"MV", {"maldives", "maldivian", "male", NULL, NULL}},
     {"AF", {"afghanistan", "afghan", "kabul", "kandahar", NULL}},
+    /* East Asia */
     {"CN", {"china", "chinese", "beijing", "shanghai", "shenzhen"}},
-    {"JP", {"japan", "japanese", "tokyo", "osaka", NULL}},
-    {"KR", {"south korea", "korean", "seoul", NULL, NULL}},
-    {"TW", {"taiwan", "taiwanese", "taipei", "tsmc", NULL}},
+    {"JP", {"japan", "japanese", "tokyo", "osaka", "yokohama"}},
+    {"KR", {"south korea", "korean", "seoul", "busan", NULL}},
+    {"KP", {"north korea", "pyongyang", "dprk", NULL, NULL}},
+    {"TW", {"taiwan", "taiwanese", "taipei", "tsmc", "hsinchu"}},
     {"HK", {"hong kong", NULL, NULL, NULL, NULL}},
     {"MN", {"mongolia", "mongolian", "ulaanbaatar", NULL, NULL}},
+    /* Southeast Asia */
     {"SG", {"singapore", "singaporean", NULL, NULL, NULL}},
     {"ID", {"indonesia", "indonesian", "jakarta", "nusantara", NULL}},
     {"PH", {"philippines", "philippine", "manila", "luzon", NULL}},
     {"VN", {"vietnam", "vietnamese", "hanoi", "ho chi minh", NULL}},
     {"TH", {"thailand", "thai", "bangkok", NULL, NULL}},
     {"MM", {"myanmar", "burmese", "yangon", "naypyidaw", NULL}},
-    {"MY", {"malaysia", "malaysian", "kuala lumpur", NULL, NULL}},
+    {"MY", {"malaysia", "malaysian", "kuala lumpur", "penang", NULL}},
     {"KH", {"cambodia", "cambodian", "phnom penh", NULL, NULL}},
     {"LA", {"laos", "laotian", "vientiane", NULL, NULL}},
+    {"BN", {"brunei", "bandar seri begawan", NULL, NULL, NULL}},
+    {"TL", {"timor-leste", "east timor", "dili", NULL, NULL}},
+    /* Central Asia & Caucasus */
     {"KZ", {"kazakhstan", "kazakh", "astana", "almaty", NULL}},
     {"UZ", {"uzbekistan", "uzbek", "tashkent", NULL, NULL}},
     {"KG", {"kyrgyzstan", "kyrgyz", "bishkek", NULL, NULL}},
@@ -660,46 +736,132 @@ static const GeoRule k_geo_rules[] = {
     {"GE", {"georgia", "georgian", "tbilisi", NULL, NULL}},
     {"AM", {"armenia", "armenian", "yerevan", NULL, NULL}},
     {"AZ", {"azerbaijan", "azerbaijani", "baku", NULL, NULL}},
+    /* Oceania */
     {"AU", {"australia", "australian", "canberra", "sydney", "melbourne"}},
     {"NZ", {"new zealand", "wellington", "auckland", NULL, NULL}},
     {"FJ", {"fiji", "fijian", "suva", NULL, NULL}},
     {"PG", {"papua new guinea", "port moresby", NULL, NULL, NULL}},
     {"WS", {"samoa", "samoan", "apia", NULL, NULL}},
+    {"SB", {"solomon islands", "honiara", NULL, NULL, NULL}},
+    {"VU", {"vanuatu", "port vila", NULL, NULL, NULL}},
 };
 
 typedef struct {
   OntologyNodeId node;
-  const char *const terms[9];
+  const char *const terms[16];
 } TopicRule;
 
 static const TopicRule k_topic_rules[] = {
-    {ONTO_AI, {"artificial intelligence", "llm", "neural network", "openai", "deepmind", "anthropic", "generative ai", "machine learning", "transformer"}},
-    {ONTO_ROBOTICS, {"robotics", "humanoid", "autonomous vehicle", "drone", "actuator", "manipulator", "embodied ai", "quadruped", NULL}},
-    {ONTO_QUANTUM, {"quantum computing", "qubit", "superconducting qubit", "quantum error correction", "entanglement", "topological qubit", "quantum supremacy", "quantum photonics", NULL}},
-    {ONTO_SEMICONDUCTORS, {"semiconductor", "tsmc", "asml", "lithography", "wafer", "foundry", "euv", "risc-v", "hbm"}},
-    {ONTO_BIOTECH, {"crispr", "gene editing", "genomics", "mrna", "protein folding", "alphafold", "synthetic biology", "sequencing", "cell therapy"}},
-    {ONTO_MATHEMATICS, {"category theory", "theorem", "conjecture", "topos", "cohomology", "homotopy", "kan extension", "formal verification", "type theory"}},
-    {ONTO_MATERIALS, {"superconductor", "graphene", "perovskite", "metamaterial", "topological insulator", "condensed matter", "solid-state battery", "cathode", NULL}},
-    {ONTO_CRYPTOGRAPHY, {"zero-knowledge", "zk-snark", "post-quantum cryptography", "lattice cryptography", "homomorphic encryption", "cryptographic", "elliptic curve", "cipher", NULL}},
-    {ONTO_NUCLEAR_FUSION, {"nuclear fusion", "tokamak", "iter", "stellarator", "plasma confinement", "inertial confinement", "deuterium", "tritium", NULL}},
-    {ONTO_CYBER, {"cybersecurity", "ransomware", "zero-day", "malware", "hacker", "data breach", "encryption", "phishing", NULL}},
-    {ONTO_TECHNOLOGY, {"microchip", "software", "cloud computing", "open source", "linux", "silicon", "chipmaker", "compiler", "kernel"}},
-    {ONTO_SPACE, {"nasa", "esa", "spacex", "satellite", "spacecraft", "astronaut", "lunar", "orbit", "telescope"}},
-    {ONTO_SCIENCE, {"physics", "quantum", "researchers", "scientists", "laboratory", "peer-reviewed", "chemistry", "genome", "synchrotron"}},
-    {ONTO_FINANCE, {"central bank", "federal reserve", "ecb", "interest rate", "bond yield", "wall street", "stock market", "ipo", "venture capital"}},
-    {ONTO_ECONOMY, {"inflation", "gdp", "recession", "tariff", "supply chain", "imf", "world bank", "trade deficit", "macroeconomic"}},
-    {ONTO_ENERGY, {"crude oil", "opec", "natural gas", "solar power", "wind farm", "nuclear reactor", "power grid", "battery", "hydrogen"}},
-    {ONTO_CLIMATE, {"climate change", "carbon emissions", "greenhouse", "wildfire", "drought", "biodiversity", "deforestation", "glacier", NULL}},
-    {ONTO_HEALTH, {"vaccine", "pandemic", "epidemic", "hospital", "clinical trial", "public health", "virus", "cancer", "fda"}},
-    {ONTO_DEFENSE, {"military", "missile", "airstrike", "ceasefire", "artillery", "warship", "troops", "battalion", "nato"}},
-    {ONTO_SECURITY, {"intelligence agency", "espionage", "counterterrorism", "border security", "surveillance", "national security", NULL, NULL, NULL}},
-    {ONTO_GEOPOLITICS, {"diplomacy", "ambassador", "summit", "bilateral", "sanctions", "foreign policy", "treaty", "sovereignty", "geopolitical"}},
-    {ONTO_POLITICS, {"parliament", "election", "coalition", "prime minister", "president", "referendum", "ballot", "campaign", "legislature"}},
-    {ONTO_LAW, {"supreme court", "judiciary", "indictment", "antitrust", "prosecutor", "constitutional", "lawsuit", "verdict", "tribunal"}},
-    {ONTO_HUMAN_RIGHTS, {"human rights", "refugee", "asylum", "humanitarian", "amnesty", "civil liberties", "displaced", "war crimes", NULL}},
-    {ONTO_LABOR, {"labor union", "strike", "collective bargaining", "minimum wage", "layoffs", "workforce", "workers", NULL, NULL}},
-    {ONTO_CULTURE, {"museum", "cinema", "literature", "architecture", "exhibition", "symphony", "novel", NULL, NULL}},
-    {ONTO_SPORTS, {"olympics", "world cup", "championship", "premier league", "tournament", "grand prix", "stadium", NULL, NULL}},
+    {ONTO_AI,
+     {"artificial intelligence", "llm", "neural network", "openai", "deepmind", "anthropic",
+      "generative ai", "machine learning", "transformer", "foundation model", "multimodal",
+      "reinforcement learning", "diffusion model", "inference", "fine-tuning", "agentic"}},
+    {ONTO_ROBOTICS,
+     {"robotics", "humanoid", "autonomous vehicle", "drone", "actuator", "manipulator",
+      "embodied ai", "quadruped", "lidar", "slam", "exoskeleton", "rov", "uav",
+      "bipedal", "kinematics", "servomotor"}},
+    {ONTO_QUANTUM,
+     {"quantum computing", "qubit", "superconducting qubit", "quantum error correction",
+      "entanglement", "topological qubit", "quantum supremacy", "quantum photonics",
+      "trapped ion", "decoherence", "neutral atom", "josephson junction", "quantum annealing",
+      "fault-tolerant quantum", "bell state", "quantum sensing"}},
+    {ONTO_SEMICONDUCTORS,
+     {"semiconductor", "tsmc", "asml", "lithography", "wafer", "foundry", "euv", "risc-v",
+      "hbm", "finfet", "gaafet", "chiplet", "cowos", "packaging", "photomask", "dram"}},
+    {ONTO_BIOTECH,
+     {"crispr", "gene editing", "genomics", "mrna", "protein folding", "alphafold",
+      "synthetic biology", "sequencing", "cell therapy", "car-t", "organoid", "viral vector",
+      "epigenetics", "proteomics", "monoclonal", "transcriptomics"}},
+    {ONTO_MATHEMATICS,
+     {"category theory", "theorem", "conjecture", "topos", "cohomology", "homotopy",
+      "kan extension", "formal verification", "type theory", "lean4", "coq", "galois",
+      "ergodic", "riemann", "langlands", "combinatorics"}},
+    {ONTO_MATERIALS,
+     {"superconductor", "graphene", "perovskite", "metamaterial", "topological insulator",
+      "condensed matter", "solid-state battery", "cathode", "piezoelectric", "ferroelectric",
+      "spintronics", "high-entropy alloy", "nanotube", "zeolite", "2d material", "anode"}},
+    {ONTO_CRYPTOGRAPHY,
+     {"zero-knowledge", "zk-snark", "post-quantum cryptography", "lattice cryptography",
+      "homomorphic encryption", "cryptographic", "elliptic curve", "cipher", "kyber",
+      "dilithium", "ml-kem", "zk-stark", "multiparty computation", "oblivious transfer",
+      "hash function", "merkle tree"}},
+    {ONTO_NUCLEAR_FUSION,
+     {"nuclear fusion", "tokamak", "iter", "stellarator", "plasma confinement",
+      "inertial confinement", "deuterium", "tritium", "divertor", "magnetohydrodynamics",
+      "ignition", "small modular reactor", "smr", "molten salt reactor", "breeder reactor",
+      "gyrotron"}},
+    {ONTO_CYBER,
+     {"cybersecurity", "ransomware", "zero-day", "malware", "hacker", "data breach",
+      "encryption", "phishing", "botnet", "exploit", "rootkit", "spyware", "apt",
+      "backdoor", "cve-", "sandbox escape"}},
+    {ONTO_TECHNOLOGY,
+     {"microchip", "software", "cloud computing", "open source", "linux", "silicon",
+      "chipmaker", "compiler", "kernel", "webassembly", "webgpu", "browser", "database",
+      "distributed system", "hypervisor", "protocol"}},
+    {ONTO_SPACE,
+     {"nasa", "esa", "spacex", "satellite", "spacecraft", "astronaut", "lunar", "orbit",
+      "telescope", "exoplanet", "jwst", "cosmology", "astrophysics", "starship", "payload",
+      "launchpad"}},
+    {ONTO_SCIENCE,
+     {"physics", "quantum", "researchers", "scientists", "laboratory", "peer-reviewed",
+      "chemistry", "genome", "synchrotron", "arxiv", "biorxiv", "particle", "collider",
+      "spectroscopy", "catalysis", "neuroscience"}},
+    {ONTO_FINANCE,
+     {"central bank", "federal reserve", "ecb", "interest rate", "bond yield", "wall street",
+      "stock market", "ipo", "venture capital", "treasury yield", "equities", "hedge fund",
+      "foreign exchange", "sovereign debt", "basis points", "derivatives"}},
+    {ONTO_ECONOMY,
+     {"inflation", "gdp", "recession", "tariff", "supply chain", "imf", "world bank",
+      "trade deficit", "macroeconomic", "unemployment", "payrolls", "cpi", "fiscal policy",
+      "austerity", "stimulus", "industrial production"}},
+    {ONTO_ENERGY,
+     {"crude oil", "opec", "natural gas", "solar power", "wind farm", "nuclear reactor",
+      "power grid", "battery", "hydrogen", "lng", "refinery", "geothermal", "hydropower",
+      "megawatt", "gigawatt", "uranium"}},
+    {ONTO_CLIMATE,
+     {"climate change", "carbon emissions", "greenhouse", "wildfire", "drought",
+      "biodiversity", "deforestation", "glacier", "permafrost", "sea level", "el nino",
+      "decarbonization", "methane", "coral reef", "ipcc", "reforestation"}},
+    {ONTO_HEALTH,
+     {"vaccine", "pandemic", "epidemic", "hospital", "clinical trial", "public health",
+      "virus", "cancer", "fda", "oncology", "immunology", "antibiotic", "pathogen",
+      "neurology", "cardiovascular", "epidemiology"}},
+    {ONTO_DEFENSE,
+     {"military", "missile", "airstrike", "ceasefire", "artillery", "warship", "troops",
+      "battalion", "nato", "submarine", "fighter jet", "hypersonic", "air defense",
+      "munitions", "frigate", "deterrence"}},
+    {ONTO_SECURITY,
+     {"intelligence agency", "espionage", "counterterrorism", "border security",
+      "surveillance", "national security", "sigint", "geoint", "osint", "reconnaissance",
+      "opsec", "classified", "c4isr", "counterintelligence", "homeland security", "sanctions"}},
+    {ONTO_GEOPOLITICS,
+     {"diplomacy", "ambassador", "summit", "bilateral", "sanctions", "foreign policy",
+      "treaty", "sovereignty", "geopolitical", "multilateral", "non-aligned", "annexation",
+      "enclave", "statecraft", "consulate", "deterrence"}},
+    {ONTO_POLITICS,
+     {"parliament", "election", "coalition", "prime minister", "president", "referendum",
+      "ballot", "campaign", "legislature", "senate", "cabinet", "impeachment", "gubernatorial",
+      "bipartisan", "caucus", "polling"}},
+    {ONTO_LAW,
+     {"supreme court", "judiciary", "indictment", "antitrust", "prosecutor", "constitutional",
+      "lawsuit", "verdict", "tribunal", "injunction", "appellate", "arbitration",
+      "jurisprudence", "subpoena", "extradition", "statute"}},
+    {ONTO_HUMAN_RIGHTS,
+     {"human rights", "refugee", "asylum", "humanitarian", "amnesty", "civil liberties",
+      "displaced", "war crimes", "genocide", "detainee", "press freedom", "indigenous",
+      "censorship", "famine", "peacekeeping", "stateless"}},
+    {ONTO_LABOR,
+     {"labor union", "strike", "collective bargaining", "minimum wage", "layoffs",
+      "workforce", "workers", "picket line", "pension", "gig economy", "occupational safety",
+      "overtime", "unionization", "payroll", "automation", "apprenticeship"}},
+    {ONTO_CULTURE,
+     {"museum", "cinema", "literature", "architecture", "exhibition", "symphony", "novel",
+      "archaeology", "biennale", "documentary", "philharmonic", "heritage", "theatre",
+      "opera", "sculpture", "curation"}},
+    {ONTO_SPORTS,
+     {"olympics", "world cup", "championship", "premier league", "tournament", "grand prix",
+      "stadium", "champions league", "formula 1", "athletics", "marathon", "tennis",
+      "cricket", "rugby", "basketball", "fifa"}},
 };
 
 typedef struct {
@@ -708,22 +870,42 @@ typedef struct {
 } OrgRule;
 
 static const OrgRule k_org_rules[] = {
-    {"UN", {"united nations", "u.n.", "security council", NULL}},
+    {"UN", {"united nations", "u.n.", "security council", "unhcr"}},
     {"NATO", {"nato", "north atlantic treaty", NULL, NULL}},
-    {"EU", {"european union", "european commission", "brussels", NULL}},
+    {"EU", {"european union", "european commission", "european parliament", "eurogroup"}},
     {"WHO", {"world health organization", "w.h.o.", NULL, NULL}},
     {"IMF", {"international monetary fund", "imf", NULL, NULL}},
-    {"World Bank", {"world bank", NULL, NULL, NULL}},
+    {"World Bank", {"world bank", "ibrd", NULL, NULL}},
     {"WTO", {"world trade organization", "wto", NULL, NULL}},
-    {"BRICS", {"brics", NULL, NULL, NULL}},
+    {"OECD", {"oecd", "organisation for economic co-operation", NULL, NULL}},
+    {"BRICS", {"brics", "new development bank", NULL, NULL}},
     {"ASEAN", {"asean", NULL, NULL, NULL}},
-    {"African Union", {"african union", NULL, NULL, NULL}},
+    {"African Union", {"african union", "afcfta", NULL, NULL}},
+    {"MERCOSUR", {"mercosur", NULL, NULL, NULL}},
+    {"SCO", {"shanghai cooperation organisation", NULL, NULL, NULL}},
+    {"GCC", {"gulf cooperation council", NULL, NULL, NULL}},
     {"OPEC", {"opec", "opec+", NULL, NULL}},
+    {"IEA", {"international energy agency", "iea", NULL, NULL}},
+    {"IAEA", {"international atomic energy agency", "iaea", NULL, NULL}},
     {"G7", {"g7", "group of seven", NULL, NULL}},
     {"G20", {"g20", "group of twenty", NULL, NULL}},
     {"ICC", {"international criminal court", "icj", NULL, NULL}},
-    {"Fed", {"federal reserve", "fomc", NULL, NULL}},
-    {"ECB", {"european central bank", "ecb", NULL, NULL}},
+    {"Fed", {"federal reserve", "fomc", "jerome powell", NULL}},
+    {"ECB", {"european central bank", "ecb", "lagarde", NULL}},
+    {"BoE", {"bank of england", "mpc", "threadneedle", NULL}},
+    {"BoJ", {"bank of japan", "ueda", NULL, NULL}},
+    {"PBOC", {"people's bank of china", "pboc", NULL, NULL}},
+    {"RBI", {"reserve bank of india", "rbi", NULL, NULL}},
+    {"SNB", {"swiss national bank", "snb", NULL, NULL}},
+    {"BoC", {"bank of canada", NULL, NULL, NULL}},
+    {"RBA", {"reserve bank of australia", "rba", NULL, NULL}},
+    {"BCB", {"banco central do brasil", "copom", "selic", NULL}},
+    {"Banxico", {"banco de mexico", "banxico", NULL, NULL}},
+    {"SARB", {"south african reserve bank", "sarb", NULL, NULL}},
+    {"SEC", {"securities and exchange commission", "sec filing", "10-k", NULL}},
+    {"CFTC", {"commodity futures trading commission", "cftc", NULL, NULL}},
+    {"BIS", {"bank for international settlements", "basel committee", NULL, NULL}},
+    {"CBO", {"congressional budget office", "cbo", NULL, NULL}},
     {"CERN", {"cern", "large hadron collider", "lhc", NULL}},
     {"NASA", {"nasa", "jet propulsion laboratory", NULL, NULL}},
     {"ESA", {"european space agency", "esa", NULL, NULL}},
@@ -741,21 +923,13 @@ static const OrgRule k_org_rules[] = {
     {"GCHQ/NCSC", {"gchq", "ncsc", NULL, NULL}},
     {"CISA", {"cisa", "known exploited vulnerabilities", NULL, NULL}},
     {"ANSSI", {"anssi", "cert-fr", NULL, NULL}},
-    {"BSI", {"bsi", NULL, NULL, NULL}},
+    {"BSI", {"bsi", "bundesamt fur sicherheit", NULL, NULL}},
     {"ENISA", {"enisa", NULL, NULL, NULL}},
+    {"NIST", {"nist", "national institute of standards", "post-quantum", NULL}},
     {"W3C", {"w3c", "world wide web consortium", "webgpu", "webauthn"}},
     {"WHATWG", {"whatwg", "html living standard", NULL, NULL}},
     {"IETF", {"ietf", "internet engineering task force", "quic", "privacy pass"}},
     {"Tor Project", {"tor project", "onion service", "pluggable transport", NULL}},
-    {"BoE", {"bank of england", "mpc", NULL, NULL}},
-    {"BoJ", {"bank of japan", "ueda", NULL, NULL}},
-    {"PBOC", {"people's bank of china", "pboc", NULL, NULL}},
-    {"RBI", {"reserve bank of india", "rbi", NULL, NULL}},
-    {"SNB", {"swiss national bank", "snb", NULL, NULL}},
-    {"SEC", {"securities and exchange commission", "sec filing", "10-k", NULL}},
-    {"CFTC", {"commodity futures trading commission", "cftc", NULL, NULL}},
-    {"BIS", {"bank for international settlements", NULL, NULL, NULL}},
-    {"CBO", {"congressional budget office", "cbo", NULL, NULL}},
 };
 
 typedef struct {
@@ -770,31 +944,55 @@ static const AssetRule k_asset_rules[] = {
     {"JPY", {"japanese yen", "usd/jpy", "yen carry", "yen", NULL}},
     {"GBP", {"pound sterling", "gbp/usd", "sterling", "british pound", NULL}},
     {"CHF", {"swiss franc", "usd/chf", "eur/chf", NULL, NULL}},
-    {"CNY", {"renminbi", "yuan", "usd/cny", "usd/cnh", NULL}},
+    {"CNY", {"renminbi", "yuan", "usd/cny", "usd/cnh", "pboc"}},
     {"INR", {"indian rupee", "usd/inr", "rupee", NULL, NULL}},
     {"BRL", {"brazilian real", "usd/brl", "selic", NULL, NULL}},
     {"CAD", {"canadian dollar", "loonie", "usd/cad", NULL, NULL}},
     {"AUD", {"australian dollar", "aussie dollar", "aud/usd", NULL, NULL}},
+    {"NZD", {"new zealand dollar", "kiwi dollar", "nzd/usd", NULL, NULL}},
+    {"SEK", {"swedish krona", "usd/sek", "riksbank", NULL, NULL}},
+    {"NOK", {"norwegian krone", "usd/nok", "norges bank", NULL, NULL}},
+    {"SGD", {"singapore dollar", "usd/sgd", "s$neer", NULL, NULL}},
+    {"KRW", {"south korean won", "usd/krw", "korean won", NULL, NULL}},
+    {"TWD", {"taiwan dollar", "usd/twd", NULL, NULL, NULL}},
     {"MXN", {"mexican peso", "usd/mxn", "super peso", NULL, NULL}},
     {"ZAR", {"south african rand", "usd/zar", NULL, NULL, NULL}},
     {"TRY", {"turkish lira", "usd/try", NULL, NULL, NULL}},
-    /* Equity Indices, Sovereign Bonds & Commodities */
+    {"PLN", {"polish zloty", "eur/pln", NULL, NULL, NULL}},
+    /* Equity Indices, Sovereign Bonds, Commodities & Strategic Tech Tickers */
     {"SPX", {"s&p 500", "wall street", "sp500", NULL, NULL}},
     {"NDX", {"nasdaq", "nasdaq-100", NULL, NULL, NULL}},
     {"DJI", {"dow jones", "djia", NULL, NULL, NULL}},
+    {"RUT", {"russell 2000", "small-cap", NULL, NULL, NULL}},
+    {"VIX", {"vix", "volatility index", "cboe volatility", NULL, NULL}},
     {"NIKKEI", {"nikkei 225", "topix", "tokyo stock exchange", NULL, NULL}},
     {"FTSE", {"ftse 100", "london stock exchange", NULL, NULL, NULL}},
     {"DAX", {"dax 40", "frankfurt stock", NULL, NULL, NULL}},
+    {"CAC40", {"cac 40", "euronext paris", NULL, NULL, NULL}},
+    {"STOXX", {"stoxx 600", "euro stoxx", NULL, NULL, NULL}},
+    {"CSI300", {"csi 300", "shanghai composite", "shenzhen component", "a-shares", NULL}},
+    {"HSI", {"hang seng", "hkex", NULL, NULL, NULL}},
+    {"KOSPI", {"kospi", "kosdaq", NULL, NULL, NULL}},
+    {"TAIEX", {"taiex", "taiwan stock", NULL, NULL, NULL}},
     {"NIFTY", {"nifty 50", "sensex", "bse", NULL, NULL}},
+    {"BOVESPA", {"bovespa", "ibovespa", NULL, NULL, NULL}},
     {"UST10Y", {"treasury yield", "10-year yield", "10-year treasury", "sovereign bond", "gilt yield"}},
+    {"BUND10Y", {"german bund", "bund yield", "btp spread", NULL, NULL}},
+    {"JGB10Y", {"jgb yield", "japanese government bond", "yield curve control", NULL, NULL}},
     {"BRENT", {"brent crude", "wti crude", "crude oil", "opec+", NULL}},
+    {"NATGAS", {"natural gas", "ttf gas", "henry hub", "lng cargo", NULL}},
     {"XAU", {"gold bullion", "gold price", "spot gold", "precious metal", NULL}},
+    {"XAG", {"silver bullion", "spot silver", "comex silver", NULL, NULL}},
     {"COPPER", {"copper price", "lme copper", "comex copper", NULL, NULL}},
     {"LITHIUM", {"lithium carbonate", "lithium spodumene", "battery metal", NULL, NULL}},
-    {"NVDA", {"nvidia", "blackwell", "h100", NULL, NULL}},
-    {"TSMC", {"tsmc", "taiwan semiconductor", NULL, NULL, NULL}},
-    {"ASML", {"asml", "extreme ultraviolet", NULL, NULL, NULL}},
+    {"URANIUM", {"uranium", "yellowcake", "u3o8", NULL, NULL}},
+    {"NVDA", {"nvidia", "blackwell", "h100", "cuda", NULL}},
+    {"TSMC", {"tsmc", "taiwan semiconductor", "cowos", NULL, NULL}},
+    {"ASML", {"asml", "extreme ultraviolet", "high-na euv", NULL, NULL}},
+    {"AMD", {"amd", "instinct mi300", "epyc", NULL, NULL}},
+    {"ARM", {"arm holdings", "armv9", NULL, NULL, NULL}},
     {"BTC", {"bitcoin", "btc", "spot etf", NULL, NULL}},
+    {"ETH", {"ethereum", "ether", NULL, NULL, NULL}},
 };
 
 typedef struct {
@@ -856,11 +1054,13 @@ void entities_extract(const char *title,
   char lower[4096];
   size_t len = 0;
   build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
+  uint32_t alpha_mask = 0u;
+  compute_char_mask(lower, len, &alpha_mask);
 
   for(size_t i = 0; i < sizeof(k_geo_rules) / sizeof(k_geo_rules[0]); ++i) {
     if(out->country_count >= MAX_EXTRACTED_COUNTRIES) break;
     for(size_t t = 0; t < 5u && k_geo_rules[i].terms[t]; ++t) {
-      if(text_contains_word(lower, len, k_geo_rules[i].terms[t])) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_geo_rules[i].terms[t])) {
         strncpy(out->countries[out->country_count], k_geo_rules[i].iso2, 3u);
         out->countries[out->country_count][3] = '\0';
         out->country_count++;
@@ -872,7 +1072,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_org_rules) / sizeof(k_org_rules[0]); ++i) {
     if(out->org_count >= MAX_EXTRACTED_ORGS) break;
     for(size_t t = 0; t < 4u && k_org_rules[i].terms[t]; ++t) {
-      if(text_contains_word(lower, len, k_org_rules[i].terms[t])) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_org_rules[i].terms[t])) {
         strncpy(out->organizations[out->org_count], k_org_rules[i].name, 23u);
         out->organizations[out->org_count][23] = '\0';
         out->org_count++;
@@ -897,8 +1097,8 @@ void entities_extract(const char *title,
   }
 
   for(size_t i = 0; i < sizeof(k_topic_rules) / sizeof(k_topic_rules[0]); ++i) {
-    for(size_t t = 0; t < 9u && k_topic_rules[i].terms[t]; ++t) {
-      if(text_contains_word(lower, len, k_topic_rules[i].terms[t])) {
+    for(size_t t = 0; t < 16u && k_topic_rules[i].terms[t]; ++t) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_topic_rules[i].terms[t])) {
         direct |= BIT(k_topic_rules[i].node);
         break;
       }
@@ -960,7 +1160,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_asset_rules) / sizeof(k_asset_rules[0]); ++i) {
     if(out->asset_count >= MAX_EXTRACTED_ASSETS) break;
     for(size_t t = 0; t < 5u && k_asset_rules[i].terms[t]; ++t) {
-      if(text_contains_word(lower, len, k_asset_rules[i].terms[t])) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_asset_rules[i].terms[t])) {
         strncpy(out->assets[out->asset_count], k_asset_rules[i].symbol, 15u);
         out->assets[out->asset_count][15] = '\0';
         out->asset_count++;
@@ -972,7 +1172,7 @@ void entities_extract(const char *title,
   for(size_t i = 0; i < sizeof(k_fiscal_event_rules) / sizeof(k_fiscal_event_rules[0]); ++i) {
     if(out->fiscal_event_count >= MAX_EXTRACTED_EVENTS) break;
     for(size_t t = 0; t < 5u && k_fiscal_event_rules[i].terms[t]; ++t) {
-      if(text_contains_word(lower, len, k_fiscal_event_rules[i].terms[t])) {
+      if(text_contains_word_fast(lower, len, alpha_mask, k_fiscal_event_rules[i].terms[t])) {
         strncpy(out->fiscal_events[out->fiscal_event_count], k_fiscal_event_rules[i].event_name, 23u);
         out->fiscal_events[out->fiscal_event_count][23] = '\0';
         out->fiscal_event_count++;

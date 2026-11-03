@@ -19,10 +19,23 @@ static void train_default_m1(M1Tokenizer *tok) {
   const CatalogEntry *entries = catalog_entries(&count);
   Buffer corpus;
   buffer_init(&corpus);
-  for(size_t i = 0; i < count; ++i) {
-    buffer_format(&corpus, "%s | %s | %s\n", entries[i].title, entries[i].editorial_focus, entries[i].category);
+  for(size_t pass = 0; pass < 4u; ++pass) {
+    for(size_t i = 0; i < count; ++i) {
+      buffer_format(&corpus,
+                    "%s | %s | %s | %s | %s | %s\n",
+                    entries[i].title,
+                    entries[i].editorial_focus,
+                    entries[i].category,
+                    entries[i].country,
+                    entries[i].subregion,
+                    entries[i].source_tier);
+    }
+    for(uint32_t n = 0; n < ONTOLOGY_NODE_COUNT; ++n) {
+      const OntologyNode *node = ontology_node((OntologyNodeId)n);
+      buffer_format(&corpus, "%s : %s\n", node->slug, node->label);
+    }
   }
-  m1_tokenizer_train(tok, (const uint8_t *)(corpus.data ? corpus.data : ""), corpus.len, 512u);
+  m1_tokenizer_train(tok, (const uint8_t *)(corpus.data ? corpus.data : ""), corpus.len, 2048u);
   buffer_free(&corpus);
 }
 

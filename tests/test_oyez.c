@@ -85,7 +85,7 @@ static void test_bpe_and_m1_tokenizer(void) {
 
   M1Tokenizer m1;
   m1_tokenizer_init(&m1);
-  assert(m1_tokenizer_train(&m1, (const uint8_t *)corpus, strlen(corpus), 460u) == 0);
+  assert(m1_tokenizer_train(&m1, (const uint8_t *)corpus, strlen(corpus), 640u) == 0);
   assert(m1_tokenizer_vocab_size(&m1) > M1_FIXED_VOCAB_SIZE);
 
   uint32_t *m1_ids = NULL;
@@ -272,7 +272,7 @@ static void test_engine_search_and_categorical_endpoints(void) {
   engine_init(&eng);
 
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 475u);
+  assert(seeded >= 520u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",

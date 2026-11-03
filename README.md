@@ -13,10 +13,10 @@ Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only 
 | **Core & Hashing** | [`src/core.h`](src/core.h), [`src/core.c`](src/core.c) | Dynamic/fixed `Buffer`, JSON string escaping, monotonic nanosecond clocks, `fnv1a64`, `mix64`, hardware `popcnt64` & `ctz64`. |
 | **Checksums & Wire** | [`src/checksum.h`](src/checksum.h), [`src/checksum.c`](src/checksum.c), [`src/wire.h`](src/wire.h) | Little-endian binary wire encoding, reflected nibble CRC-32, and incremental SHA-256 (`Sha256Digest`). |
 | **Byte-Level BPE Tokenizer** | [`src/token.h`](src/token.h), [`src/token.c`](src/token.c) | Doubly-linked symbol list + open-addressed `PairTable` + `MaxHeap`/`MinHeap` BPE trainer/encoder with `OYEZBP01` CRC-32 binary checkpoints. |
-| **M1 Structured Tokenizer** | [`src/m1_tokenizer.h`](src/m1_tokenizer.h), [`src/m1_tokenizer.c`](src/m1_tokenizer.c) | Fixed-vocabulary pre-segmenter (256 raw bytes + 26 indent tokens + 89 syntax primitives + 22 landmarks + 12 control tokens = `405` base IDs) with `OYEZMT02` SHA-256 + CRC-32 sealed serialization. |
+| **M1 Structured Tokenizer** | [`src/m1_tokenizer.h`](src/m1_tokenizer.h), [`src/m1_tokenizer.c`](src/m1_tokenizer.c) | Fixed-vocabulary pre-segmenter (256 raw bytes + 26 indent tokens + 164 syntax/crypto/scientific primitives + 94 news/arXiv/cybersec/macro landmarks + 16 control tokens = `556` base IDs, `2,048` default trained vocabulary) with `OYEZMT02` SHA-256 + CRC-32 sealed serialization. |
 | **Markup & Readability** | [`src/markup.h`](src/markup.h), [`src/markup.c`](src/markup.c) | Unified RSS 2.0, Atom 1.0, RSS 1.0/RDF, and JSON Feed 1.1 parser + Readability DOM block scorer and HTML-to-Markdown converter. |
-| **Category Theory & Gazetteer** | [`src/ontology.h`](src/ontology.h), [`src/ontology.c`](src/ontology.c) | **32-node Bitmask Poset Category $\mathcal{C}$** (`upward_mask` $\uparrow c$, `downward_mask` $\downarrow c$), Lattice Join $\vee$ & Meet $\wedge$, Heyting Algebra Implication $(A \Rightarrow B)$ & Intuitionistic Negation $\neg A$, Left & Right Kan Extensions ($\text{Lan}_\iota \dashv \iota^* \dashv \text{Ran}_\iota$), **Rota's Incidence Algebra Möbius Inversion** $\mu(u, v)$, **Poset Wasserstein / Radon Distance**, Grothendieck Sheaf Cohomology $H^1$ defect, 10 epistemic `NewsType` genres, 5 `ClearanceLevel` tiers, 5 `FiscalStance` regimes, G10/EM FX & equity asset extraction, fiscal event extraction, CVE extraction, 95+ ISO-2 country gazetteer, and 64-bit Charikar SimHash. |
-| **Global Feed Catalog** | [`src/catalog.h`](src/catalog.h), [`src/catalog.c`](src/catalog.c) | **483 curated news, frontier science, 0-day cybersec, browser/anti-bot standards, central banks, equities, FX & fiscal event feeds** across all 11 world regions and 90+ countries/territories. |
+| **Category Theory & Gazetteer** | [`src/ontology.h`](src/ontology.h), [`src/ontology.c`](src/ontology.c) | **32-node Bitmask Poset Category $\mathcal{C}$** (`upward_mask` $\uparrow c$, `downward_mask` $\downarrow c$), Lattice Join $\vee$ & Meet $\wedge$, Heyting Algebra Implication $(A \Rightarrow B)$ & Intuitionistic Negation $\neg A$, Left & Right Kan Extensions ($\text{Lan}_\iota \dashv \iota^* \dashv \text{Ran}_\iota$), **Rota's Incidence Algebra Möbius Inversion** $\mu(u, v)$, **Poset Wasserstein / Radon Distance**, Grothendieck Sheaf Cohomology $H^1$ defect, 10 epistemic `NewsType` genres, 5 `ClearanceLevel` tiers, 5 `FiscalStance` regimes, 432-term domain lexicon, 48 FX/equity/commodity asset rules, 60 global organization rules, fiscal event extraction, CVE extraction, **138-country ISO-2 gazetteer**, and 64-bit Charikar SimHash. |
+| **Global Feed Catalog** | [`src/catalog.h`](src/catalog.h), [`src/catalog.c`](src/catalog.c) | **524 curated news, frontier science, 0-day cybersec, browser/anti-bot standards, central banks, equities, FX & fiscal event feeds** across all 11 world regions and 100+ countries/territories. |
 | **BM25 & BitSet Index Engine** | [`src/index_engine.h`](src/index_engine.h), [`src/index_engine.c`](src/index_engine.c) | Database-free in-memory + `OYEZIX01` binary snapshot engine with 64-bit word `BitSet` presheaf fibers, **4-Band Multi-Probe SimHash64 LSH** index, **64-entry Generation-Invalidated Query Cache**, Okapi BM25 ranking, Submodular MMR diversification, Galois Formal Concept Analysis, Categorical Pullbacks, and Bipartite Entity-Article PageRank. |
 | **POSIX HTTP Server & CLI** | [`src/http_server.h`](src/http_server.h), [`src/http_server.c`](src/http_server.c), [`src/main.c`](src/main.c) | Zero-dependency POSIX socket HTTP/1.1 JSON REST server, **multi-threaded `pthread` concurrent feed poller**, and CLI (`serve`, `seed`, `poll`, `bench`, `stats`). |
 
@@ -28,18 +28,18 @@ Compiled strictly with `-std=c23 -Wall -Wextra -Werror -Wpedantic -O3` and only 
 ================================================================
   Oyez Pure C23 Proprietary Engine Benchmark Suite
 ================================================================
-1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 483 feeds):
-   Total Time:  410.87 ms (4868 articles/sec)
+1. Ingest + Entity/Poset/SimHash64 Index (2000 articles across 524 feeds):
+   Total Time:  558.51 ms (3581 articles/sec)
 2. BM25 + Poset Presheaf Fiber + BitSet + Cache Search (1000 queries):
-   Avg Latency: 0.43 us/query (2331002 queries/sec, hits=539)
+   Avg Latency: 0.43 us/query (2336449 queries/sec, hits=546)
 3. Bipartite Entity-Article PageRank (15 iterations over 2000 articles):
-   Total Time:  112.30 ms (top entity: geo:US score=0.0641)
+   Total Time:  109.88 ms (top entity: geo:US score=0.0535)
 4. 4-Band Multi-Probe SimHash64 LSH Story Clustering (2000 articles):
-   Total Time:  0.06 ms (clusters formed=32)
+   Total Time:  0.03 ms (clusters formed=32)
 5. 32-Node Poset Left/Right Kan Extensions & Sheaf Cohomology (10,000 runs):
-   Avg Latency: 0.351 us/pass (L2 cohomology norm=757777.00)
+   Avg Latency: 0.359 us/pass (L2 cohomology norm=757777.00)
 6. M1 Structured BPE Tokenizer Training + SHA-256 Seal:
-   Vocab Size:  512 (trained in 15.72 ms)
+   Vocab Size:  2048 (trained in 223.14 ms)
 ```
 
 ---
@@ -53,7 +53,7 @@ make test
 # Run the high-performance benchmark suite
 make bench
 
-# Seed the 483 global news, scientific, cybersec & macro/market feeds into data/oyez.ix
+# Seed the 524 global news, scientific, cybersec & macro/market feeds into data/oyez.ix
 ./build/oyez seed
 
 # Poll live RSS/Atom feeds
@@ -74,7 +74,7 @@ make bench
 - `GET /api/v1/pullback?left_region=east-asia&right_region=europe&over=mentioned_country` — Categorical fibered product $X \times_Z Y$ across regional bureaus
 - `GET /api/v1/centrality` — Bipartite Entity-Article PageRank centrality
 - `GET /api/v1/markets` — Macro & fiscal stance fiber counts, extracted FX/equity/commodity asset counts, and fiscal event counts
-- `GET /api/v1/catalog?region=east-asia` — Browse the 483-feed global news catalog
+- `GET /api/v1/catalog?region=east-asia` — Browse the 524-feed global news catalog
 - `POST /api/v1/catalog/seed` — Seed feeds from the global catalog
 - `GET /api/v1/feeds` — List indexed feeds
 - `POST /api/v1/feeds/poll` — Poll live feeds and persist `OYEZIX01` snapshot
