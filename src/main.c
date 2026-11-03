@@ -174,14 +174,23 @@ static int run_bench(void) {
   engine_natural_transformation(&eng, REGION_EAST_ASIA, REGION_EUROPE, &nat_morph);
   CartesianLift lifts[32];
   size_t fib_cnt = engine_grothendieck_fibration(&eng, "all-news", lifts, 32u);
+  TemporalSheafState temp_sheaf;
+  engine_temporal_sheaf(&eng, &temp_sheaf);
+  PersistenceBarcode barcode;
+  ontology_persistent_homology(raw_s, &barcode);
+  AdjunctionMonadState monad;
+  ontology_adjunction_monad(raw_s, &monad);
+  OperadChain chains[16];
+  size_t op_cnt = engine_operad_compose(&eng, "east-asia", "north-america", "europe", chains, 16u);
   uint64_t po1 = monotonic_ns();
-  printf("6. Categorical Pushout, Natural Transformation & Grothendieck Fibration:\n");
-  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, naturality_defect=%.4f, coend=%.1f)\n",
+  printf("6. Pushout, Fibration, Temporal Sheaf, Persistent Homology & Operad:\n");
+  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, operads=%zu, PH_L1=%.2f, H_kl=%.3f)\n",
          (double)(po1 - po0) / 1e6,
          po_cnt,
          fib_cnt,
-         nat_morph.naturality_defect,
-         nat_morph.coend_pairing);
+         op_cnt,
+         barcode.total_persistence_l1,
+         monad.kleisli_entropy);
 
   M1Tokenizer m1;
   uint64_t m0 = monotonic_ns();
@@ -247,6 +256,59 @@ int main(int argc, char **argv) {
            eng.inv_count,
            m1_tokenizer_vocab_size(&tok),
            tok.sha256);
+    m1_tokenizer_free(&tok);
+    engine_free(&eng);
+    return 0;
+  }
+
+  if(strcmp(cmd, "tui") == 0 || strcmp(cmd, "top") == 0) {
+    double raw_s[ONTOLOGY_NODE_COUNT], clo_s[ONTOLOGY_NODE_COUNT];
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      raw_s[i] = (double)bitset_popcount(&eng.by_direct_ontology[i]);
+      clo_s[i] = (double)bitset_popcount(&eng.by_closure_ontology[i]);
+    }
+    SheafCohomology sheaf;
+    ontology_sheaf_cohomology(raw_s, clo_s, &sheaf);
+    PersistenceBarcode barcode;
+    ontology_persistent_homology(raw_s, &barcode);
+    AdjunctionMonadState monad;
+    ontology_adjunction_monad(raw_s, &monad);
+    TemporalSheafState temp;
+    engine_temporal_sheaf(&eng, &temp);
+
+    printf("\033[1;36m========================================================================\033[0m\n");
+    printf("\033[1;37m  OYEZ // C23 CATEGORY-THEORETIC & TOPOS INTELLIGENCE TUI DASHBOARD\033[0m\n");
+    printf("\033[1;36m========================================================================\033[0m\n");
+    printf("  Feeds: \033[1;32m%zu\033[0m | Articles: \033[1;32m%zu\033[0m | Terms: \033[1;32m%zu\033[0m | M1 Vocab: \033[1;33m%u\033[0m\n",
+           eng.feed_count, eng.article_count, eng.inv_count, m1_tokenizer_vocab_size(&tok));
+    printf("------------------------------------------------------------------------\n");
+    printf("  \033[1;35m[Homological & Enriched Category Invariants]\033[0m\n");
+    printf("  Leinster Magnitude |C|_L : %8.4f   Euler Char chi(N(C)) : %d\n",
+           sheaf.leinster_magnitude, sheaf.euler_characteristic);
+    printf("  Fiedler Connectivity l_2 : %8.4f   Cochain ||d1*d0||_2  : %.2e\n",
+           sheaf.fiedler_eigenvalue, sheaf.cochain_exactness_norm);
+    printf("  Hodge Gradient ||d0*phi||: %8.2f   Hodge Solenoidal Curl: %8.2f\n",
+           sheaf.hodge_gradient_norm, sheaf.hodge_solenoidal_norm);
+    printf("  Kleisli Monad Entropy    : %8.4f   Zig-Zag Defect       : %.2e\n",
+           monad.kleisli_entropy, monad.zig_zag_triangle_defect);
+    printf("  Temporal Sheaf Laplacian : %8.4f   Emerging Fiber       : %s\n",
+           temp.connection_laplacian_norm, ontology_node(temp.fastest_emerging_node)->slug);
+    printf("------------------------------------------------------------------------\n");
+    printf("  \033[1;34m[Persistent Homology Filtration Barcode (N_eps(C))]\033[0m\n");
+    for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
+      printf("  eps=%.2f | V=%2u E=%3u T=%3u | beta_0=%2u beta_1=%2u | ",
+             barcode.steps[s].threshold_eps,
+             barcode.steps[s].f_vector[0],
+             barcode.steps[s].f_vector[1],
+             barcode.steps[s].f_vector[2],
+             barcode.steps[s].betti_0,
+             barcode.steps[s].betti_1);
+      uint32_t bars = barcode.steps[s].betti_0 + barcode.steps[s].betti_1;
+      if(bars > 24u) bars = 24u;
+      for(uint32_t b = 0; b < bars; ++b) putchar('#');
+      putchar('\n');
+    }
+    printf("\033[1;36m========================================================================\033[0m\n");
     m1_tokenizer_free(&tok);
     engine_free(&eng);
     return 0;
