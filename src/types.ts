@@ -1,12 +1,38 @@
 export type FeedFormat = "rss2" | "atom" | "rdf" | "jsonfeed";
 
+export type WorldRegion =
+  | "north-america"
+  | "latin-america"
+  | "europe"
+  | "middle-east"
+  | "africa"
+  | "south-asia"
+  | "east-asia"
+  | "southeast-asia"
+  | "central-asia"
+  | "oceania"
+  | "global";
+
+export interface ArticleEntities {
+  /** ISO-2 country codes mentioned in the article text */
+  mentionedCountries: string[];
+  /** High-level semantic topics detected in the article */
+  topics: string[];
+  /** International organizations, institutions, and proper noun entities */
+  organizationsAndPeople: string[];
+}
+
 export interface FeedConfig {
   id: string;
   url: string;
   title: string;
   description?: string;
   siteUrl?: string;
-  language?: string;
+  region: WorldRegion;
+  /** ISO-2 country code of the publication (e.g. US, GB, JP, BR, NG, IN) or INT */
+  country: string;
+  /** ISO-639-1 language code (e.g. en, es, fr, de, pt, ja, ar) */
+  language: string;
   category: string;
   tags: string[];
   enabled: boolean;
@@ -48,6 +74,9 @@ export interface Article {
   url: string;
   canonicalHash: string;
   domain: string;
+  region: WorldRegion;
+  country: string;
+  language: string;
   title: string;
   summary: string;
   contentHtml?: string;
@@ -55,6 +84,7 @@ export interface Article {
   markdownContent?: string;
   author?: string;
   categories: string[];
+  entities: ArticleEntities;
   imageUrl?: string;
   publishedAt: number;
   ingestedAt: number;
@@ -88,6 +118,14 @@ export interface SearchQuery {
   q?: string;
   feedId?: string;
   category?: string;
+  region?: WorldRegion | string;
+  /** Source publication country ISO-2 */
+  country?: string;
+  /** Country mentioned inside the article */
+  mentionedCountry?: string;
+  language?: string;
+  topic?: string;
+  entity?: string;
   domain?: string;
   from?: number;
   to?: number;
@@ -107,7 +145,41 @@ export interface SearchResult {
   limit: number;
   offset: number;
   queryTimeMs: number;
+  facets?: FacetCounts;
   results: ScoredArticle[];
+}
+
+export interface FacetCounts {
+  regions: Record<string, number>;
+  countries: Record<string, number>;
+  mentionedCountries: Record<string, number>;
+  categories: Record<string, number>;
+  topics: Record<string, number>;
+  languages: Record<string, number>;
+  domains: Record<string, number>;
+  topEntities: Record<string, number>;
+}
+
+export interface StoryCluster {
+  id: string;
+  headline: string;
+  leadArticleId: string;
+  articleCount: number;
+  sources: string[];
+  regions: string[];
+  countries: string[];
+  topics: string[];
+  sharedTerms: string[];
+  latestPublishedAt: number;
+  articles: Array<{
+    id: string;
+    title: string;
+    feedTitle: string;
+    country: string;
+    region: string;
+    url: string;
+    publishedAt: number;
+  }>;
 }
 
 export interface EngineStats {
@@ -117,8 +189,14 @@ export interface EngineStats {
   vocabularySize: number;
   totalPostings: number;
   averageDocumentLength: number;
+  regions: Record<string, number>;
+  countries: Record<string, number>;
+  mentionedCountries: Record<string, number>;
   categories: Record<string, number>;
+  topics: Record<string, number>;
+  languages: Record<string, number>;
   domains: Record<string, number>;
+  topEntities: Record<string, number>;
   dataDir: string;
   lastSnapshotAt?: number;
   uptimeSeconds: number;
