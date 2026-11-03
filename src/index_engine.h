@@ -130,10 +130,12 @@ typedef struct {
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
-  CountryFiber by_source_country[128];
-  CountryFiber by_mentioned_country[128];
+  CountryFiber by_source_country[256];
+  CountryFiber by_mentioned_country[256];
   CountryFiber by_asset[128];
   CountryFiber by_fiscal_event[64];
+  CountryFiber by_cve[128];
+  CountryFiber by_org[128];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -163,6 +165,8 @@ typedef struct {
   const char *fiscal_stance;
   const char *asset;
   const char *fiscal_event;
+  const char *cve;
+  const char *organization;
   const char *region;
   const char *country;
   const char *mentioned_country;

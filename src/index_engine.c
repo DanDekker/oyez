@@ -270,10 +270,14 @@ void engine_free(OyezEngine *engine) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
   }
-  for(size_t i = 0; i < 128u; ++i) {
+  for(size_t i = 0; i < 256u; ++i) {
     if(engine->by_source_country[i].occupied) bitset_free(&engine->by_source_country[i].bits);
     if(engine->by_mentioned_country[i].occupied) bitset_free(&engine->by_mentioned_country[i].bits);
+  }
+  for(size_t i = 0; i < 128u; ++i) {
     if(engine->by_asset[i].occupied) bitset_free(&engine->by_asset[i].bits);
+    if(engine->by_cve[i].occupied) bitset_free(&engine->by_cve[i].bits);
+    if(engine->by_org[i].occupied) bitset_free(&engine->by_org[i].bits);
   }
   for(size_t i = 0; i < 64u; ++i) {
     if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
@@ -391,11 +395,11 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
     }
   }
 
-  BitSet *src_cb = country_fiber_get(engine->by_source_country, 128u, a->feed_country, 1);
+  BitSet *src_cb = country_fiber_get(engine->by_source_country, 256u, a->feed_country, 1);
   if(src_cb) bitset_set(src_cb, slot);
 
   for(size_t i = 0; i < a->mentioned_country_count; ++i) {
-    BitSet *m_cb = country_fiber_get(engine->by_mentioned_country, 128u, a->mentioned_countries[i], 1);
+    BitSet *m_cb = country_fiber_get(engine->by_mentioned_country, 256u, a->mentioned_countries[i], 1);
     if(m_cb) bitset_set(m_cb, slot);
   }
   for(size_t i = 0; i < a->mentioned_asset_count; ++i) {
@@ -405,6 +409,14 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   for(size_t i = 0; i < a->mentioned_fiscal_event_count; ++i) {
     BitSet *e_cb = country_fiber_get(engine->by_fiscal_event, 64u, a->mentioned_fiscal_events[i], 1);
     if(e_cb) bitset_set(e_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
+    BitSet *c_cb = country_fiber_get(engine->by_cve, 128u, a->mentioned_cves[i], 1);
+    if(c_cb) bitset_set(c_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_org_count; ++i) {
+    BitSet *o_cb = country_fiber_get(engine->by_org, 128u, a->mentioned_orgs[i], 1);
+    if(o_cb) bitset_set(o_cb, slot);
   }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
@@ -619,6 +631,8 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   h ^= mix64(fnv1a64_cstr(q->fiscal_stance ? q->fiscal_stance : "") + 5u);
   h ^= mix64(fnv1a64_cstr(q->asset ? q->asset : "") + 6u);
   h ^= mix64(fnv1a64_cstr(q->fiscal_event ? q->fiscal_event : "") + 7u);
+  h ^= mix64(fnv1a64_cstr(q->cve ? q->cve : "") + 13u);
+  h ^= mix64(fnv1a64_cstr(q->organization ? q->organization : "") + 14u);
   h ^= mix64(fnv1a64_cstr(q->region ? q->region : "") + 8u);
   h ^= mix64(fnv1a64_cstr(q->country ? q->country : "") + 9u);
   h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
@@ -714,6 +728,24 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
+  if(q->cve && q->cve[0]) {
+    const BitSet *cvb = country_fiber_get((CountryFiber *)engine->by_cve, 128u, q->cve, 0);
+    if(cvb) bitset_and_inplace(&candidates, cvb);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->organization && q->organization[0]) {
+    const BitSet *ob = country_fiber_get((CountryFiber *)engine->by_org, 128u, q->organization, 0);
+    if(ob) bitset_and_inplace(&candidates, ob);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
   if(q->category && q->category[0]) {
     OntologyNodeId node;
     if(ontology_from_slug(q->category, &node) == 0) {
@@ -729,7 +761,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   }
 
   if(q->country && q->country[0]) {
-    const BitSet *cb = country_fiber_get((CountryFiber *)engine->by_source_country, 128u, q->country, 0);
+    const BitSet *cb = country_fiber_get((CountryFiber *)engine->by_source_country, 256u, q->country, 0);
     if(cb) bitset_and_inplace(&candidates, cb);
     else {
       bitset_free(&candidates);
@@ -738,7 +770,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   }
 
   if(q->mentioned_country && q->mentioned_country[0]) {
-    const BitSet *mcb = country_fiber_get((CountryFiber *)engine->by_mentioned_country, 128u, q->mentioned_country, 0);
+    const BitSet *mcb = country_fiber_get((CountryFiber *)engine->by_mentioned_country, 256u, q->mentioned_country, 0);
     if(mcb) bitset_and_inplace(&candidates, mcb);
     else {
       bitset_free(&candidates);
@@ -1147,7 +1179,7 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     e->score = 1.0;
   }
 
-  for(size_t i = 0; i < 128u && ent_count < 96u; ++i) {
+  for(size_t i = 0; i < 256u && ent_count < 96u; ++i) {
     if(engine->by_mentioned_country[i].occupied) {
       uint32_t deg = bitset_popcount(&engine->by_mentioned_country[i].bits);
       if(deg == 0) continue;

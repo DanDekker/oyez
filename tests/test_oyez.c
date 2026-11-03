@@ -227,6 +227,14 @@ static void test_category_theory_and_ontology(void) {
   SheafCohomology sheaf;
   ontology_sheaf_cohomology(raw, kan, &sheaf);
   assert(sheaf.sheaf_section[ONTO_TECHNOLOGY] >= 24.0);
+  /* Simplicial Nerve N(C) of a poset with terminal object (ONTO_ROOT) is contractible:
+   * Euler characteristic chi(N(C)) = f_0 - f_1 + f_2 - f_3 must equal 1 */
+  assert(sheaf.nerve_f_vector[0] == 32u);
+  assert(sheaf.nerve_f_vector[1] > 60u);
+  assert(sheaf.euler_characteristic == 1);
+  assert(sheaf.laplacian_trace > 40.0);
+  assert(sheaf.spectral_radius > 4.0);
+  assert(sheaf.dirichlet_energy > 0.0);
 
   /* Epistemic NewsType classification */
   assert(news_type_classify("BREAKING: Earthquake strikes Pacific trench", "", "", "climate") ==
@@ -350,6 +358,17 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(res.total == 3u);
   search_response_free(&res);
 
+  /* Domain alias expansion: 'AI' in article matches 'artificial-intelligence' or 'ai' query,
+   * and organization BitSet fiber filters by 'EU' */
+  ArticleQuery org_q;
+  memset(&org_q, 0, sizeof(org_q));
+  org_q.organization = "EU";
+  org_q.limit = 10u;
+  assert(engine_search(&eng, &org_q, &res) == 0);
+  assert(res.total == 1u);
+  assert(res.hits[0].article->id == a3);
+  search_response_free(&res);
+
   /* SimHash64 near-duplicate detection between a1 and a2 */
   const ArticleRecord *dups[8];
   uint32_t dists[8];
@@ -398,6 +417,12 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(http_handle_request(&ctx, "GET", "/api/v1/ontology?sub=ai&sup=knowledge-economy&a=cyber&b=ai", "", 0, &status, &json) == 0);
   assert(status == 200);
   assert(strstr(json.data, "\"exists\":true") != NULL);
+  assert(strstr(json.data, "\"euler_characteristic\":1") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/security", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"clearance_levels\":") != NULL);
   buffer_free(&json);
 
   m1_tokenizer_free(&tok);

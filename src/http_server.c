@@ -479,9 +479,21 @@ int http_handle_request(ServerContext *ctx,
     ontology_sheaf_cohomology(raw_scores, closure_scores, &sheaf);
 
     buffer_format(out_json,
-                  "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f",
+                  "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f,"
+                  "\"nerve_f_vector\":[%u,%u,%u,%u,%u,%u],\"euler_characteristic\":%d,"
+                  "\"laplacian_trace\":%.2f,\"spectral_radius\":%.4f,\"dirichlet_energy\":%.2f",
                   ONTOLOGY_NODE_COUNT,
-                  sheaf.total_cohomology_norm);
+                  sheaf.total_cohomology_norm,
+                  sheaf.nerve_f_vector[0],
+                  sheaf.nerve_f_vector[1],
+                  sheaf.nerve_f_vector[2],
+                  sheaf.nerve_f_vector[3],
+                  sheaf.nerve_f_vector[4],
+                  sheaf.nerve_f_vector[5],
+                  sheaf.euler_characteristic,
+                  sheaf.laplacian_trace,
+                  sheaf.spectral_radius,
+                  sheaf.dirichlet_energy);
     if(sub[0] && sup[0]) {
       OntologyNodeId u, v;
       int has = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0 &&
@@ -712,8 +724,40 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/security") == 0) {
+    buffer_text(out_json, "{\"clearance_levels\":{");
+    for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
+      if(cl > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
+    }
+    buffer_text(out_json, "},\"cves\":{");
+    int first_c = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_cve[i].occupied) {
+        if(!first_c) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_cve[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_cve[i].bits));
+        first_c = 0;
+      }
+    }
+    buffer_text(out_json, "},\"organizations\":{");
+    int first_o = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_org[i].occupied) {
+        if(!first_o) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_org[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_org[i].bits));
+        first_o = 0;
+      }
+    }
+    buffer_text(out_json, "}}");
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
     char q_str[256], cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
+    char cve_str[32], org_str[32];
     char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
@@ -724,6 +768,8 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "fiscal_stance", fst, sizeof(fst));
     query_param(qs, "asset", asset, sizeof(asset));
     query_param(qs, "fiscal_event", fev, sizeof(fev));
+    query_param(qs, "cve", cve_str, sizeof(cve_str));
+    query_param(qs, "organization", org_str, sizeof(org_str));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -745,6 +791,8 @@ int http_handle_request(ServerContext *ctx,
     aq.fiscal_stance = fst[0] ? fst : NULL;
     aq.asset = asset[0] ? asset : NULL;
     aq.fiscal_event = fev[0] ? fev : NULL;
+    aq.cve = cve_str[0] ? cve_str : NULL;
+    aq.organization = org_str[0] ? org_str : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;

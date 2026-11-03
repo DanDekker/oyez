@@ -87,6 +87,11 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
 
 static int g_ontology_ready = 0;
 static int8_t g_mobius[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static uint32_t g_nerve_f[6] = {0};
+static int32_t g_euler_char = 0;
+static double g_laplacian[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
+static double g_laplacian_trace = 0.0;
+static double g_spectral_radius = 0.0;
 
 void ontology_init(void) {
   if(g_ontology_ready) return;
@@ -142,6 +147,94 @@ void ontology_init(void) {
       }
     }
   }
+
+  /* Compute Simplicial Nerve N(C) f-vector (f_0, f_1, f_2, f_3, f_4, f_5) of strict chains
+   * u_0 < u_1 < ... < u_k in the Poset Category C, and verify contractibility chi(N(C)) == 1. */
+  uint32_t f0 = ONTOLOGY_NODE_COUNT, f1 = 0u, f2 = 0u, f3 = 0u, f4 = 0u, f5 = 0u;
+  for(uint32_t u0 = 0; u0 < ONTOLOGY_NODE_COUNT; ++u0) {
+    uint32_t m1 = g_ontology[u0].upward_mask & ~BIT(u0);
+    f1 += popcnt64((uint64_t)m1);
+    while(m1) {
+      uint32_t u1 = ctz64((uint64_t)m1);
+      m1 &= (m1 - 1u);
+      uint32_t m2 = g_ontology[u1].upward_mask & ~BIT(u1);
+      f2 += popcnt64((uint64_t)m2);
+      while(m2) {
+        uint32_t u2 = ctz64((uint64_t)m2);
+        m2 &= (m2 - 1u);
+        uint32_t m3 = g_ontology[u2].upward_mask & ~BIT(u2);
+        f3 += popcnt64((uint64_t)m3);
+        while(m3) {
+          uint32_t u3 = ctz64((uint64_t)m3);
+          m3 &= (m3 - 1u);
+          uint32_t m4 = g_ontology[u3].upward_mask & ~BIT(u3);
+          f4 += popcnt64((uint64_t)m4);
+          while(m4) {
+            uint32_t u4 = ctz64((uint64_t)m4);
+            m4 &= (m4 - 1u);
+            uint32_t m5 = g_ontology[u4].upward_mask & ~BIT(u4);
+            f5 += popcnt64((uint64_t)m5);
+          }
+        }
+      }
+    }
+  }
+  g_nerve_f[0] = f0;
+  g_nerve_f[1] = f1;
+  g_nerve_f[2] = f2;
+  g_nerve_f[3] = f3;
+  g_nerve_f[4] = f4;
+  g_nerve_f[5] = f5;
+  g_euler_char = (int32_t)f0 - (int32_t)f1 + (int32_t)f2 - (int32_t)f3 + (int32_t)f4 - (int32_t)f5;
+
+  /* Construct 0-th Combinatorial Hodge / Graph Laplacian L_0 = D - A over covering edges */
+  memset(g_laplacian, 0, sizeof(g_laplacian));
+  g_laplacian_trace = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    uint32_t pmask = g_ontology[u].parents_mask;
+    while(pmask) {
+      uint32_t p = ctz64((uint64_t)pmask);
+      pmask &= (pmask - 1u);
+      if(p < ONTOLOGY_NODE_COUNT && p != u) {
+        g_laplacian[u][p] -= 1.0;
+        g_laplacian[p][u] -= 1.0;
+        g_laplacian[u][u] += 1.0;
+        g_laplacian[p][p] += 1.0;
+        g_laplacian_trace += 2.0;
+      }
+    }
+  }
+
+  /* Power iteration for dominant eigenvalue lambda_max(L_0) */
+  double vec[ONTOLOGY_NODE_COUNT];
+  double next_v[ONTOLOGY_NODE_COUNT];
+  for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    vec[i] = (i & 1u) ? 1.0 : -1.0;
+  }
+  double eig = 0.0;
+  for(int it = 0; it < 30; ++it) {
+    double norm_sq = 0.0;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      double s = 0.0;
+      for(uint32_t j = 0; j < ONTOLOGY_NODE_COUNT; ++j) {
+        s += g_laplacian[i][j] * vec[j];
+      }
+      next_v[i] = s;
+      norm_sq += s * s;
+    }
+    if(norm_sq <= 1e-18) break;
+    double inv_norm = 1.0;
+    /* Newton-Raphson reciprocal square root without <math.h> dependency in ontology.c */
+    double x = norm_sq;
+    double r = 1.0;
+    for(int nr = 0; nr < 12; ++nr) r = 0.5 * (r + x / r);
+    eig = r;
+    inv_norm = 1.0 / r;
+    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+      vec[i] = next_v[i] * inv_norm;
+    }
+  }
+  g_spectral_radius = eig;
 
   g_ontology_ready = 1;
 }
@@ -415,6 +508,27 @@ void ontology_sheaf_cohomology(const double *raw_fiber_counts,
     total_norm += defect * defect;
   }
   out->total_cohomology_norm = total_norm;
+  for(int k = 0; k < 6; ++k) out->nerve_f_vector[k] = g_nerve_f[k];
+  out->euler_characteristic = g_euler_char;
+  out->laplacian_trace = g_laplacian_trace;
+  out->spectral_radius = g_spectral_radius;
+
+  /* Compute Dirichlet harmonic energy <f, L_0 f> = sum_{u < v} (f(u) - f(v))^2 */
+  double energy = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    uint32_t pmask = g_ontology[u].parents_mask;
+    double fu = raw_fiber_counts ? raw_fiber_counts[u] : 0.0;
+    while(pmask) {
+      uint32_t p = ctz64((uint64_t)pmask);
+      pmask &= (pmask - 1u);
+      if(p < ONTOLOGY_NODE_COUNT) {
+        double fp = raw_fiber_counts ? raw_fiber_counts[p] : 0.0;
+        double d = fu - fp;
+        energy += d * d;
+      }
+    }
+  }
+  out->dirichlet_energy = energy;
 }
 
 static void compute_char_mask(const char *s, size_t len, uint32_t *out_alpha_mask) {
@@ -1231,14 +1345,121 @@ static const char *const k_stopwords[] = {
 };
 
 static int is_stopword(const char *w) {
-  for(size_t i = 0; i < sizeof(k_stopwords) / sizeof(k_stopwords[0]); ++i) {
-    if(strcmp(w, k_stopwords[i]) == 0) return 1;
+  size_t lo = 0;
+  size_t hi = sizeof(k_stopwords) / sizeof(k_stopwords[0]);
+  while(lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    int cmp = strcmp(w, k_stopwords[mid]);
+    if(cmp == 0) return 1;
+    if(cmp < 0) hi = mid;
+    else lo = mid + 1u;
   }
   return 0;
 }
 
+typedef struct {
+  const char *alias;
+  const char *canonical;
+} DomainAlias;
+
+static const DomainAlias k_domain_aliases[] = {
+    {"0-day", "zero-day"},
+    {"0day", "zero-day"},
+    {"ai", "artificial-intelligence"},
+    {"apt", "advanced-persistent-threat"},
+    {"boe", "bank-of-england"},
+    {"boj", "bank-of-japan"},
+    {"bps", "basis-point"},
+    {"btc", "bitcoin"},
+    {"cbdc", "central-bank-digital-currency"},
+    {"cisa", "cybersecurity-agency"},
+    {"cpi", "consumer-price-index"},
+    {"cve", "vulnerability"},
+    {"ddos", "denial-of-service"},
+    {"dxy", "dollar-index"},
+    {"ebpf", "extended-bpf"},
+    {"ecb", "european-central-bank"},
+    {"edr", "endpoint-detection"},
+    {"euv", "extreme-ultraviolet"},
+    {"fed", "federal-reserve"},
+    {"fomc", "federal-reserve"},
+    {"forex", "foreign-exchange"},
+    {"fx", "foreign-exchange"},
+    {"gdp", "gross-domestic-product"},
+    {"geoint", "geospatial-intelligence"},
+    {"gilt", "sovereign-bond"},
+    {"gilts", "sovereign-bond"},
+    {"hbm", "high-bandwidth-memory"},
+    {"humint", "human-intelligence"},
+    {"imf", "international-monetary-fund"},
+    {"ipo", "initial-public-offering"},
+    {"jgb", "japanese-government-bond"},
+    {"jgbs", "japanese-government-bond"},
+    {"jwst", "james-webb-telescope"},
+    {"lhc", "large-hadron-collider"},
+    {"llm", "large-language-model"},
+    {"llms", "large-language-model"},
+    {"lng", "liquefied-natural-gas"},
+    {"ml-dsa", "dilithium"},
+    {"ml-kem", "kyber"},
+    {"mrna", "messenger-rna"},
+    {"nfp", "nonfarm-payroll"},
+    {"nsa", "national-security-agency"},
+    {"oob", "out-of-bounds"},
+    {"opec+", "opec"},
+    {"opsec", "operational-security"},
+    {"osint", "open-source-intelligence"},
+    {"pboc", "peoples-bank-of-china"},
+    {"pce", "personal-consumption"},
+    {"pqc", "post-quantum-cryptography"},
+    {"qe", "quantitative-easing"},
+    {"qt", "quantitative-tightening"},
+    {"rbi", "reserve-bank-of-india"},
+    {"rce", "remote-code-execution"},
+    {"rmb", "renminbi"},
+    {"s&p500", "sp500"},
+    {"sigint", "signals-intelligence"},
+    {"smr", "small-modular-reactor"},
+    {"snb", "swiss-national-bank"},
+    {"sqli", "sql-injection"},
+    {"ssrf", "server-side-forgery"},
+    {"tokamak", "nuclear-fusion-tokamak"},
+    {"uaf", "use-after-free"},
+    {"uav", "drone"},
+    {"ust", "treasury-yield"},
+    {"wasm", "webassembly"},
+    {"xss", "cross-site-scripting"},
+    {"ycc", "yield-curve-control"},
+    {"zk-snark", "zero-knowledge-proof"},
+    {"zk-stark", "zero-knowledge-proof"},
+    {"zkp", "zero-knowledge-proof"},
+};
+
+static const char *lookup_domain_alias(const char *w) {
+  size_t lo = 0;
+  size_t hi = sizeof(k_domain_aliases) / sizeof(k_domain_aliases[0]);
+  while(lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    int cmp = strcmp(w, k_domain_aliases[mid].alias);
+    if(cmp == 0) return k_domain_aliases[mid].canonical;
+    if(cmp < 0) hi = mid;
+    else lo = mid + 1u;
+  }
+  return NULL;
+}
+
 static void stem_word(char *w, size_t len) {
-  if(len > 5u && strcmp(w + len - 3u, "ies") == 0) {
+  if(len > 7u && strcmp(w + len - 5u, "ation") == 0) {
+    w[len - 5u] = '\0';
+  } else if(len > 6u && strcmp(w + len - 4u, "ment") == 0) {
+    w[len - 4u] = '\0';
+  } else if(len > 6u && strcmp(w + len - 4u, "ness") == 0) {
+    w[len - 4u] = '\0';
+  } else if(len > 6u && strcmp(w + len - 4u, "able") == 0) {
+    w[len - 4u] = '\0';
+  } else if(len > 6u && strcmp(w + len - 4u, "ible") == 0) {
+    w[len - 4u] = '\0';
+  } else if(len > 5u && strcmp(w + len - 3u, "ies") == 0) {
     strcpy(w + len - 3u, "y");
   } else if(len > 5u && strcmp(w + len - 3u, "ing") == 0) {
     w[len - 3u] = '\0';
@@ -1247,6 +1468,31 @@ static void stem_word(char *w, size_t len) {
   } else if(len > 4u && w[len - 1u] == 's' && w[len - 2u] != 's') {
     w[len - 1u] = '\0';
   }
+}
+
+static size_t push_lexical_term(const char *word,
+                                size_t wlen,
+                                float weight,
+                                LexicalTerm *terms,
+                                size_t current_count,
+                                size_t max_terms) {
+  uint64_t h = fnv1a64(word, wlen);
+  for(size_t i = 0; i < current_count; ++i) {
+    if(terms[i].hash == h && strcmp(terms[i].term, word) == 0) {
+      terms[i].weight += weight;
+      terms[i].tf += 1u;
+      return current_count;
+    }
+  }
+  if(current_count < max_terms) {
+    strncpy(terms[current_count].term, word, 31u);
+    terms[current_count].term[31] = '\0';
+    terms[current_count].hash = h;
+    terms[current_count].weight = weight;
+    terms[current_count].tf = 1u;
+    current_count++;
+  }
+  return current_count;
 }
 
 size_t lexical_analyze(const char *text,
@@ -1262,37 +1508,29 @@ size_t lexical_analyze(const char *text,
     if(text[p] == '\0') break;
     char word[32];
     size_t wlen = 0;
-    while(text[p] != '\0' && (isalnum((unsigned char)text[p]) || text[p] == '-')) {
+    while(text[p] != '\0' && (isalnum((unsigned char)text[p]) || text[p] == '-' || text[p] == '+')) {
       if(wlen < 30u) {
         word[wlen++] = (char)tolower((unsigned char)text[p]);
       }
       p++;
     }
-    while(wlen > 0 && word[wlen - 1u] == '-') wlen--;
+    while(wlen > 0 && (word[wlen - 1u] == '-' || word[wlen - 1u] == '+')) wlen--;
     word[wlen] = '\0';
     if(wlen < 2u || is_stopword(word)) continue;
+
+    /* Check canonical domain alias before stemming */
+    const char *canonical = lookup_domain_alias(word);
+
     stem_word(word, wlen);
     wlen = strlen(word);
     if(wlen < 2u) continue;
 
     if(out_word_tokens) (*out_word_tokens)++;
-    uint64_t h = fnv1a64(word, wlen);
+    current_count = push_lexical_term(word, wlen, field_weight, terms, current_count, max_terms);
 
-    int found = 0;
-    for(size_t i = 0; i < current_count; ++i) {
-      if(terms[i].hash == h && strcmp(terms[i].term, word) == 0) {
-        terms[i].weight += field_weight;
-        terms[i].tf += 1u;
-        found = 1;
-        break;
-      }
-    }
-    if(!found && current_count < max_terms) {
-      strcpy(terms[current_count].term, word);
-      terms[current_count].hash = h;
-      terms[current_count].weight = field_weight;
-      terms[current_count].tf = 1u;
-      current_count++;
+    if(canonical) {
+      size_t clen = strlen(canonical);
+      current_count = push_lexical_term(canonical, clen, field_weight * 0.85f, terms, current_count, max_terms);
     }
   }
   return current_count;

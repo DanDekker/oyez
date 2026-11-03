@@ -110,6 +110,12 @@ typedef struct {
   double sheaf_section[ONTOLOGY_NODE_COUNT];        /* Glued sheaf section over C */
   double cohomology_defect[ONTOLOGY_NODE_COUNT];    /* Local-to-global H^1 obstruction */
   double total_cohomology_norm;
+  /* Simplicial Nerve N(C) of the Poset Category C & Hodge Laplacian Spectrum */
+  uint32_t nerve_f_vector[6];                       /* (f_0..f_5) k-simplices of strict chains u_0 < ... < u_k */
+  int32_t euler_characteristic;                     /* chi(N(C)) = sum_{k=0}^5 (-1)^k f_k == 1 */
+  double laplacian_trace;                           /* Tr(L_0) of weighted poset graph Laplacian */
+  double spectral_radius;                           /* lambda_max(L_0) via power iteration */
+  double dirichlet_energy;                          /* <f, L_0 f> = sum_{u < v} w(u,v) (f(u) - f(v))^2 */
 } SheafCohomology;
 
 typedef struct {
