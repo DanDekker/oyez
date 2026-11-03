@@ -6,10 +6,12 @@
 #include <ctype.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static int url_is_safe(const char *url) {
@@ -268,21 +270,45 @@ static int query_param(const char *query_str, const char *key, char *out_val, si
 }
 
 static void json_extract_field(const char *json, size_t len, const char *key, char *out, size_t cap) {
+  if(!out || cap == 0) return;
   out[0] = '\0';
-  if(!json || len == 0) return;
+  if(!json || len == 0 || !key) return;
   char pat[64];
-  snprintf(pat, sizeof(pat), "\"%s\"", key);
-  const char *hit = strstr(json, pat);
-  if(!hit || (size_t)(hit - json) >= len) return;
-  const char *p = hit + strlen(pat);
+  int pn = snprintf(pat, sizeof(pat), "\"%s\"", key);
+  if(pn <= 0 || (size_t)pn >= sizeof(pat)) return;
+  size_t plen = (size_t)pn;
+  if(len < plen) return;
+
+  const char *hit = NULL;
+  for(size_t i = 0; i + plen <= len; ++i) {
+    if(memcmp(json + i, pat, plen) == 0) {
+      hit = json + i;
+      break;
+    }
+  }
+  if(!hit) return;
+
+  const char *p = hit + plen;
   const char *end = json + len;
-  while(p < end && (isspace((unsigned char)*p) || *p == ':')) p++;
+  while(p < end && isspace((unsigned char)*p)) p++;
+  if(p >= end || *p != ':') return;
+  p++;
+  while(p < end && isspace((unsigned char)*p)) p++;
   if(p >= end || *p != '"') return;
   p++;
+
   size_t o = 0;
   while(p < end && *p != '"' && o + 1u < cap) {
-    if(*p == '\\' && p + 1u < end) p++;
-    out[o++] = *p++;
+    if(*p == '\\' && p + 1u < end) {
+      p++;
+      char c = *p++;
+      if(c == 'n') c = '\n';
+      else if(c == 'r') c = '\r';
+      else if(c == 't') c = '\t';
+      out[o++] = c;
+    } else {
+      out[o++] = *p++;
+    }
   }
   out[o] = '\0';
 }
@@ -462,6 +488,7 @@ int http_handle_request(ServerContext *ctx,
       "<div id=\"results\"></div></div></div></div>";
     static const char *const k_console_html_script =
       "<script>"
+      "function esc(s){return String(s||'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}"
       "async function init(){"
       "const [st,on,tm,fb]=await Promise.all([fetch('/api/v1/stats').then(r=>r.json()),"
       "fetch('/api/v1/ontology').then(r=>r.json()),fetch('/api/v1/temporal').then(r=>r.json()),"
@@ -489,9 +516,9 @@ int http_handle_request(ServerContext *ctx,
       "const c=encodeURIComponent(document.getElementById('cat').value);"
       "const r=await fetch(`/api/v1/articles?q=${q}&category=${c}&limit=20`).then(x=>x.json());"
       "document.getElementById('results').innerHTML=(r.articles||[]).map(a=>"
-      "`<div class='art'><a href='${a.url}' target='_blank'>${a.title}</a>"
-      "<div><span class='badge'>${a.feed_country}</span><span class='badge'>${a.news_type}</span>"
-      "<span class='badge'>${a.ai_tier}</span><span class='badge'>${a.clearance}</span></div></div>`).join('');}"
+      "`<div class='art'><a href='${esc(a.url)}' target='_blank' rel='noopener'>${esc(a.title)}</a>"
+      "<div><span class='badge'>${esc(a.feed_country)}</span><span class='badge'>${esc(a.news_type)}</span>"
+      "<span class='badge'>${esc(a.ai_tier)}</span><span class='badge'>${esc(a.clearance)}</span></div></div>`).join('');}"
       "init();</script></body></html>";
     buffer_text(out_json, k_console_html_head);
     buffer_text(out_json, k_console_html_script);
@@ -619,8 +646,11 @@ int http_handle_request(ServerContext *ctx,
                  ontology_has_morphism(u, v));
       int32_t mu = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0)
                    ? ontology_mobius_value(u, v) : 0;
-      buffer_format(out_json, ",\"morphism\":{\"sub\":\"%s\",\"sup\":\"%s\",\"exists\":%s,\"mobius_mu\":%d}",
-                    sub, sup, has ? "true" : "false", mu);
+      buffer_text(out_json, ",\"morphism\":{\"sub\":");
+      json_cstr(out_json, sub);
+      buffer_text(out_json, ",\"sup\":");
+      json_cstr(out_json, sup);
+      buffer_format(out_json, ",\"exists\":%s,\"mobius_mu\":%d}", has ? "true" : "false", mu);
     }
     if(a_slug[0] && b_slug[0]) {
       OntologyNodeId na, nb;
@@ -634,11 +664,15 @@ int http_handle_request(ServerContext *ctx,
         double w_dist = ontology_wasserstein_distance(1u << na, 1u << nb);
         double l_ab = ontology_lawvere_distance(1u << na, 1u << nb);
         double l_ba = ontology_lawvere_distance(1u << nb, 1u << na);
+        buffer_text(out_json, ",\"lattice\":{\"a\":");
+        json_cstr(out_json, a_slug);
+        buffer_text(out_json, ",\"b\":");
+        json_cstr(out_json, b_slug);
         buffer_format(out_json,
-                      ",\"lattice\":{\"a\":\"%s\",\"b\":\"%s\",\"join\":\"%s\","
+                      ",\"join\":\"%s\","
                       "\"wasserstein_distance\":%.4f,\"lawvere_distance_ab\":%.4f,"
                       "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s,\"meet\":",
-                      a_slug, b_slug, ontology_node(j)->slug, w_dist, l_ab, l_ba,
+                      ontology_node(j)->slug, w_dist, l_ab, l_ba,
                       dense_a ? "true" : "false");
         serialize_ontology_mask_array(out_json, m);
         buffer_text(out_json, ",\"heyting_implication\":");
@@ -756,9 +790,13 @@ int http_handle_request(ServerContext *ctx,
 
     PullbackPair pairs[32];
     size_t count = engine_categorical_pullback(eng, left, right, over, pairs, 32u);
-    buffer_format(out_json,
-                  "{\"left_region\":\"%s\",\"right_region\":\"%s\",\"over\":\"%s\",\"total\":%zu,\"pairs\":[",
-                  left, right, over, count);
+    buffer_text(out_json, "{\"left_region\":");
+    json_cstr(out_json, left);
+    buffer_text(out_json, ",\"right_region\":");
+    json_cstr(out_json, right);
+    buffer_text(out_json, ",\"over\":");
+    json_cstr(out_json, over);
+    buffer_format(out_json, ",\"total\":%zu,\"pairs\":[", count);
     for(size_t i = 0; i < count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       buffer_text(out_json, "{\"shared_witness\":");
@@ -789,11 +827,17 @@ int http_handle_request(ServerContext *ctx,
     PresheafMorphism morph;
     engine_natural_transformation(eng, lr, rr, &morph);
 
+    buffer_text(out_json, "{\"left_region\":");
+    json_cstr(out_json, left);
+    buffer_text(out_json, ",\"right_region\":");
+    json_cstr(out_json, right);
+    buffer_text(out_json, ",\"over\":");
+    json_cstr(out_json, over);
     buffer_format(out_json,
-                  "{\"left_region\":\"%s\",\"right_region\":\"%s\",\"over\":\"%s\",\"total\":%zu,"
+                  ",\"total\":%zu,"
                   "\"natural_transformation\":{\"naturality_defect\":%.4f,\"coend_pairing\":%.2f,"
                   "\"lawvere_transport_cost\":%.4f,\"reverse_transport_cost\":%.4f,\"heyting_truth_sieve\":",
-                  left, right, over, count,
+                  count,
                   morph.naturality_defect,
                   morph.coend_pairing,
                   morph.lawvere_transport_cost,
@@ -834,9 +878,10 @@ int http_handle_request(ServerContext *ctx,
     if(!query_param(qs, "category", cat, sizeof(cat)) || !cat[0]) strcpy(cat, "all-news");
     CartesianLift lifts[32];
     size_t count = engine_grothendieck_fibration(eng, cat, lifts, 32u);
+    buffer_text(out_json, "{\"base_category\":");
+    json_cstr(out_json, cat);
     buffer_format(out_json,
-                  "{\"base_category\":\"%s\",\"leinster_magnitude\":%.4f,\"total\":%zu,\"cartesian_lifts\":[",
-                  cat,
+                  ",\"leinster_magnitude\":%.4f,\"total\":%zu,\"cartesian_lifts\":[",
                   ontology_leinster_magnitude(),
                   count);
     for(size_t i = 0; i < count; ++i) {
@@ -928,9 +973,13 @@ int http_handle_request(ServerContext *ctx,
 
     OperadChain chains[16];
     size_t count = engine_operad_compose(eng, r1, r2, r3, chains, 16u);
-    buffer_format(out_json,
-                  "{\"stage_regions\":[\"%s\",\"%s\",\"%s\"],\"total\":%zu,\"operad_chains\":[",
-                  r1, r2, r3, count);
+    buffer_text(out_json, "{\"stage_regions\":[");
+    json_cstr(out_json, r1);
+    buffer_text(out_json, ",");
+    json_cstr(out_json, r2);
+    buffer_text(out_json, ",");
+    json_cstr(out_json, r3);
+    buffer_format(out_json, "],\"total\":%zu,\"operad_chains\":[", count);
     for(size_t i = 0; i < count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       buffer_text(out_json, "{\"witness_ab\":");
@@ -982,16 +1031,16 @@ int http_handle_request(ServerContext *ctx,
       buffer_format(out_json,
                     "  <entry>\n"
                     "    <id>urn:oyez:article:%u</id>\n"
-                    "    <title><![CDATA[%s]]></title>\n"
-                    "    <link href=\"%s\"/>\n"
-                    "    <updated>%s</updated>\n"
-                    "    <summary><![CDATA[%s]]></summary>\n"
-                    "  </entry>\n",
-                    a->id,
-                    a->title ? a->title : "",
-                    a->url ? a->url : "",
-                    a->published_at ? a->published_at : "2026-11-03T00:00:00Z",
-                    a->summary ? a->summary : "");
+                    "    <title>",
+                    a->id);
+      xml_cstr(out_json, a->title ? a->title : "");
+      buffer_text(out_json, "</title>\n    <link href=\"");
+      xml_cstr(out_json, a->url ? a->url : "");
+      buffer_text(out_json, "\"/>\n    <updated>");
+      xml_cstr(out_json, (a->published_at && a->published_at[0]) ? a->published_at : "2026-11-03T00:00:00Z");
+      buffer_text(out_json, "</updated>\n    <summary>");
+      xml_cstr(out_json, a->summary ? a->summary : "");
+      buffer_text(out_json, "</summary>\n  </entry>\n");
     }
     buffer_text(out_json, "</feed>\n");
     search_response_free(&res);
@@ -1558,11 +1607,29 @@ static const char *detect_content_type(const char *target) {
   return "application/json; charset=utf-8";
 }
 
+static int send_all(int fd, const char *data, size_t len) {
+  size_t sent = 0;
+  while(sent < len) {
+    ssize_t w = send(fd, data + sent, len - sent, 0);
+    if(w <= 0) return -1;
+    sent += (size_t)w;
+  }
+  return 0;
+}
+
 static void *http_client_worker(void *arg) {
   ClientConnTask *task = (ClientConnTask *)arg;
   ServerContext *ctx = task->ctx;
   int client = task->client_fd;
   free(task);
+
+#ifdef SO_NOSIGPIPE
+  int nosig = 1;
+  setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+#endif
+  struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+  setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
   /* Serve up to 16 pipelined / keep-alive HTTP/1.1 requests per connection */
   for(int req_idx = 0; req_idx < 16; ++req_idx) {
@@ -1585,8 +1652,7 @@ static void *http_client_worker(void *arg) {
           "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
           "Access-Control-Allow-Headers: Content-Type\r\n"
           "Connection: keep-alive\r\n\r\n";
-      send(client, cors, strlen(cors), 0);
-      if(want_close) break;
+      if(send_all(client, cors, strlen(cors)) != 0 || want_close) break;
       continue;
     }
 
@@ -1627,12 +1693,13 @@ static void *http_client_worker(void *arg) {
                   want_close ? "close" : "keep-alive");
     if(payload.len > 0) buffer_append(&resp, payload.data, payload.len);
 
+    int send_err = 0;
     if(resp.data && resp.len > 0) {
-      send(client, resp.data, resp.len, 0);
+      if(send_all(client, resp.data, resp.len) != 0) send_err = 1;
     }
     buffer_free(&payload);
     buffer_free(&resp);
-    if(want_close) break;
+    if(want_close || send_err) break;
   }
 
   close(client);
@@ -1641,6 +1708,7 @@ static void *http_client_worker(void *arg) {
 
 int http_server_listen(ServerContext *ctx) {
   if(!ctx) return -1;
+  signal(SIGPIPE, SIG_IGN);
   int srv = socket(AF_INET, SOCK_STREAM, 0);
   if(srv < 0) return -1;
 
