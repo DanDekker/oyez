@@ -3,6 +3,7 @@
 #include "core.h"
 
 #include <ctype.h>
+#include <pthread.h>
 #include <string.h>
 
 static const char *const k_region_slugs[WORLD_REGION_COUNT] = {
@@ -101,7 +102,7 @@ static OntologyNode g_ontology[ONTOLOGY_NODE_COUNT] = {
     {ONTO_NUCLEAR_FUSION, "nuclear-fusion", "Plasma Physics, Tokamaks & Advanced Fission", BIT(ONTO_ENERGY) | BIT(ONTO_SCIENCE), 0u, 0u},
 };
 
-static int g_ontology_ready = 0;
+static pthread_once_t g_ontology_once = PTHREAD_ONCE_INIT;
 static int8_t g_mobius[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT];
 static uint32_t g_mobius_tv = 0u;
 static uint32_t g_nerve_f[6] = {0};
@@ -136,8 +137,7 @@ static double fast_exp_neg(double x) {
   return r;
 }
 
-void ontology_init(void) {
-  if(g_ontology_ready) return;
+static void ontology_init_once(void) {
   for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     g_ontology[i].upward_mask = BIT(i) | g_ontology[i].parents_mask;
   }
@@ -377,8 +377,10 @@ void ontology_init(void) {
   for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
     g_leinster_magnitude += g_leinster_weight[u];
   }
+}
 
-  g_ontology_ready = 1;
+void ontology_init(void) {
+  pthread_once(&g_ontology_once, ontology_init_once);
 }
 
 const char *world_region_slug(WorldRegion region) {

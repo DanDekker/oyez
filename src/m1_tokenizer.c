@@ -5,6 +5,7 @@
 #include "wire.h"
 
 #include <ctype.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -359,10 +360,9 @@ typedef struct {
 } M1DispatchBucket;
 
 static M1DispatchBucket g_m1_dispatch[256];
-static int g_m1_dispatch_ready = 0;
+static pthread_once_t g_m1_dispatch_once = PTHREAD_ONCE_INIT;
 
-static void m1_dispatch_init(void) {
-  if(g_m1_dispatch_ready) return;
+static void m1_dispatch_init_once(void) {
   memset(g_m1_dispatch, 0, sizeof(g_m1_dispatch));
 
   for(uint32_t i = 0; i < M1_LANDMARK_COUNT - 1u; ++i) {
@@ -400,7 +400,10 @@ static void m1_dispatch_init(void) {
       bk->items[j] = key;
     }
   }
-  g_m1_dispatch_ready = 1;
+}
+
+static void m1_dispatch_init(void) {
+  pthread_once(&g_m1_dispatch_once, m1_dispatch_init_once);
 }
 
 static int match_fixed_piece(const uint8_t *data,
