@@ -1009,23 +1009,22 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
   return out_e;
 }
 
-static int wire_append_cstr(Buffer *buf, const char *s) {
+static void wire_append_cstr(Buffer *buf, const char *s) {
   if(!s) s = "";
   uint32_t len = (uint32_t)strlen(s);
-  if(wire_append_u32(buf, len) != 0) return -1;
-  return buffer_append(buf, s, len);
+  wire_append_u32(buf, len);
+  buffer_append(buf, s, len);
 }
 
-static char *wire_read_cstr(const uint8_t **cursor, const uint8_t *end) {
-  if((size_t)(end - *cursor) < 4u) return NULL;
-  uint32_t len = wire_read_u32(*cursor);
-  *cursor += 4u;
-  if((size_t)(end - *cursor) < len) return NULL;
+static char *wire_read_cstr(const unsigned char *bytes, size_t total_len, size_t *offset) {
+  uint32_t len = 0;
+  if(!wire_read_u32(bytes, total_len, offset, &len)) return NULL;
+  if(len > total_len - *offset) return NULL;
   char *out = malloc((size_t)len + 1u);
   if(!out) return NULL;
-  if(len > 0) memcpy(out, *cursor, len);
+  if(len > 0) memcpy(out, bytes + *offset, len);
   out[len] = '\0';
-  *cursor += len;
+  *offset += len;
   return out;
 }
 
@@ -1033,57 +1032,52 @@ int engine_save_snapshot(const OyezEngine *engine, const char *path) {
   if(!engine || !path) return -1;
   Buffer buf;
   buffer_init(&buf);
-  if(buffer_append(&buf, "OYEZIX01", 8u) != 0) goto fail;
-  if(wire_append_u32(&buf, (uint32_t)engine->feed_count) != 0) goto fail;
-  if(wire_append_u32(&buf, (uint32_t)engine->article_count) != 0) goto fail;
+  buffer_append(&buf, "OYEZIX01", 8u);
+  wire_append_u32(&buf, (uint32_t)engine->feed_count);
+  wire_append_u32(&buf, (uint32_t)engine->article_count);
 
   for(size_t i = 0; i < engine->feed_count; ++i) {
     const FeedRecord *f = &engine->feeds[i];
-    if(wire_append_u32(&buf, f->id) != 0 ||
-       wire_append_cstr(&buf, f->title) != 0 ||
-       wire_append_cstr(&buf, f->feed_url) != 0 ||
-       wire_append_cstr(&buf, f->site_url) != 0 ||
-       wire_append_cstr(&buf, f->category) != 0 ||
-       wire_append_u32(&buf, (uint32_t)f->region) != 0 ||
-       wire_append_cstr(&buf, f->country) != 0 ||
-       wire_append_cstr(&buf, f->subregion) != 0 ||
-       wire_append_cstr(&buf, f->language) != 0 ||
-       wire_append_cstr(&buf, f->source_tier) != 0 ||
-       wire_append_cstr(&buf, f->editorial_focus) != 0) {
-      goto fail;
-    }
+    wire_append_u32(&buf, f->id);
+    wire_append_cstr(&buf, f->title);
+    wire_append_cstr(&buf, f->feed_url);
+    wire_append_cstr(&buf, f->site_url);
+    wire_append_cstr(&buf, f->category);
+    wire_append_u32(&buf, (uint32_t)f->region);
+    wire_append_cstr(&buf, f->country);
+    wire_append_cstr(&buf, f->subregion);
+    wire_append_cstr(&buf, f->language);
+    wire_append_cstr(&buf, f->source_tier);
+    wire_append_cstr(&buf, f->editorial_focus);
   }
 
   for(size_t i = 0; i < engine->article_count; ++i) {
     const ArticleRecord *a = &engine->articles[i];
-    if(wire_append_u32(&buf, a->feed_id) != 0 ||
-       wire_append_cstr(&buf, a->guid) != 0 ||
-       wire_append_cstr(&buf, a->title) != 0 ||
-       wire_append_cstr(&buf, a->url) != 0 ||
-       wire_append_cstr(&buf, a->author) != 0 ||
-       wire_append_cstr(&buf, a->summary) != 0 ||
-       wire_append_cstr(&buf, a->content_html) != 0 ||
-       wire_append_cstr(&buf, a->published_at) != 0 ||
-       wire_append_u64(&buf, a->published_ms) != 0 ||
-       wire_append_cstr(&buf, a->image_url) != 0) {
-      goto fail;
-    }
+    wire_append_u32(&buf, a->feed_id);
+    wire_append_cstr(&buf, a->guid);
+    wire_append_cstr(&buf, a->title);
+    wire_append_cstr(&buf, a->url);
+    wire_append_cstr(&buf, a->author);
+    wire_append_cstr(&buf, a->summary);
+    wire_append_cstr(&buf, a->content_html);
+    wire_append_cstr(&buf, a->published_at);
+    wire_append_u64(&buf, a->published_ms);
+    wire_append_cstr(&buf, a->image_url);
   }
 
   uint32_t crc = checksum_crc32(buf.data, buf.len);
-  if(wire_append_u32(&buf, crc) != 0) goto fail;
+  wire_append_u32(&buf, crc);
 
   FILE *fp = fopen(path, "wb");
-  if(!fp) goto fail;
+  if(!fp) {
+    buffer_free(&buf);
+    return -1;
+  }
   size_t written = fwrite(buf.data, 1u, buf.len, fp);
   fclose(fp);
   size_t expected = buf.len;
   buffer_free(&buf);
   return written == expected ? 0 : -1;
-
-fail:
-  buffer_free(&buf);
-  return -1;
 }
 
 int engine_load_snapshot(OyezEngine *engine, const char *path) {
@@ -1099,7 +1093,7 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     fclose(fp);
     return -1;
   }
-  uint8_t *bytes = malloc((size_t)sz);
+  unsigned char *bytes = malloc((size_t)sz);
   if(!bytes) {
     fclose(fp);
     return -1;
@@ -1112,7 +1106,9 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
   fclose(fp);
 
   size_t payload_len = (size_t)sz - 4u;
-  uint32_t stored_crc = wire_read_u32(bytes + payload_len);
+  size_t crc_off = payload_len;
+  uint32_t stored_crc = 0;
+  wire_read_u32(bytes, (size_t)sz, &crc_off, &stored_crc);
   if(stored_crc != checksum_crc32(bytes, payload_len) || memcmp(bytes, "OYEZIX01", 8u) != 0) {
     free(bytes);
     return -1;
@@ -1121,32 +1117,31 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
   engine_free(engine);
   engine_init(engine);
 
-  const uint8_t *cursor = bytes + 8u;
-  const uint8_t *end = bytes + payload_len;
-  uint32_t fcount = wire_read_u32(cursor);
-  cursor += 4u;
-  uint32_t acount = wire_read_u32(cursor);
-  cursor += 4u;
+  size_t off = 8u;
+  uint32_t fcount = 0;
+  uint32_t acount = 0;
+  if(!wire_read_u32(bytes, payload_len, &off, &fcount) ||
+     !wire_read_u32(bytes, payload_len, &off, &acount)) {
+    goto fail;
+  }
 
   for(uint32_t i = 0; i < fcount; ++i) {
-    if((size_t)(end - cursor) < 4u) goto fail;
-    uint32_t fid = wire_read_u32(cursor);
-    cursor += 4u;
-    char *title = wire_read_cstr(&cursor, end);
-    char *furl = wire_read_cstr(&cursor, end);
-    char *surl = wire_read_cstr(&cursor, end);
-    char *cat = wire_read_cstr(&cursor, end);
-    if((size_t)(end - cursor) < 4u) {
+    uint32_t fid = 0;
+    if(!wire_read_u32(bytes, payload_len, &off, &fid)) goto fail;
+    char *title = wire_read_cstr(bytes, payload_len, &off);
+    char *furl = wire_read_cstr(bytes, payload_len, &off);
+    char *surl = wire_read_cstr(bytes, payload_len, &off);
+    char *cat = wire_read_cstr(bytes, payload_len, &off);
+    uint32_t reg = 0;
+    if(!wire_read_u32(bytes, payload_len, &off, &reg)) {
       free(title); free(furl); free(surl); free(cat);
       goto fail;
     }
-    uint32_t reg = wire_read_u32(cursor);
-    cursor += 4u;
-    char *country = wire_read_cstr(&cursor, end);
-    char *subreg = wire_read_cstr(&cursor, end);
-    char *lang = wire_read_cstr(&cursor, end);
-    char *tier = wire_read_cstr(&cursor, end);
-    char *focus = wire_read_cstr(&cursor, end);
+    char *country = wire_read_cstr(bytes, payload_len, &off);
+    char *subreg = wire_read_cstr(bytes, payload_len, &off);
+    char *lang = wire_read_cstr(bytes, payload_len, &off);
+    char *tier = wire_read_cstr(bytes, payload_len, &off);
+    char *focus = wire_read_cstr(bytes, payload_len, &off);
     if(!title || !furl || !surl || !cat || !country || !subreg || !lang || !tier || !focus) {
       free(title); free(furl); free(surl); free(cat);
       free(country); free(subreg); free(lang); free(tier); free(focus);
@@ -1164,23 +1159,21 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
   }
 
   for(uint32_t i = 0; i < acount; ++i) {
-    if((size_t)(end - cursor) < 4u) goto fail;
-    uint32_t fid = wire_read_u32(cursor);
-    cursor += 4u;
-    char *guid = wire_read_cstr(&cursor, end);
-    char *title = wire_read_cstr(&cursor, end);
-    char *url = wire_read_cstr(&cursor, end);
-    char *author = wire_read_cstr(&cursor, end);
-    char *summary = wire_read_cstr(&cursor, end);
-    char *chtml = wire_read_cstr(&cursor, end);
-    char *pub_at = wire_read_cstr(&cursor, end);
-    if((size_t)(end - cursor) < 8u) {
+    uint32_t fid = 0;
+    if(!wire_read_u32(bytes, payload_len, &off, &fid)) goto fail;
+    char *guid = wire_read_cstr(bytes, payload_len, &off);
+    char *title = wire_read_cstr(bytes, payload_len, &off);
+    char *url = wire_read_cstr(bytes, payload_len, &off);
+    char *author = wire_read_cstr(bytes, payload_len, &off);
+    char *summary = wire_read_cstr(bytes, payload_len, &off);
+    char *chtml = wire_read_cstr(bytes, payload_len, &off);
+    char *pub_at = wire_read_cstr(bytes, payload_len, &off);
+    uint64_t pub_ms = 0;
+    if(!wire_read_u64(bytes, payload_len, &off, &pub_ms)) {
       free(guid); free(title); free(url); free(author); free(summary); free(chtml); free(pub_at);
       goto fail;
     }
-    uint64_t pub_ms = wire_read_u64(cursor);
-    cursor += 8u;
-    char *img = wire_read_cstr(&cursor, end);
+    char *img = wire_read_cstr(bytes, payload_len, &off);
     if(!guid || !title || !url || !author || !summary || !chtml || !pub_at || !img) {
       free(guid); free(title); free(url); free(author); free(summary); free(chtml); free(pub_at); free(img);
       goto fail;

@@ -15,6 +15,15 @@ typedef struct {
 } Buffer;
 
 void *allocate(size_t count, size_t size);
+static inline void buffer_init(Buffer *buffer)
+{
+    if (!buffer) return;
+    buffer->data = NULL;
+    buffer->len = 0;
+    buffer->capacity = 0;
+    buffer->fixed = false;
+    buffer->truncated = false;
+}
 void buffer_attach(Buffer *buffer, char *data, size_t capacity);
 void buffer_append(Buffer *buffer, const void *data, size_t length);
 void buffer_text(Buffer *buffer, const char *text);

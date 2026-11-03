@@ -54,7 +54,8 @@ static int append_utf8_codepoint(Buffer *out, uint32_t cp) {
   } else {
     return 0;
   }
-  return buffer_append(out, u, n);
+  buffer_append(out, u, n);
+  return 0;
 }
 
 typedef struct {
@@ -113,7 +114,7 @@ int markup_decode_entities(const char *input, size_t len, Buffer *out) {
             }
           }
           if(valid && cp > 0) {
-            if(append_utf8_codepoint(out, cp) != 0) return -1;
+            append_utf8_codepoint(out, cp);
             i = semi + 1u;
             continue;
           }
@@ -121,7 +122,7 @@ int markup_decode_entities(const char *input, size_t len, Buffer *out) {
           int matched = 0;
           for(size_t m = 0; m < sizeof(k_entities) / sizeof(k_entities[0]); ++m) {
             if(ci_equals(ent, elen, k_entities[m].name)) {
-              if(buffer_text(out, k_entities[m].val) != 0) return -1;
+              buffer_text(out, k_entities[m].val);
               matched = 1;
               break;
             }
@@ -133,7 +134,7 @@ int markup_decode_entities(const char *input, size_t len, Buffer *out) {
         }
       }
     }
-    if(buffer_append(out, input + i, 1u) != 0) return -1;
+    buffer_append(out, input + i, 1u);
     i++;
   }
   return 0;
@@ -145,11 +146,11 @@ static int append_normalized_ws(Buffer *out, const char *s, size_t len) {
     unsigned char c = (unsigned char)s[i];
     if(isspace(c)) {
       if(!prev_space) {
-        if(buffer_append(out, " ", 1u) != 0) return -1;
+        buffer_append(out, " ", 1u);
         prev_space = 1;
       }
     } else {
-      if(buffer_append(out, (const char *)&c, 1u) != 0) return -1;
+      buffer_append(out, (const char *)&c, 1u);
       prev_space = 0;
     }
   }
@@ -171,10 +172,15 @@ int markup_strip_html(const char *html, size_t len, Buffer *out) {
     if(i + 9u <= len && memcmp(html + i, "<![CDATA[", 9u) == 0) {
       const char *end = ci_find(html + i + 9u, len - (i + 9u), "]]>");
       if(end) {
-        if(buffer_append(&raw, html + i + 9u, (size_t)(end - (html + i + 9u))) != 0) {
-          buffer_free(&raw);
-          return -1;
+        Buffer sub;
+        buffer_init(&sub);
+        markup_strip_html(html + i + 9u, (size_t)(end - (html + i + 9u)), &sub);
+        if(sub.len > 0) {
+          buffer_append(&raw, " ", 1u);
+          buffer_append(&raw, sub.data, sub.len);
+          buffer_append(&raw, " ", 1u);
         }
+        buffer_free(&sub);
         i = (size_t)((end + 3u) - html);
         continue;
       }
@@ -204,18 +210,25 @@ int markup_strip_html(const char *html, size_t len, Buffer *out) {
       size_t close = i + 1u;
       while(close < len && html[close] != '>') close++;
       if(close < len) {
-        if(buffer_append(&raw, " ", 1u) != 0) {
-          buffer_free(&raw);
-          return -1;
+        size_t tlen = close - (i + 1u);
+        const char *ts = html + i + 1u;
+        if(tlen > 0 && ts[0] == '/') {
+          ts++;
+          tlen--;
+        }
+        int is_inline = (ci_equals(ts, tlen, "b") || ci_equals(ts, tlen, "i") ||
+                         ci_equals(ts, tlen, "strong") || ci_equals(ts, tlen, "em") ||
+                         ci_equals(ts, tlen, "span") || ci_equals(ts, tlen, "u") ||
+                         ci_equals(ts, tlen, "code") || ci_equals(ts, tlen, "sub") ||
+                         ci_equals(ts, tlen, "sup") || ci_starts_with(ts, tlen, "a "));
+        if(!is_inline) {
+          buffer_append(&raw, " ", 1u);
         }
         i = close + 1u;
         continue;
       }
     }
-    if(buffer_append(&raw, html + i, 1u) != 0) {
-      buffer_free(&raw);
-      return -1;
-    }
+    buffer_append(&raw, html + i, 1u);
     i++;
   }
 

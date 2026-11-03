@@ -122,7 +122,7 @@ static const M1FixedPiece k_landmark_pieces[M1_LANDMARK_COUNT] = {
     PIECE("ORDER BY", M1_BOUNDARY_IDENT),
     PIECE("INSERT INTO", M1_BOUNDARY_IDENT),
     PIECE("VALUES", M1_BOUNDARY_IDENT),
-    PIECE("", M1_BOUNDARY_NONE), /* M1_CTRL_FIM_MID */
+    PIECE("", M1_BOUNDARY_NONE),
 };
 
 static const char *const k_control_names[M1_CONTROL_COUNT] = {
@@ -239,9 +239,16 @@ static int append_bpe_span(const M1Tokenizer *tokenizer,
                            size_t *count,
                            size_t *cap) {
   if(span_len == 0) return 0;
+  if(!token_valid(&tokenizer->bpe)) {
+    for(size_t i = 0; i < span_len; ++i) {
+      if(push_token_vec(items, count, cap, span[i]) != 0) return -1;
+    }
+    return 0;
+  }
   uint32_t *encoded = NULL;
   size_t encoded_count = 0;
-  if(tokenizer_encode(&tokenizer->bpe, span, span_len, &encoded, &encoded_count) != 0) return -1;
+  char err[256];
+  if(!token_encode(&tokenizer->bpe, span, span_len, &encoded, &encoded_count, err)) return -1;
   for(size_t i = 0; i < encoded_count; ++i) {
     uint32_t mapped = encoded[i] < 256u
                           ? encoded[i]
@@ -273,19 +280,9 @@ static int build_bpe_training_buffer(const uint8_t *data, size_t len, Buffer *ou
       size_t piece_len = 0;
       if(match_fixed_piece(data, train_end, pos, &token, &piece_len)) {
         (void)token;
-        if(out->len > 0 && out->data[out->len - 1u] != '\0') {
-          char sep = '\0';
-          if(buffer_append(out, &sep, 1u) != 0) {
-            buffer_free(out);
-            return -1;
-          }
-        }
         pos += piece_len;
       } else {
-        if(buffer_append(out, (const char *)(data + pos), 1u) != 0) {
-          buffer_free(out);
-          return -1;
-        }
+        buffer_append(out, data + pos, 1u);
         pos++;
       }
     }
@@ -295,14 +292,13 @@ static int build_bpe_training_buffer(const uint8_t *data, size_t len, Buffer *ou
 
 void m1_tokenizer_init(M1Tokenizer *tokenizer) {
   memset(tokenizer, 0, sizeof(*tokenizer));
-  tokenizer_init(&tokenizer->bpe);
   tokenizer->target_vocab_size = M1_FIXED_VOCAB_SIZE;
   sha256_hex("oyez.m1.tokenizer.empty", 23u, tokenizer->sha256);
 }
 
 void m1_tokenizer_free(M1Tokenizer *tokenizer) {
   if(!tokenizer) return;
-  tokenizer_free(&tokenizer->bpe);
+  token_free(&tokenizer->bpe);
   memset(tokenizer, 0, sizeof(*tokenizer));
 }
 
@@ -318,17 +314,27 @@ int m1_tokenizer_train(M1Tokenizer *tokenizer, const uint8_t *data, size_t len, 
   uint32_t bpe_merges = vocab_size - M1_FIXED_VOCAB_SIZE;
   Buffer filtered;
   if(build_bpe_training_buffer(data, len, &filtered) != 0) return -1;
-  int rc = tokenizer_train(&tokenizer->bpe,
-                           (const uint8_t *)(filtered.data ? filtered.data : ""),
-                           filtered.len,
-                           256u + bpe_merges);
+
+  TokenTrainConfig cfg = token_train_config_default();
+  cfg.target_vocab = 256u + bpe_merges;
+  cfg.min_frequency = 2u;
+  char err[256];
+  bool ok = token_train(&tokenizer->bpe,
+                        filtered.data ? filtered.data : "",
+                        filtered.len,
+                        NULL,
+                        0u,
+                        NULL,
+                        0u,
+                        &cfg,
+                        err);
   buffer_free(&filtered);
-  return rc;
+  return ok ? 0 : -1;
 }
 
 uint32_t m1_tokenizer_vocab_size(const M1Tokenizer *tokenizer) {
   if(!tokenizer) return 0;
-  uint32_t learned = tokenizer->bpe.vocab_size > 256u ? (tokenizer->bpe.vocab_size - 256u) : 0u;
+  uint32_t learned = tokenizer->bpe.vocab > 256u ? (tokenizer->bpe.vocab - 256u) : 0u;
   return M1_FIXED_VOCAB_SIZE + learned;
 }
 
@@ -407,19 +413,13 @@ int m1_tokenizer_decode(const M1Tokenizer *tokenizer,
     }
     if(token < 256u) {
       char byte = (char)token;
-      if(buffer_append(&buf, &byte, 1u) != 0) {
-        buffer_free(&buf);
-        return -1;
-      }
+      buffer_append(&buf, &byte, 1u);
       continue;
     }
 
     const M1FixedPiece *piece = fixed_piece_for_token(token);
     if(piece && token != M1_CTRL_FIM_MID) {
-      if(buffer_append(&buf, piece->text, piece->len) != 0) {
-        buffer_free(&buf);
-        return -1;
-      }
+      buffer_append(&buf, piece->text, piece->len);
       continue;
     }
 
@@ -428,12 +428,12 @@ int m1_tokenizer_decode(const M1Tokenizer *tokenizer,
     }
 
     uint32_t bpe_token = 256u + (token - M1_FIXED_VOCAB_SIZE);
-    if(bpe_token >= tokenizer->bpe.vocab_size) {
+    if(bpe_token >= tokenizer->bpe.vocab) {
       buffer_free(&buf);
       return -1;
     }
-    TokenSpan span = tokenizer->bpe.spans[bpe_token];
-    if(buffer_append(&buf, (const char *)(tokenizer->bpe.arena + span.offset), span.length) != 0) {
+    char err[256];
+    if(!token_decode(&tokenizer->bpe, &bpe_token, 1u, &buf, err)) {
       buffer_free(&buf);
       return -1;
     }
@@ -451,37 +451,30 @@ int m1_tokenizer_decode(const M1Tokenizer *tokenizer,
   return 0;
 }
 
-static int serialize_m1_payload(const M1Tokenizer *tokenizer, Buffer *buf) {
-  buffer_init(buf);
-  if(buffer_append(buf, "OYEZMT02", 8u) != 0) goto fail;
-  if(wire_append_u32(buf, tokenizer->target_vocab_size) != 0) goto fail;
-  if(wire_append_u32(buf, m1_tokenizer_vocab_size(tokenizer)) != 0) goto fail;
-  if(wire_append_u32(buf, tokenizer->bpe.merge_count) != 0) goto fail;
-  for(uint32_t i = 0; i < tokenizer->bpe.merge_count; ++i) {
-    if(wire_append_u32(buf, tokenizer->bpe.merges[i].left) != 0 ||
-       wire_append_u32(buf, tokenizer->bpe.merges[i].right) != 0) {
-      goto fail;
-    }
-  }
-  return 0;
-
-fail:
-  buffer_free(buf);
-  return -1;
-}
-
 int m1_tokenizer_save(M1Tokenizer *tokenizer, const char *path) {
   if(!tokenizer || !path) return -1;
+  Buffer bpe_buf;
+  buffer_init(&bpe_buf);
+  if(token_valid(&tokenizer->bpe)) {
+    if(!token_save(&tokenizer->bpe, &bpe_buf)) {
+      buffer_free(&bpe_buf);
+      return -1;
+    }
+  }
+
   Buffer payload;
-  if(serialize_m1_payload(tokenizer, &payload) != 0) return -1;
+  buffer_init(&payload);
+  buffer_append(&payload, "OYEZMT02", 8u);
+  wire_append_u32(&payload, tokenizer->target_vocab_size);
+  wire_append_u32(&payload, (uint32_t)bpe_buf.len);
+  if(bpe_buf.len > 0) buffer_append(&payload, bpe_buf.data, bpe_buf.len);
+  buffer_free(&bpe_buf);
 
   char digest[65];
   sha256_hex(payload.data, payload.len, digest);
   uint32_t crc = checksum_crc32(payload.data, payload.len);
-  if(buffer_append(&payload, digest, 64u) != 0 || wire_append_u32(&payload, crc) != 0) {
-    buffer_free(&payload);
-    return -1;
-  }
+  buffer_append(&payload, digest, 64u);
+  wire_append_u32(&payload, crc);
 
   FILE *fp = fopen(path, "wb");
   if(!fp) {
@@ -490,8 +483,9 @@ int m1_tokenizer_save(M1Tokenizer *tokenizer, const char *path) {
   }
   size_t written = fwrite(payload.data, 1u, payload.len, fp);
   fclose(fp);
+  size_t expected = payload.len;
   buffer_free(&payload);
-  if(written != payload.len) return -1;
+  if(written != expected) return -1;
   memcpy(tokenizer->sha256, digest, 65u);
   return 0;
 }
@@ -505,12 +499,12 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
     return -1;
   }
   long size = ftell(fp);
-  if(size < 88 || fseek(fp, 0, SEEK_SET) != 0) {
+  if(size < 84 || fseek(fp, 0, SEEK_SET) != 0) {
     fclose(fp);
     return -1;
   }
 
-  uint8_t *bytes = malloc((size_t)size);
+  unsigned char *bytes = malloc((size_t)size);
   if(!bytes) {
     fclose(fp);
     return -1;
@@ -526,7 +520,9 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
   char stored_sha[65];
   memcpy(stored_sha, bytes + payload_len, 64u);
   stored_sha[64] = '\0';
-  uint32_t stored_crc = wire_read_u32(bytes + payload_len + 64u);
+  size_t crc_off = payload_len + 64u;
+  uint32_t stored_crc = 0;
+  wire_read_u32(bytes, (size_t)size, &crc_off, &stored_crc);
   char actual_sha[65];
   sha256_hex(bytes, payload_len, actual_sha);
   if(memcmp(stored_sha, actual_sha, 64u) != 0 ||
@@ -536,12 +532,12 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
     return -1;
   }
 
-  uint32_t target_vocab = wire_read_u32(bytes + 8u);
-  uint32_t total_vocab = wire_read_u32(bytes + 12u);
-  uint32_t merge_count = wire_read_u32(bytes + 16u);
-  if(target_vocab < M1_FIXED_VOCAB_SIZE || target_vocab > M1_DEFAULT_VOCAB_SIZE ||
-     total_vocab != M1_FIXED_VOCAB_SIZE + merge_count ||
-     20u + (size_t)merge_count * 8u != payload_len) {
+  size_t off = 8u;
+  uint32_t target_vocab = 0;
+  uint32_t bpe_len = 0;
+  if(!wire_read_u32(bytes, payload_len, &off, &target_vocab) ||
+     !wire_read_u32(bytes, payload_len, &off, &bpe_len) ||
+     off + bpe_len != payload_len) {
     free(bytes);
     return -1;
   }
@@ -549,19 +545,10 @@ int m1_tokenizer_load(M1Tokenizer *tokenizer, const char *path) {
   m1_tokenizer_free(tokenizer);
   m1_tokenizer_init(tokenizer);
   tokenizer->target_vocab_size = target_vocab;
-  const uint8_t *cursor = bytes + 20u;
-  for(uint32_t i = 0; i < merge_count; ++i) {
-    uint32_t left = wire_read_u32(cursor);
-    uint32_t right = wire_read_u32(cursor + 4u);
-    cursor += 8u;
-    if(left >= tokenizer->bpe.vocab_size || right >= tokenizer->bpe.vocab_size) {
+  if(bpe_len > 0) {
+    char err[256];
+    if(!token_load(&tokenizer->bpe, bytes + off, bpe_len, err)) {
       free(bytes);
-      m1_tokenizer_free(tokenizer);
-      return -1;
-    }
-    if(tokenizer_append_merge(&tokenizer->bpe, left, right) != 0) {
-      free(bytes);
-      m1_tokenizer_free(tokenizer);
       return -1;
     }
   }

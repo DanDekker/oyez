@@ -217,9 +217,7 @@ void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores) 
       uint32_t sub = ctz64((uint64_t)ideal);
       double raw = raw_scores[sub];
       if(raw > 0.0) {
-        uint32_t dist = popcnt64((uint64_t)(g_ontology[sub].upward_mask & g_ontology[c].downward_mask));
-        double attenuation = dist <= 1u ? 1.0 : (1.0 / (1.0 + 0.25 * (double)(dist - 1u)));
-        sum += raw * attenuation;
+        sum += raw;
       }
       ideal &= (ideal - 1u);
     }

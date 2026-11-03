@@ -40,11 +40,7 @@ int http_fetch_url(const char *url, Buffer *out) {
   char chunk[8192];
   size_t r = 0;
   while((r = fread(chunk, 1u, sizeof(chunk), pipe)) > 0) {
-    if(buffer_append(out, chunk, r) != 0) {
-      pclose(pipe);
-      buffer_free(out);
-      return -1;
-    }
+    buffer_append(out, chunk, r);
     if(out->len > 8u * 1024u * 1024u) break;
   }
   int status = pclose(pipe);
