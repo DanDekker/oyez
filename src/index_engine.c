@@ -40,7 +40,7 @@ static char *arena_strdup(OyezEngine *engine, const char *s) {
   if(!blk || blk->cap - blk->used < need) {
     size_t bcap = need > (ARENA_BLOCK_DEFAULT_CAP / 2u) ? (need * 2u) : ARENA_BLOCK_DEFAULT_CAP;
     blk = malloc(sizeof(struct StringArenaBlock) + bcap);
-    if(!blk) return dup_str(s);
+    if(!blk) return (char *)"";
     blk->next = engine->arena_head;
     blk->used = 0;
     blk->cap = bcap;
@@ -708,6 +708,7 @@ int engine_ingest_article(OyezEngine *engine,
   a->summary = arena_strdup(engine, summary ? summary : "");
   a->content_html = arena_strdup(engine, content_html ? content_html : "");
   a->content_text = markup_clean_cstr((content_html && content_html[0]) ? content_html : summary);
+  if(!a->content_text) a->content_text = dup_str("");
   a->published_at = arena_strdup(engine, published_at ? published_at : "2026-11-03T00:00:00Z");
   a->published_ms = published_ms > 0 ? published_ms : wall_time_ms();
   a->image_url = arena_strdup(engine, image_url ? image_url : "");
@@ -778,7 +779,7 @@ int engine_ingest_article(OyezEngine *engine,
 
   uint32_t words = 0;
   int in_w = 0;
-  for(const char *p = a->content_text; *p; ++p) {
+  for(const char *p = a->content_text ? a->content_text : ""; *p; ++p) {
     if(isspace((unsigned char)*p)) in_w = 0;
     else if(!in_w) {
       in_w = 1;
@@ -790,6 +791,7 @@ int engine_ingest_article(OyezEngine *engine,
 
   index_article_record(engine, a);
   feed->article_count++;
+  pthread_mutex_lock(&engine->cache_lock);
   engine->index_generation++;
   for(size_t c = 0; c < 64u; ++c) {
     if(engine->query_cache[c].valid) {
@@ -800,6 +802,7 @@ int engine_ingest_article(OyezEngine *engine,
       engine->query_cache[c].valid = 0;
     }
   }
+  pthread_mutex_unlock(&engine->cache_lock);
 
   if(out_article_id) *out_article_id = a->id;
   if(out_inserted) *out_inserted = 1;
@@ -860,8 +863,11 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   h ^= mix64(fnv1a64_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
   h ^= mix64(fnv1a64_cstr(q->language ? q->language : "") + 11u);
   h ^= mix64(fnv1a64_cstr(q->source_tier ? q->source_tier : "") + 12u);
+  uint64_t mmr_bits = (q->mmr_lambda > 0.0 && q->mmr_lambda <= 1.0)
+                          ? (uint64_t)(q->mmr_lambda * 10000.0 + 0.5)
+                          : 6500ULL;
   h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)q->use_category_morphism << 16u) |
-             (uint64_t)q->diversify_mmr);
+             ((uint64_t)q->diversify_mmr << 15u) | (mmr_bits & 0x7FFFULL));
   h ^= mix64(((uint64_t)q->limit << 32u) | (uint64_t)q->offset);
   return h;
 }
@@ -1165,6 +1171,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
   qsort(pool, pool_count, sizeof(ScoredArticle), compare_scored_desc);
 
   size_t limit = q->limit > 0 ? q->limit : 50u;
+  if(limit > 500u) limit = 500u;
   size_t offset = q->offset;
   out->total = pool_count;
 
@@ -2339,19 +2346,40 @@ int engine_save_snapshot(const OyezEngine *engine, const char *path) {
     wire_append_cstr(&buf, a->image_url);
   }
 
+  if(buf.truncated || !buf.data) {
+    buffer_free(&buf);
+    return -1;
+  }
   uint32_t crc = checksum_crc32(buf.data, buf.len);
   wire_append_u32(&buf, crc);
+  if(buf.truncated || !buf.data) {
+    buffer_free(&buf);
+    return -1;
+  }
 
-  FILE *fp = fopen(path, "wb");
+  char tmp_path[1024];
+  int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+  const char *write_path = (tn > 0 && (size_t)tn < sizeof(tmp_path)) ? tmp_path : path;
+
+  FILE *fp = fopen(write_path, "wb");
   if(!fp) {
     buffer_free(&buf);
     return -1;
   }
   size_t written = fwrite(buf.data, 1u, buf.len, fp);
+  int flush_rc = fflush(fp);
   fclose(fp);
   size_t expected = buf.len;
   buffer_free(&buf);
-  return written == expected ? 0 : -1;
+  if(written != expected || flush_rc != 0) {
+    if(write_path == tmp_path) remove(tmp_path);
+    return -1;
+  }
+  if(write_path == tmp_path && rename(tmp_path, path) != 0) {
+    remove(tmp_path);
+    return -1;
+  }
+  return 0;
 }
 
 int engine_load_snapshot(OyezEngine *engine, const char *path) {
@@ -2363,7 +2391,7 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     return -1;
   }
   long sz = ftell(fp);
-  if(sz < 20 || fseek(fp, 0, SEEK_SET) != 0) {
+  if(sz < 20 || sz > 256L * 1024L * 1024L || fseek(fp, 0, SEEK_SET) != 0) {
     fclose(fp);
     return -1;
   }
@@ -2395,7 +2423,8 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
   uint32_t fcount = 0;
   uint32_t acount = 0;
   if(!wire_read_u32(bytes, payload_len, &off, &fcount) ||
-     !wire_read_u32(bytes, payload_len, &off, &acount)) {
+     !wire_read_u32(bytes, payload_len, &off, &acount) ||
+     fcount > 100000u || acount > 1000000u) {
     goto fail;
   }
 
@@ -2461,6 +2490,8 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
   return 0;
 
 fail:
+  engine_free(engine);
+  engine_init(engine);
   free(bytes);
   return -1;
 }
