@@ -93,5 +93,8 @@ int m1_sequence_assistant(M1Sequence *seq,
                           const char *final_text,
                           size_t final_len,
                           uint8_t include_thought_loss);
+uint64_t m1_structural_sketch64(const char *text,
+                                size_t len,
+                                uint32_t *out_landmark_hits);
 
 #endif

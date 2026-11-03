@@ -878,3 +878,55 @@ int m1_sequence_assistant(M1Sequence *seq,
   if(m1_sequence_push_token(seq, M1_CTRL_FINAL, 0u) != 0) return -1;
   return m1_sequence_append_text(seq, tokenizer, final_text, final_len, 1u);
 }
+
+uint64_t m1_structural_sketch64(const char *text,
+                                size_t len,
+                                uint32_t *out_landmark_hits) {
+  if(out_landmark_hits) *out_landmark_hits = 0u;
+  if(!text || len == 0) return 0ULL;
+  m1_dispatch_init();
+
+  int32_t acc[64] = {0};
+  uint32_t landmarks = 0u;
+  const uint8_t *bytes = (const uint8_t *)text;
+  size_t pos = 0;
+
+  while(pos < len) {
+    uint32_t tok = 0;
+    size_t consumed = 0;
+    if(match_fixed_piece(bytes, len, pos, &tok, &consumed)) {
+      int32_t w = 2;
+      if(tok >= M1_LANDMARK_BASE && tok < M1_CONTROL_BASE) {
+        w = 5;
+        landmarks++;
+      }
+      uint64_t h = (uint64_t)tok * 0x9E3779B97F4A7C15ULL;
+      h ^= h >> 30u;
+      h *= 0xBF58476D1CE4E5B9ULL;
+      h ^= h >> 27u;
+      for(int b = 0; b < 64; ++b) {
+        acc[b] += ((h >> b) & 1ULL) ? w : -w;
+      }
+      pos += consumed;
+    } else {
+      if(pos + 3u <= len && bytes[pos] > 32u) {
+        uint32_t tri = ((uint32_t)(bytes[pos] | 0x20u) << 16u) |
+                       ((uint32_t)(bytes[pos + 1u] | 0x20u) << 8u) |
+                       (uint32_t)(bytes[pos + 2u] | 0x20u);
+        uint64_t h = (uint64_t)tri * 0x94D049BB133111EBULL;
+        h ^= h >> 31u;
+        for(int b = 0; b < 64; ++b) {
+          acc[b] += ((h >> b) & 1ULL) ? 1 : -1;
+        }
+      }
+      pos++;
+    }
+  }
+
+  if(out_landmark_hits) *out_landmark_hits = landmarks;
+  uint64_t sketch = 0ULL;
+  for(int b = 0; b < 64; ++b) {
+    if(acc[b] > 0) sketch |= (1ULL << b);
+  }
+  return sketch;
+}
