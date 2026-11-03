@@ -563,6 +563,7 @@ uint32_t ontology_meet_mask(OntologyNodeId a, OntologyNodeId b) {
 }
 
 void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores) {
+  if(!raw_scores || !out_kan_scores) return;
   ontology_init();
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     uint32_t ideal = g_ontology[c].downward_mask;
@@ -580,6 +581,7 @@ void ontology_left_kan_extend(const double *raw_scores, double *out_kan_scores) 
 }
 
 void ontology_right_kan_extend(const double *raw_scores, double *out_ran_scores) {
+  if(!raw_scores || !out_ran_scores) return;
   ontology_init();
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     uint32_t filter = g_ontology[c].upward_mask;
@@ -604,6 +606,7 @@ void ontology_mobius_invert(const double *kan_section, double *out_fundamental) 
   /* Rota's Mobius Inversion over the Poset Ideal Zeta Function:
    * Given g(c) = (Lan_iota f)(c) = sum_{u <= c} f(u),
    * recover f(c) = sum_{u <= c} g(u) * mu(u, c). */
+  if(!kan_section || !out_fundamental) return;
   ontology_init();
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     uint32_t ideal = g_ontology[c].downward_mask;
@@ -1108,12 +1111,13 @@ void ontology_adjunction_monad(const double *raw_fiber_counts,
   double ent = 0.0;
   if(total_kleisli > 0.0) {
     for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-      if(lan[c] <= 0.0) continue;
+      if(!(lan[c] > 0.0)) continue;
       double p = lan[c] / total_kleisli;
+      if(!(p > 1e-18 && p <= 1.0)) continue;
       /* 3-term Pade log(p) via y = (p - 1) / (p + 1) after binary exponent reduction */
       double m = p;
       int exp2 = 0;
-      while(m < 0.70710678) {
+      while(m < 0.70710678 && exp2 > -64) {
         m *= 2.0;
         exp2--;
       }
@@ -1146,7 +1150,7 @@ static void compute_char_mask(const char *s, size_t len, WordBloomIndex *wb) {
     unsigned char c0 = (unsigned char)s[i];
     if(!isalnum(c0)) continue;
     wb->char0_mask |= (1ULL << (c0 & 63u));
-    if(wb->word_count < 2048u) {
+    if(wb->word_count < 2048u && i <= 0xFFFEu) {
       uint32_t b = c0 & 31u;
       uint32_t w = wb->word_count++;
       wb->pos[w] = (uint16_t)i;
@@ -1977,7 +1981,9 @@ static void extract_cve_identifiers(const char *lower_text,
   while(p + 9u <= end && out->cve_count < MAX_EXTRACTED_CVES) {
     const char *hit = strstr(p, "cve-");
     if(!hit || hit + 9u > end) break;
-    if(isdigit((unsigned char)hit[4u]) &&
+    int boundary_ok = (hit == lower_text) || !isalnum((unsigned char)hit[-1]);
+    if(boundary_ok &&
+       isdigit((unsigned char)hit[4u]) &&
        isdigit((unsigned char)hit[5u]) &&
        isdigit((unsigned char)hit[6u]) &&
        isdigit((unsigned char)hit[7u]) &&
@@ -1986,11 +1992,22 @@ static void extract_cve_identifiers(const char *lower_text,
       while(j < end && isdigit((unsigned char)*j) && (size_t)(j - hit) < 18u) j++;
       if(j > hit + 9u) {
         size_t clen = (size_t)(j - hit);
+        char cand[24];
         for(size_t k = 0; k < clen; ++k) {
-          out->cves[out->cve_count][k] = (char)toupper((unsigned char)hit[k]);
+          cand[k] = (char)toupper((unsigned char)hit[k]);
         }
-        out->cves[out->cve_count][clen] = '\0';
-        out->cve_count++;
+        cand[clen] = '\0';
+        int dup = 0;
+        for(size_t c = 0; c < out->cve_count; ++c) {
+          if(strcmp(out->cves[c], cand) == 0) {
+            dup = 1;
+            break;
+          }
+        }
+        if(!dup) {
+          memcpy(out->cves[out->cve_count], cand, clen + 1u);
+          out->cve_count++;
+        }
         p = j;
         continue;
       }
