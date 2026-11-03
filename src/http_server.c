@@ -74,6 +74,7 @@ int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_insert
 
   feed->fetch_count++;
   feed->last_fetched_ms = wall_time_ms();
+  engine->total_bandit_pulls++;
   free(feed->last_error);
   feed->last_error = malloc(1u);
   if(feed->last_error) feed->last_error[0] = '\0';
@@ -88,6 +89,7 @@ size_t engine_poll_all(OyezEngine *engine, size_t max_feeds) {
 
 typedef struct {
   OyezEngine *engine;
+  const uint32_t *feed_ids;
   size_t limit;
   size_t next_idx;
   size_t total_inserted;
@@ -99,12 +101,17 @@ static void *poll_worker_main(void *arg) {
   PollPool *pool = (PollPool *)arg;
   for(;;) {
     pthread_mutex_lock(&pool->idx_lock);
-    size_t idx = pool->next_idx;
-    if(idx >= pool->limit) {
+    size_t slot = pool->next_idx;
+    if(slot >= pool->limit) {
       pthread_mutex_unlock(&pool->idx_lock);
       break;
     }
     pool->next_idx++;
+    size_t idx = pool->feed_ids ? (size_t)(pool->feed_ids[slot] - 1u) : slot;
+    if(idx >= pool->engine->feed_count) {
+      pthread_mutex_unlock(&pool->idx_lock);
+      continue;
+    }
     uint32_t feed_id = pool->engine->feeds[idx].id;
     const char *feed_url = pool->engine->feeds[idx].feed_url;
     const char *site_url = pool->engine->feeds[idx].site_url;
@@ -114,6 +121,7 @@ static void *poll_worker_main(void *arg) {
     if(http_fetch_url(feed_url, &raw) != 0) {
       pthread_mutex_lock(&pool->eng_lock);
       pool->engine->feeds[idx].error_count++;
+      pool->engine->total_bandit_pulls++;
       pthread_mutex_unlock(&pool->eng_lock);
       continue;
     }
@@ -123,6 +131,7 @@ static void *poll_worker_main(void *arg) {
       buffer_free(&raw);
       pthread_mutex_lock(&pool->eng_lock);
       pool->engine->feeds[idx].error_count++;
+      pool->engine->total_bandit_pulls++;
       pthread_mutex_unlock(&pool->eng_lock);
       continue;
     }
@@ -156,6 +165,7 @@ static void *poll_worker_main(void *arg) {
     }
     pool->engine->feeds[idx].fetch_count++;
     pool->engine->feeds[idx].last_fetched_ms = wall_time_ms();
+    pool->engine->total_bandit_pulls++;
     pool->total_inserted += ins_count;
     pthread_mutex_unlock(&pool->eng_lock);
 
@@ -174,6 +184,7 @@ size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t threa
   PollPool pool;
   memset(&pool, 0, sizeof(pool));
   pool.engine = engine;
+  pool.feed_ids = NULL;
   pool.limit = limit;
   pthread_mutex_init(&pool.idx_lock, NULL);
   pthread_mutex_init(&pool.eng_lock, NULL);
@@ -189,6 +200,47 @@ size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t threa
   pthread_mutex_destroy(&pool.idx_lock);
   pthread_mutex_destroy(&pool.eng_lock);
   return pool.total_inserted;
+}
+
+size_t engine_poll_bandit_auto(OyezEngine *engine, size_t batch_size, size_t thread_count) {
+  if(!engine) return 0;
+  size_t inserted = 0;
+  if(engine->feed_count > 0 && batch_size > 0) {
+    if(batch_size > 64u) batch_size = 64u;
+    BanditFeedPriority prio[64];
+    size_t selected = engine_bandit_select_feeds(engine, prio, batch_size);
+    if(selected > 0) {
+      uint32_t fids[64];
+      for(size_t i = 0; i < selected; ++i) fids[i] = prio[i].feed_id;
+      if(thread_count == 0) thread_count = 1u;
+      if(thread_count > 16u) thread_count = 16u;
+      if(thread_count > selected) thread_count = selected;
+
+      PollPool pool;
+      memset(&pool, 0, sizeof(pool));
+      pool.engine = engine;
+      pool.feed_ids = fids;
+      pool.limit = selected;
+      pthread_mutex_init(&pool.idx_lock, NULL);
+      pthread_mutex_init(&pool.eng_lock, NULL);
+
+      pthread_t threads[16];
+      for(size_t t = 0; t < thread_count; ++t) {
+        pthread_create(&threads[t], NULL, poll_worker_main, &pool);
+      }
+      for(size_t t = 0; t < thread_count; ++t) {
+        pthread_join(threads[t], NULL);
+      }
+
+      pthread_mutex_destroy(&pool.idx_lock);
+      pthread_mutex_destroy(&pool.eng_lock);
+      inserted = pool.total_inserted;
+    }
+  }
+  engine_evaluate_all_automation_rules(engine);
+  engine->last_auto_cycle_ms = wall_time_ms();
+  engine->auto_cycles_completed++;
+  return inserted;
 }
 
 static void url_decode_Component(const char *src, size_t len, char *dst, size_t cap) {
@@ -255,23 +307,30 @@ static void json_extract_field(const char *json, size_t len, const char *key, ch
   if(p >= end || *p != ':') return;
   p++;
   while(p < end && isspace((unsigned char)*p)) p++;
-  if(p >= end || *p != '"') return;
-  p++;
-
-  size_t o = 0;
-  while(p < end && *p != '"' && o + 1u < cap) {
-    if(*p == '\\' && p + 1u < end) {
-      p++;
-      char c = *p++;
-      if(c == 'n') c = '\n';
-      else if(c == 'r') c = '\r';
-      else if(c == 't') c = '\t';
-      out[o++] = c;
-    } else {
+  if(p >= end) return;
+  if(*p == '"') {
+    p++;
+    size_t o = 0;
+    while(p < end && *p != '"' && o + 1u < cap) {
+      if(*p == '\\' && p + 1u < end) {
+        p++;
+        char c = *p++;
+        if(c == 'n') c = '\n';
+        else if(c == 'r') c = '\r';
+        else if(c == 't') c = '\t';
+        out[o++] = c;
+      } else {
+        out[o++] = *p++;
+      }
+    }
+    out[o] = '\0';
+  } else {
+    size_t o = 0;
+    while(p < end && *p != ',' && *p != '}' && *p != ']' && !isspace((unsigned char)*p) && o + 1u < cap) {
       out[o++] = *p++;
     }
+    out[o] = '\0';
   }
-  out[o] = '\0';
 }
 
 static void serialize_ontology_mask_array(Buffer *buf, uint32_t mask) {
@@ -315,7 +374,13 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_format(buf, "\"ai_compute_score\":%.2f,", a->ai_compute_score);
   buffer_text(buf, "\"ai_license\":"); json_cstr(buf, ai_weight_license_slug(a->ai_license)); buffer_text(buf, ",");
   buffer_format(buf, "\"openness_score\":%.2f,\"sports_score\":%.2f,", a->openness_score, a->sports_score);
-  buffer_text(buf, "\"mentioned_sports\":[");
+  buffer_text(buf, "\"weather_severity\":"); json_cstr(buf, weather_severity_slug(a->weather_severity)); buffer_text(buf, ",");
+  buffer_format(buf, "\"weather_score\":%.2f,\"mentioned_weather\":[", a->weather_score);
+  for(size_t i = 0; i < a->mentioned_weather_count; ++i) {
+    if(i > 0) buffer_text(buf, ",");
+    json_cstr(buf, a->mentioned_weather[i]);
+  }
+  buffer_text(buf, "],\"mentioned_sports\":[");
   for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
     if(i > 0) buffer_text(buf, ",");
     json_cstr(buf, a->mentioned_sports[i]);
@@ -434,34 +499,48 @@ int http_handle_request(ServerContext *ctx,
       "<header><h1>OYEZ // C23 TOPOS &amp; SHEAF INTELLIGENCE CONSOLE</h1>"
       "<div id=\"hdr-meta\">Loading C23 Topos Engine...</div></header>"
       "<div class=\"grid\"><div>"
+      "<div class=\"card\"><h2>One-Machine Appliance &amp; 12-Theorem Proof</h2><div id=\"app-stats\"></div>"
+      "<div style=\"margin-top:8px\"><button onclick=\"runAutoSweep()\" style=\"width:100%\">Run Autonomous Sweep (UCB1 + Watchpoints)</button></div></div>"
       "<div class=\"card\"><h2>Category C &amp; Hodge Invariants</h2><div id=\"onto-stats\"></div></div>"
       "<div class=\"card\"><h2>Persistent Homology Barcode (beta_0, beta_1)</h2><div id=\"ph-stats\"></div></div>"
       "<div class=\"card\"><h2>Grothendieck Cartesian Lifts (int_C F)</h2><div id=\"fib-list\"></div></div>"
       "</div><div>"
       "<div class=\"card\"><h2>BM25+ &amp; Poset Presheaf Fiber Search</h2>"
       "<div style=\"display:flex;gap:8px;margin-bottom:10px\">"
-      "<input id=\"q\" placeholder=\"Search terms, CVEs, AI models, tickers...\" style=\"flex:1\">"
+      "<input id=\"q\" placeholder=\"Search terms, CVEs, AI models, weather, tickers...\" style=\"flex:1\">"
       "<select id=\"cat\"><option value=\"all-news\">all-news (Terminal)</option>"
       "<option value=\"ai\">ai</option><option value=\"cyber\">cyber</option>"
       "<option value=\"cryptography\">cryptography</option><option value=\"finance\">finance</option>"
-      "<option value=\"semiconductors\">semiconductors</option><option value=\"sports\">sports</option></select>"
+      "<option value=\"semiconductors\">semiconductors</option><option value=\"weather\">weather</option>"
+      "<option value=\"climate\">climate</option><option value=\"sports\">sports</option></select>"
       "<button onclick=\"runSearch()\">Query Presheaf</button></div>"
       "<div id=\"results\"></div></div></div></div>";
-    static const char *const k_console_html_script =
+    static const char *const k_console_html_script_1 =
       "<script>"
       "function esc(s){return String(s||'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}"
       "async function init(){"
-      "const [st,on,tm,fb]=await Promise.all([fetch('/api/v1/stats').then(r=>r.json()),"
-      "fetch('/api/v1/ontology').then(r=>r.json()),fetch('/api/v1/temporal').then(r=>r.json()),"
-      "fetch('/api/v1/fibration').then(r=>r.json())]);"
+      "const [st,ap,on,tm,fb]=await Promise.all([fetch('/api/v1/stats').then(r=>r.json()),"
+      "fetch('/api/v1/appliance').then(r=>r.json()),fetch('/api/v1/ontology').then(r=>r.json()),"
+      "fetch('/api/v1/temporal').then(r=>r.json()),fetch('/api/v1/fibration').then(r=>r.json())]);"
       "document.getElementById('hdr-meta').textContent="
-      "`Feeds: ${st.feeds} | Articles: ${st.articles} | Terms: ${st.inverted_terms} | M1 Vocab: ${st.tokenizer_vocab_size}`;"
+      "`Feeds: ${st.feeds} | Articles: ${st.articles} | Terms: ${st.inverted_terms} | Theorems: ${ap.theorems_verified_count}/${ap.theorems_total_count} | RAM: ${(ap.memory.total_resident_bytes/1048576).toFixed(2)} MB`;"
+      "document.getElementById('app-stats').innerHTML="
+      "`<div class='stat-row'><span>Appliance Self-Verification</span><b>${ap.theorems_verified_count}/${ap.theorems_total_count} PASS</b></div>"
+      "<div class='stat-row'><span>Resident Memory Footprint</span><b>${(ap.memory.total_resident_bytes/1048576).toFixed(2)} MB</b></div>"
+      "<div class='stat-row'><span>String Arena (Used / Cap)</span><b>${(ap.memory.arena_bytes_used/1024).toFixed(1)} / ${(ap.memory.arena_bytes_capacity/1024).toFixed(1)} KB</b></div>"
+      "<div class='stat-row'><span>Lorenz-63 Lyapunov / D_KY</span><b>${ap.atmospheric_physics.lyapunov_max.toFixed(4)} / ${ap.atmospheric_physics.kaplan_yorke_dim.toFixed(4)}</b></div>"
+      "<div class='stat-row'><span>Stull Wet-Bulb / Rossby c_x</span><b>${ap.atmospheric_physics.wet_bulb_celsius.toFixed(2)} C / ${ap.atmospheric_physics.rossby_phase_speed.toFixed(2)} m/s</b></div>"
+      "<div class='stat-row'><span>Watchpoint Rules / Alerts</span><b>${ap.automation.active_watchpoint_rules} / ${ap.automation.total_watchpoint_alerts}</b></div>`;";
+    static const char *const k_console_html_script_2 =
       "document.getElementById('onto-stats').innerHTML="
       "`<div class='stat-row'><span>Leinster Magnitude |C|_L</span><b>${on.leinster_magnitude}</b></div>"
       "<div class='stat-row'><span>Euler Characteristic chi(N(C))</span><b>${on.euler_characteristic}</b></div>"
       "<div class='stat-row'><span>Fiedler Eigenvalue l_2(L_0)</span><b>${on.fiedler_eigenvalue}</b></div>"
       "<div class='stat-row'><span>Hodge Gradient Norm ||d_0 phi||</span><b>${on.hodge_gradient_norm}</b></div>"
-      "<div class='stat-row'><span>Hodge Solenoidal Norm</span><b>${on.hodge_solenoidal_norm}</b></div>"
+      "<div class='stat-row'><span>Hodge Coexact Norm ||d_1^T psi||</span><b>${on.hodge_coexact_norm}</b></div>"
+      "<div class='stat-row'><span>Hodge Harmonic Residual</span><b>${on.hodge_harmonic_norm}</b></div>"
+      "<div class='stat-row'><span>1-Laplacian Trace Tr(L_1)</span><b>${on.laplacian_1_trace}</b></div>"
+      "<div class='stat-row'><span>Isbell Envelope Defect</span><b>${on.isbell_codensity_defect}</b></div>"
       "<div class='stat-row'><span>Cochain Exactness ||d_1 d_0||</span><b>${on.cochain_exactness_norm}</b></div>"
       "<div class='stat-row'><span>Kleisli Monad Entropy</span><b>${tm.adjunction_monad.kleisli_entropy}</b></div>"
       "<div class='stat-row'><span>Fastest Emerging Stalk</span><b>${tm.temporal_sheaf.fastest_emerging_category}</b></div>`;"
@@ -472,6 +551,9 @@ int http_handle_request(ServerContext *ctx,
       "`<div class='stat-row'><span>${l.sub_category} -> ${l.sup_category}</span>"
       "<span class='badge'>${l.transport_witness}</span></div>`).join('');"
       "runSearch();}"
+      "async function runAutoSweep(){"
+      "await fetch('/api/v1/automation/run',{method:'POST',body:'{}'});"
+      "await init();}"
       "async function runSearch(){"
       "const q=encodeURIComponent(document.getElementById('q').value);"
       "const c=encodeURIComponent(document.getElementById('cat').value);"
@@ -479,10 +561,12 @@ int http_handle_request(ServerContext *ctx,
       "document.getElementById('results').innerHTML=(r.articles||[]).map(a=>"
       "`<div class='art'><a href='${esc(a.url)}' target='_blank' rel='noopener'>${esc(a.title)}</a>"
       "<div><span class='badge'>${esc(a.feed_country)}</span><span class='badge'>${esc(a.news_type)}</span>"
-      "<span class='badge'>${esc(a.ai_tier)}</span><span class='badge'>${esc(a.clearance)}</span></div></div>`).join('');}"
+      "<span class='badge'>${esc(a.ai_tier)}</span><span class='badge'>${esc(a.clearance)}</span>"
+      "<span class='badge'>${esc(a.weather_severity)}</span></div></div>`).join('');}"
       "init();</script></body></html>";
     buffer_text(out_json, k_console_html_head);
-    buffer_text(out_json, k_console_html_script);
+    buffer_text(out_json, k_console_html_script_1);
+    buffer_text(out_json, k_console_html_script_2);
     return 0;
   }
 
@@ -504,12 +588,14 @@ int http_handle_request(ServerContext *ctx,
     catalog_entries(&cat_count);
     buffer_format(out_json,
                   "{\"feeds\":%zu,\"articles\":%zu,\"inverted_terms\":%zu,\"catalog_size\":%zu,"
-                  "\"tokenizer_vocab_size\":%u,\"regions\":{",
+                  "\"tokenizer_vocab_size\":%u,\"automation_rules\":%zu,\"automation_alerts\":%zu,\"regions\":{",
                   eng->feed_count,
                   eng->article_count,
                   eng->inv_count,
                   cat_count,
-                  ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u);
+                  ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u,
+                  eng->automation_rule_count,
+                  eng->automation_alert_count);
     for(uint32_t r = 0; r < WORLD_REGION_COUNT; ++r) {
       if(r > 0) buffer_text(out_json, ",");
       json_cstr(out_json, world_region_slug((WorldRegion)r));
@@ -532,6 +618,12 @@ int http_handle_request(ServerContext *ctx,
       if(fs > 0) buffer_text(out_json, ",");
       json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
+    }
+    buffer_text(out_json, "},\"weather_severities\":{");
+    for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
+      if(ws > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
     }
     buffer_text(out_json, "},\"categories_presheaf\":{");
     for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
@@ -568,16 +660,26 @@ int http_handle_request(ServerContext *ctx,
     SheafCohomology sheaf;
     ontology_sheaf_cohomology(raw_scores, closure_scores, &sheaf);
     double coend_self = ontology_profunctor_coend(closure_scores, closure_scores);
+    double end_self = ontology_profunctor_end(closure_scores, closure_scores);
+    double w_colim_self = ontology_weighted_colimit(raw_scores, closure_scores);
+    double w_lim_self = ontology_weighted_limit(raw_scores, closure_scores);
+    int buser_holds = 0;
+    double cheeger_h = ontology_cheeger_constant(&buser_holds);
+    double day_defect_self = ontology_day_adjunction_defect(raw_scores, closure_scores, kan_scores);
 
     buffer_format(out_json,
                   "{\"terminal_object\":\"all-news\",\"node_count\":%d,\"sheaf_cohomology_l2_norm\":%.4f,"
                   "\"nerve_f_vector\":[%u,%u,%u,%u,%u,%u],\"euler_characteristic\":%d,"
                   "\"betti_numbers\":[%u,%u],\"mobius_total_variation\":%u,"
-                  "\"laplacian_trace\":%.2f,\"spectral_radius\":%.4f,\"fiedler_eigenvalue\":%.4f,"
+                  "\"laplacian_trace\":%.2f,\"laplacian_1_trace\":%.2f,\"spectral_radius\":%.4f,\"fiedler_eigenvalue\":%.4f,"
+                  "\"cheeger_constant\":%.4f,\"cheeger_buser_holds\":%s,"
                   "\"dirichlet_energy\":%.2f,\"cochain_exactness_norm\":%.6e,"
                   "\"hodge_1_curl_norm\":%.4f,\"hodge_gradient_norm\":%.4f,\"hodge_solenoidal_norm\":%.4f,"
-                  "\"leinster_magnitude\":%.4f,\"monad_closure_defect\":%.4f,"
-                  "\"profunctor_coend_self\":%.2f",
+                  "\"hodge_coexact_norm\":%.4f,\"hodge_harmonic_norm\":%.4f,"
+                  "\"leinster_magnitude\":%.4f,\"isbell_codensity_defect\":%.6e,\"monad_closure_defect\":%.4f,"
+                  "\"profunctor_coend_self\":%.2f,\"profunctor_end_self\":%.4f,"
+                  "\"weighted_colimit_self\":%.4f,\"weighted_limit_self\":%.4f,"
+                  "\"day_adjunction_defect_self\":%.6e",
                   ONTOLOGY_NODE_COUNT,
                   sheaf.total_cohomology_norm,
                   sheaf.nerve_f_vector[0],
@@ -591,16 +693,26 @@ int http_handle_request(ServerContext *ctx,
                   sheaf.betti_numbers[1],
                   sheaf.mobius_total_variation,
                   sheaf.laplacian_trace,
+                  sheaf.laplacian_1_trace,
                   sheaf.spectral_radius,
                   sheaf.fiedler_eigenvalue,
+                  cheeger_h,
+                  buser_holds ? "true" : "false",
                   sheaf.dirichlet_energy,
                   sheaf.cochain_exactness_norm,
                   sheaf.hodge_1_curl_norm,
                   sheaf.hodge_gradient_norm,
                   sheaf.hodge_solenoidal_norm,
+                  sheaf.hodge_coexact_norm,
+                  sheaf.hodge_harmonic_norm,
                   sheaf.leinster_magnitude,
+                  sheaf.isbell_codensity_defect,
                   sheaf.monad_closure_defect,
-                  coend_self);
+                  coend_self,
+                  end_self,
+                  w_colim_self,
+                  w_lim_self,
+                  day_defect_self);
     if(sub[0] && sup[0]) {
       OntologyNodeId u, v;
       int has = (ontology_from_slug(sub, &u) == 0 && ontology_from_slug(sup, &v) == 0 &&
@@ -621,6 +733,10 @@ int http_handle_request(ServerContext *ctx,
         uint32_t hey_imp = ontology_heyting_implication(1u << na, 1u << nb);
         uint32_t hey_neg = ontology_heyting_negation(1u << na);
         uint32_t lt_sheaf = ontology_lawvere_tierney_sheafify(1u << na);
+        uint32_t co_sub = ontology_coheyting_subtraction(1u << na, 1u << nb);
+        uint32_t co_supp = ontology_coheyting_negation(1u << na);
+        uint32_t law_bd = ontology_coheyting_boundary(1u << na);
+        uint32_t univ_q = ontology_universal_quantifier(ontology_downward_closure((1u << na) | (1u << nb)));
         int dense_a = ontology_is_grothendieck_dense(1u << na);
         double w_dist = ontology_wasserstein_distance(1u << na, 1u << nb);
         double l_ab = ontology_lawvere_distance(1u << na, 1u << nb);
@@ -642,6 +758,14 @@ int http_handle_request(ServerContext *ctx,
         serialize_ontology_mask_array(out_json, hey_neg);
         buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
         serialize_ontology_mask_array(out_json, lt_sheaf);
+        buffer_text(out_json, ",\"coheyting_subtraction\":");
+        serialize_ontology_mask_array(out_json, co_sub);
+        buffer_text(out_json, ",\"coheyting_supplement_a\":");
+        serialize_ontology_mask_array(out_json, co_supp);
+        buffer_text(out_json, ",\"lawvere_boundary_a\":");
+        serialize_ontology_mask_array(out_json, law_bd);
+        buffer_text(out_json, ",\"universal_quantifier_ab\":");
+        serialize_ontology_mask_array(out_json, univ_q);
         buffer_text(out_json, "}");
       }
     }
@@ -904,8 +1028,11 @@ int http_handle_request(ServerContext *ctx,
     }
     buffer_format(out_json,
                   "]},\"adjunction_monad\":{\"zig_zag_triangle_defect\":%.6e,"
+                  "\"beck_coequalizer_defect\":%.6e,\"isbell_adjunction_defect\":%.6e,"
                   "\"kleisli_entropy\":%.4f,\"eilenberg_moore_fixed_points\":",
                   monad.zig_zag_triangle_defect,
+                  monad.beck_coequalizer_defect,
+                  monad.isbell_adjunction_defect,
                   monad.kleisli_entropy);
     serialize_ontology_mask_array(out_json, monad.eilenberg_moore_mask);
     buffer_format(out_json,
@@ -923,6 +1050,161 @@ int http_handle_request(ServerContext *ctx,
       buffer_format(out_json, ":%.2f", temp.velocity[c]);
     }
     buffer_text(out_json, "}}}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/topos") == 0) {
+    char src_r[64], dst_r[64], a_slug[64], b_slug[64];
+    if(!query_param(qs, "source_region", src_r, sizeof(src_r)) || !src_r[0]) strcpy(src_r, "east-asia");
+    if(!query_param(qs, "target_region", dst_r, sizeof(dst_r)) || !dst_r[0]) strcpy(dst_r, "europe");
+    if(!query_param(qs, "a", a_slug, sizeof(a_slug)) || !a_slug[0]) strcpy(a_slug, "ai");
+    if(!query_param(qs, "b", b_slug, sizeof(b_slug)) || !b_slug[0]) strcpy(b_slug, "technology");
+
+    WorldRegion sr = REGION_EAST_ASIA, tr = REGION_EUROPE;
+    OntologyNodeId na = ONTO_AI, nb = ONTO_TECHNOLOGY;
+    world_region_from_slug(src_r, &sr);
+    world_region_from_slug(dst_r, &tr);
+    ontology_from_slug(a_slug, &na);
+    ontology_from_slug(b_slug, &nb);
+
+    ToposState topos;
+    engine_topos_state(eng, sr, tr, na, nb, &topos);
+
+    buffer_text(out_json, "{\"source_region\":");
+    json_cstr(out_json, world_region_slug(topos.source_region));
+    buffer_text(out_json, ",\"target_region\":");
+    json_cstr(out_json, world_region_slug(topos.target_region));
+    buffer_text(out_json, ",\"proposition_a\":");
+    json_cstr(out_json, ontology_node(topos.prop_a)->slug);
+    buffer_text(out_json, ",\"proposition_b\":");
+    json_cstr(out_json, ontology_node(topos.prop_b)->slug);
+    buffer_format(out_json,
+                  ",\"bi_heyting_algebra\":{\"leibniz_rule_holds\":%s,\"ideal_a\":",
+                  topos.leibniz_rule_holds ? "true" : "false");
+    serialize_ontology_mask_array(out_json, topos.ideal_a);
+    buffer_text(out_json, ",\"ideal_b\":");
+    serialize_ontology_mask_array(out_json, topos.ideal_b);
+    buffer_text(out_json, ",\"heyting_implication_ab\":");
+    serialize_ontology_mask_array(out_json, topos.heyting_implication_ab);
+    buffer_text(out_json, ",\"heyting_negation_a\":");
+    serialize_ontology_mask_array(out_json, topos.heyting_negation_a);
+    buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
+    serialize_ontology_mask_array(out_json, topos.lawvere_tierney_sheaf_a);
+    buffer_text(out_json, ",\"coheyting_subtraction_ab\":");
+    serialize_ontology_mask_array(out_json, topos.coheyting_subtraction_ab);
+    buffer_text(out_json, ",\"coheyting_supplement_a\":");
+    serialize_ontology_mask_array(out_json, topos.coheyting_supplement_a);
+    buffer_text(out_json, ",\"lawvere_boundary_a\":");
+    serialize_ontology_mask_array(out_json, topos.lawvere_boundary_a);
+    buffer_text(out_json, ",\"lawvere_boundary_b\":");
+    serialize_ontology_mask_array(out_json, topos.lawvere_boundary_b);
+    buffer_text(out_json, ",\"lawvere_boundary_meet_ab\":");
+    serialize_ontology_mask_array(out_json, topos.lawvere_boundary_meet_ab);
+    buffer_text(out_json, ",\"universal_quantifier_ab\":");
+    serialize_ontology_mask_array(out_json, topos.universal_quantifier_ab);
+    buffer_text(out_json, "},\"equalizer_subobject\":");
+    serialize_ontology_mask_array(out_json, topos.equalizer_mask);
+    buffer_format(out_json,
+                  ",\"isbell_and_enriched_limits\":{\"isbell_envelope_defect\":%.6e,"
+                  "\"profunctor_end\":%.4f,\"profunctor_coend\":%.4f,"
+                  "\"weighted_colimit\":%.4f,\"weighted_limit\":%.4f,"
+                  "\"tensor_hom_adjunction_defect\":%.6e},"
+                  "\"subobject_classifier_omega\":{",
+                  topos.isbell_envelope_defect,
+                  topos.profunctor_end,
+                  topos.profunctor_coend,
+                  topos.weighted_colimit,
+                  topos.weighted_limit,
+                  topos.tensor_hom_adjunction_defect);
+    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+      if(c > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
+      buffer_format(out_json, ":%.4f", topos.omega_truth_a[c]);
+    }
+    buffer_format(out_json,
+                  "},\"day_convolution\":{\"day_adjunction_defect\":%.6e,"
+                  "\"root_convolution\":%.4f,\"root_internal_hom\":%.4f},"
+                  "\"quillen_model_factorization\":{\"weak_equivalence_holds\":%s,"
+                  "\"acyclic_cofibration_m\":",
+                  topos.day_adjunction_defect,
+                  topos.day_convolution_fg[ONTO_ROOT],
+                  topos.day_internal_hom_gh[ONTO_ROOT],
+                  topos.quillen_weak_equivalence_holds ? "true" : "false");
+    serialize_ontology_mask_array(out_json, topos.quillen_acyclic_cofibration_m);
+    buffer_text(out_json, ",\"fibration_target\":");
+    serialize_ontology_mask_array(out_json, topos.quillen_fibration_target);
+    buffer_format(out_json,
+                  "},\"sinkhorn_optimal_transport\":{\"entropic_wasserstein\":%.4f,"
+                  "\"sinkhorn_divergence\":%.4f,\"marginal_defect_l1\":%.6e,"
+                  "\"coupling_entropy\":%.4f,\"fisher_rao_geodesic\":%.4f,"
+                  "\"cheeger_constant\":%.4f,\"cheeger_buser_holds\":%s},"
+                  "\"spectral_sequence\":{\"euler_e0\":%d,\"euler_e1\":%d,"
+                  "\"euler_e2\":%d,\"euler_e_inf\":%d,"
+                  "\"differential_nilpotency_defect\":%.6e,"
+                  "\"e1_stratum_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                  "\"e2_derived_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],"
+                  "\"e_inf_abutment_energy\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]},"
+                  "\"polynomial_functor_codesign\":{\"root_poly_px\":%.4f,\"root_codesign_lens\":%.4f},"
+                  "\"ricci_curvature\":{\"gauss_bonnet_total\":%.6f,\"gauss_bonnet_defect\":%.6e,"
+                  "\"forman_mean_curvature\":%.4f,\"ollivier_mean_curvature\":%.4f,"
+                  "\"ollivier_min_bridge\":%.4f,\"ollivier_max_cluster\":%.4f,"
+                  "\"ricci_flow_dirichlet_after\":%.4f,\"ricci_flow_volume_defect\":%.6e},"
+                  "\"ihara_zeta_and_tropical\":{\"ihara_u\":%.4f,\"ihara_zeta_val\":%.4f,"
+                  "\"ihara_bass_det\":%.6f,\"ihara_det_at_zero_defect\":%.6e,"
+                  "\"ihara_det_at_one_defect\":%.6e,\"hashimoto_spectral_radius\":%.4f,"
+                  "\"tropical_eigenvalue\":%.4f,\"tropical_idempotence_defect\":%.6e},"
+                  "\"rota_baxter_algebra\":{\"rota_baxter_identity_defect\":%.6e,"
+                  "\"spitzer_birkhoff_defect\":%.6e}}",
+                  topos.sinkhorn_ot.entropic_wasserstein,
+                  topos.sinkhorn_ot.sinkhorn_divergence,
+                  topos.sinkhorn_ot.marginal_defect_l1,
+                  topos.sinkhorn_ot.coupling_entropy,
+                  topos.sinkhorn_ot.fisher_rao_geodesic,
+                  topos.sinkhorn_ot.cheeger_constant,
+                  topos.sinkhorn_ot.cheeger_buser_holds ? "true" : "false",
+                  topos.spectral_seq.euler_e0,
+                  topos.spectral_seq.euler_e1,
+                  topos.spectral_seq.euler_e2,
+                  topos.spectral_seq.euler_e_inf,
+                  topos.spectral_seq.differential_nilpotency_defect,
+                  topos.spectral_seq.e1_stratum_energy[0],
+                  topos.spectral_seq.e1_stratum_energy[1],
+                  topos.spectral_seq.e1_stratum_energy[2],
+                  topos.spectral_seq.e1_stratum_energy[3],
+                  topos.spectral_seq.e1_stratum_energy[4],
+                  topos.spectral_seq.e1_stratum_energy[5],
+                  topos.spectral_seq.e2_derived_energy[0],
+                  topos.spectral_seq.e2_derived_energy[1],
+                  topos.spectral_seq.e2_derived_energy[2],
+                  topos.spectral_seq.e2_derived_energy[3],
+                  topos.spectral_seq.e2_derived_energy[4],
+                  topos.spectral_seq.e2_derived_energy[5],
+                  topos.spectral_seq.e_inf_abutment_energy[0],
+                  topos.spectral_seq.e_inf_abutment_energy[1],
+                  topos.spectral_seq.e_inf_abutment_energy[2],
+                  topos.spectral_seq.e_inf_abutment_energy[3],
+                  topos.spectral_seq.e_inf_abutment_energy[4],
+                  topos.spectral_seq.e_inf_abutment_energy[5],
+                  topos.polynomial_functor_px[ONTO_ROOT],
+                  topos.polynomial_codesign_lens[ONTO_ROOT],
+                  topos.ricci_curv.gauss_bonnet_total,
+                  topos.ricci_curv.gauss_bonnet_defect,
+                  topos.ricci_curv.forman_mean_curvature,
+                  topos.ricci_curv.ollivier_mean_curvature,
+                  topos.ricci_curv.ollivier_min_bridge,
+                  topos.ricci_curv.ollivier_max_cluster,
+                  topos.ricci_curv.ricci_flow_dirichlet_after,
+                  topos.ricci_curv.ricci_flow_volume_defect,
+                  topos.zeta_tropical.ihara_u,
+                  topos.zeta_tropical.ihara_zeta_val,
+                  topos.zeta_tropical.ihara_bass_det,
+                  topos.zeta_tropical.ihara_det_at_zero_defect,
+                  topos.zeta_tropical.ihara_det_at_one_defect,
+                  topos.zeta_tropical.hashimoto_spectral_radius,
+                  topos.zeta_tropical.tropical_eigenvalue,
+                  topos.zeta_tropical.tropical_idempotence_defect,
+                  topos.rota_baxter.rota_baxter_identity_defect,
+                  topos.rota_baxter.spitzer_birkhoff_defect);
     return 0;
   }
 
@@ -1314,9 +1596,399 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/weather") == 0) {
+    char t_str[32], rh_str[32], lat_str[32], u_str[32], f_str[32];
+    query_param(qs, "temp_c", t_str, sizeof(t_str));
+    query_param(qs, "humidity", rh_str, sizeof(rh_str));
+    query_param(qs, "lat_deg", lat_str, sizeof(lat_str));
+    query_param(qs, "u_wind", u_str, sizeof(u_str));
+    query_param(qs, "forcing", f_str, sizeof(f_str));
+
+    uint32_t wx_total = bitset_popcount(&eng->by_closure_ontology[ONTO_CLIMATE]);
+    uint32_t severe_cnt = bitset_popcount(&eng->by_weather_severity[WEATHER_WATCH]) +
+                          bitset_popcount(&eng->by_weather_severity[WEATHER_WARNING]) +
+                          bitset_popcount(&eng->by_weather_severity[WEATHER_CATASTROPHIC]);
+
+    double sum_wx_score = 0.0;
+    size_t wx_scored = 0;
+    for(size_t i = 0; i < eng->article_count; ++i) {
+      if(eng->articles[i].weather_score > 0.0) {
+        sum_wx_score += eng->articles[i].weather_score;
+        wx_scored++;
+      }
+    }
+    double avg_wx_score = wx_scored > 0 ? (sum_wx_score / (double)wx_scored) : 2.5;
+
+    double temp_c = t_str[0] ? strtod(t_str, NULL) : (24.0 + 0.15 * (double)severe_cnt);
+    double rh_pct = rh_str[0] ? strtod(rh_str, NULL) : 68.0;
+    double u_wind = u_str[0] ? strtod(u_str, NULL) : 18.0;
+    double lat_deg = lat_str[0] ? strtod(lat_str, NULL) : 38.0;
+    double forcing = f_str[0] ? strtod(f_str, NULL) : avg_wx_score;
+
+    WeatherPhysicsState phys;
+    ontology_atmospheric_dynamics(temp_c, rh_pct, u_wind, lat_deg, forcing, &phys);
+
+    buffer_format(out_json,
+                  "{\"weather_articles_count\":%u,\"severe_hazards_count\":%u,\"weather_severities\":{",
+                  wx_total, severe_cnt);
+    for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
+      if(ws > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
+      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
+    }
+    buffer_text(out_json, "},\"weather_phenomena\":{");
+    int first_w = 1;
+    for(size_t i = 0; i < 128u; ++i) {
+      if(eng->by_weather[i].occupied) {
+        if(!first_w) buffer_text(out_json, ",");
+        json_cstr(out_json, eng->by_weather[i].key);
+        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather[i].bits));
+        first_w = 0;
+      }
+    }
+    buffer_format(out_json,
+                  "},\"atmospheric_physics\":{"
+                  "\"lorenz_63_attractor\":[%.6f,%.6f,%.6f],"
+                  "\"maximal_lyapunov_exponent\":%.6f,"
+                  "\"liouville_divergence\":%.6f,"
+                  "\"kaplan_yorke_dimension\":%.6f,"
+                  "\"predictability_horizon_units\":%.6f,"
+                  "\"saturation_vapor_pressure_hpa\":%.4f,"
+                  "\"wet_bulb_temperature_c\":%.4f,"
+                  "\"rossby_phase_speed_ms\":%.4f,"
+                  "\"rossby_stationary_wavenumber\":%.4f,"
+                  "\"omega_blocking_regime\":%s"
+                  "},\"top_weather_articles\":[",
+                  phys.lorenz_state[0],
+                  phys.lorenz_state[1],
+                  phys.lorenz_state[2],
+                  phys.lyapunov_max,
+                  phys.lyapunov_sum_div,
+                  phys.kaplan_yorke_dim,
+                  phys.predictability_horizon,
+                  phys.saturation_vapor_hpa,
+                  phys.wet_bulb_celsius,
+                  phys.rossby_phase_speed,
+                  phys.rossby_stationary_k,
+                  phys.omega_blocking_regime ? "true" : "false");
+
+    const ArticleRecord *top_wx[12];
+    size_t top_count = 0;
+    for(size_t i = 0; i < eng->article_count; ++i) {
+      const ArticleRecord *a = &eng->articles[i];
+      if(a->weather_score <= 0.0) continue;
+      if(top_count < 12u) {
+        top_wx[top_count++] = a;
+      } else {
+        size_t min_idx = 0;
+        for(size_t k = 1u; k < 12u; ++k) {
+          if(top_wx[k]->weather_score < top_wx[min_idx]->weather_score) min_idx = k;
+        }
+        if(a->weather_score > top_wx[min_idx]->weather_score) {
+          top_wx[min_idx] = a;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      for(size_t j = i + 1u; j < top_count; ++j) {
+        if(top_wx[j]->weather_score > top_wx[i]->weather_score) {
+          const ArticleRecord *tmp = top_wx[i];
+          top_wx[i] = top_wx[j];
+          top_wx[j] = tmp;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      serialize_article(out_json, top_wx[i], top_wx[i]->weather_score, 0);
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/automation") == 0) {
+    buffer_format(out_json,
+                  "{\"auto_poll_interval_sec\":%u,\"auto_cycles_completed\":%llu,"
+                  "\"last_auto_cycle_ms\":%llu,\"total_bandit_pulls\":%llu,"
+                  "\"rule_count\":%zu,\"alert_count\":%zu,\"rules\":[",
+                  eng->auto_poll_interval_sec,
+                  (unsigned long long)eng->auto_cycles_completed,
+                  (unsigned long long)eng->last_auto_cycle_ms,
+                  (unsigned long long)eng->total_bandit_pulls,
+                  eng->automation_rule_count,
+                  eng->automation_alert_count);
+    for(size_t i = 0; i < eng->automation_rule_count; ++i) {
+      const AutomationRule *r = &eng->automation_rules[i];
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_format(out_json, "{\"id\":%u,\"enabled\":%s,\"name\":",
+                    r->id, r->enabled ? "true" : "false");
+      json_cstr(out_json, r->name);
+      buffer_text(out_json, ",\"query\":"); json_cstr(out_json, r->query);
+      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, r->category);
+      buffer_text(out_json, ",\"region\":"); json_cstr(out_json, r->region);
+      buffer_text(out_json, ",\"weather\":"); json_cstr(out_json, r->weather);
+      buffer_text(out_json, ",\"min_clearance\":"); json_cstr(out_json, clearance_level_slug(r->min_clearance));
+      buffer_text(out_json, ",\"fiscal_stance\":"); json_cstr(out_json, fiscal_stance_slug(r->fiscal_stance));
+      buffer_text(out_json, ",\"min_ai_tier\":"); json_cstr(out_json, ai_compute_tier_slug(r->min_ai_tier));
+      buffer_text(out_json, ",\"min_weather_severity\":"); json_cstr(out_json, weather_severity_slug(r->min_weather_severity));
+      buffer_format(out_json, ",\"min_score\":%.2f,\"action\":", r->min_score);
+      json_cstr(out_json, automation_action_slug(r->action));
+      buffer_text(out_json, ",\"target\":"); json_cstr(out_json, r->target);
+      buffer_format(out_json,
+                    ",\"hit_count\":%u,\"last_triggered_ms\":%llu}",
+                    r->hit_count, (unsigned long long)r->last_triggered_ms);
+    }
+    buffer_text(out_json, "],\"alerts\":[");
+    size_t emit_alerts = eng->automation_alert_count < 32u ? eng->automation_alert_count : 32u;
+    for(size_t k = 0; k < emit_alerts; ++k) {
+      size_t idx = (eng->automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
+      const AutomationAlert *al = &eng->automation_alerts[idx];
+      if(k > 0) buffer_text(out_json, ",");
+      buffer_format(out_json,
+                    "{\"alert_id\":%llu,\"rule_id\":%u,\"article_id\":%u,"
+                    "\"triggered_at_ms\":%llu,\"trigger_score\":%.4f,\"action\":",
+                    (unsigned long long)al->alert_id, al->rule_id, al->article_id,
+                    (unsigned long long)al->triggered_at_ms, al->trigger_score);
+      json_cstr(out_json, automation_action_slug(al->action_taken));
+      buffer_text(out_json, ",\"rule_name\":"); json_cstr(out_json, al->rule_name);
+      buffer_text(out_json, ",\"article_title\":"); json_cstr(out_json, al->article_title);
+      buffer_text(out_json, ",\"article_url\":"); json_cstr(out_json, al->article_url);
+      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, al->category_slug);
+      buffer_text(out_json, ",\"weather_severity\":"); json_cstr(out_json, al->weather_severity_slug);
+      buffer_text(out_json, ",\"clearance\":"); json_cstr(out_json, al->clearance_slug);
+      buffer_text(out_json, "}");
+    }
+    buffer_text(out_json, "],\"bandit_schedule\":[");
+    BanditFeedPriority prio[16];
+    size_t bcount = engine_bandit_select_feeds(eng, prio, 16u);
+    for(size_t i = 0; i < bcount; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_format(out_json, "{\"feed_id\":%u,\"title\":", prio[i].feed_id);
+      json_cstr(out_json, prio[i].title);
+      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, prio[i].category);
+      buffer_format(out_json,
+                    ",\"ucb1_score\":%.4f,\"empirical_yield\":%.4f,"
+                    "\"exploration_bonus\":%.4f,\"staleness_bonus\":%.4f,\"error_penalty\":%.4f}",
+                    prio[i].ucb1_score, prio[i].empirical_yield,
+                    prio[i].exploration_bonus, prio[i].staleness_bonus, prio[i].error_penalty);
+    }
+    buffer_text(out_json, "]}");
+    return 0;
+  }
+
+  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/automation/rules") == 0) {
+    char id_s[16], en_s[16], name_s[64], q_s[64], cat_s[32], reg_s[32], wx_s[32];
+    char clr_s[24], fst_s[24], ait_s[24], wxs_s[24], sc_s[24], act_s[32], tgt_s[128];
+    json_extract_field(body, body_len, "id", id_s, sizeof(id_s));
+    json_extract_field(body, body_len, "enabled", en_s, sizeof(en_s));
+    json_extract_field(body, body_len, "name", name_s, sizeof(name_s));
+    json_extract_field(body, body_len, "query", q_s, sizeof(q_s));
+    if(q_s[0] == '\0') json_extract_field(body, body_len, "query_terms", q_s, sizeof(q_s));
+    json_extract_field(body, body_len, "category", cat_s, sizeof(cat_s));
+    json_extract_field(body, body_len, "region", reg_s, sizeof(reg_s));
+    json_extract_field(body, body_len, "weather", wx_s, sizeof(wx_s));
+    json_extract_field(body, body_len, "min_clearance", clr_s, sizeof(clr_s));
+    json_extract_field(body, body_len, "fiscal_stance", fst_s, sizeof(fst_s));
+    json_extract_field(body, body_len, "min_ai_tier", ait_s, sizeof(ait_s));
+    json_extract_field(body, body_len, "min_weather_severity", wxs_s, sizeof(wxs_s));
+    json_extract_field(body, body_len, "min_score", sc_s, sizeof(sc_s));
+    json_extract_field(body, body_len, "action", act_s, sizeof(act_s));
+    json_extract_field(body, body_len, "target", tgt_s, sizeof(tgt_s));
+
+    if(name_s[0] == '\0') {
+      *out_status = 400;
+      buffer_text(out_json, "{\"error\":\"missing_rule_name\"}");
+      return 0;
+    }
+
+    AutomationRule rule;
+    memset(&rule, 0, sizeof(rule));
+    rule.id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
+    rule.enabled = (strcmp(en_s, "0") == 0 || strcmp(en_s, "false") == 0) ? 0 : 1;
+    snprintf(rule.name, sizeof(rule.name), "%s", name_s);
+    snprintf(rule.query, sizeof(rule.query), "%s", q_s);
+    snprintf(rule.category, sizeof(rule.category), "%s", cat_s);
+    snprintf(rule.region, sizeof(rule.region), "%s", reg_s);
+    snprintf(rule.weather, sizeof(rule.weather), "%s", wx_s);
+    if(clr_s[0] != '\0') clearance_level_from_slug(clr_s, &rule.min_clearance);
+    if(fst_s[0] != '\0') fiscal_stance_from_slug(fst_s, &rule.fiscal_stance);
+    if(ait_s[0] != '\0') ai_compute_tier_from_slug(ait_s, &rule.min_ai_tier);
+    if(wxs_s[0] != '\0') weather_severity_from_slug(wxs_s, &rule.min_weather_severity);
+    rule.min_score = sc_s[0] ? strtod(sc_s, NULL) : 0.0;
+    AutomationActionType act = AUTO_ACTION_ALERT_RING;
+    if(act_s[0] != '\0') automation_action_from_slug(act_s, &act);
+    rule.action = act;
+    snprintf(rule.target, sizeof(rule.target), "%s", tgt_s);
+
+    uint32_t rule_id = 0;
+    if(engine_upsert_automation_rule(eng, &rule, &rule_id) != 0) {
+      *out_status = 400;
+      buffer_text(out_json, "{\"error\":\"rule_capacity_exceeded\"}");
+      return 0;
+    }
+    size_t triggered = engine_evaluate_all_automation_rules(eng);
+    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+    buffer_format(out_json,
+                  "{\"status\":\"ok\",\"rule_id\":%u,\"rule_count\":%zu,\"alerts_triggered\":%zu}",
+                  rule_id, eng->automation_rule_count, triggered);
+    return 0;
+  }
+
+  if(strcmp(method, "DELETE") == 0 && strcmp(path, "/api/v1/automation/rules") == 0) {
+    char id_s[16];
+    if(!query_param(qs, "id", id_s, sizeof(id_s)) || id_s[0] == '\0') {
+      json_extract_field(body, body_len, "id", id_s, sizeof(id_s));
+    }
+    uint32_t rule_id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
+    if(rule_id == 0u || engine_delete_automation_rule(eng, rule_id) != 0) {
+      *out_status = 404;
+      buffer_text(out_json, "{\"error\":\"rule_not_found\"}");
+      return 0;
+    }
+    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+    buffer_format(out_json, "{\"status\":\"deleted\",\"rule_id\":%u,\"rule_count\":%zu}",
+                  rule_id, eng->automation_rule_count);
+    return 0;
+  }
+
+  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/automation/run") == 0) {
+    char batch_s[16], intv_s[16];
+    if(!query_param(qs, "poll_batch", batch_s, sizeof(batch_s)) || batch_s[0] == '\0') {
+      json_extract_field(body, body_len, "poll_batch", batch_s, sizeof(batch_s));
+    }
+    if(!query_param(qs, "auto_poll_interval_sec", intv_s, sizeof(intv_s)) || intv_s[0] == '\0') {
+      json_extract_field(body, body_len, "auto_poll_interval_sec", intv_s, sizeof(intv_s));
+    }
+    if(intv_s[0] != '\0') {
+      eng->auto_poll_interval_sec = (uint32_t)strtoul(intv_s, NULL, 10);
+    }
+    size_t poll_batch = batch_s[0] ? (size_t)strtoul(batch_s, NULL, 10) : 0u;
+    size_t before_alerts = eng->automation_alert_count;
+    size_t ingested = 0;
+    if(poll_batch > 0u) {
+      ingested = engine_poll_bandit_auto(eng, poll_batch, 4u);
+    } else {
+      engine_evaluate_all_automation_rules(eng);
+      eng->last_auto_cycle_ms = wall_time_ms();
+      eng->auto_cycles_completed++;
+    }
+    size_t new_alerts = eng->automation_alert_count >= before_alerts
+                            ? (eng->automation_alert_count - before_alerts)
+                            : 0u;
+    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+    buffer_format(out_json,
+                  "{\"status\":\"ok\",\"auto_cycles_completed\":%llu,\"articles_ingested\":%zu,"
+                  "\"alerts_triggered\":%zu,\"total_alerts\":%zu}",
+                  (unsigned long long)eng->auto_cycles_completed, ingested, new_alerts, eng->automation_alert_count);
+    return 0;
+  }
+
+  if(strcmp(method, "GET") == 0 &&
+     (strcmp(path, "/api/v1/appliance") == 0 || strcmp(path, "/api/v1/machine") == 0)) {
+    EngineApplianceState app;
+    engine_appliance_state(eng, &app);
+    size_t cat_count = 0;
+    catalog_entries(&cat_count);
+
+    buffer_format(out_json,
+                  "{\"appliance\":\"oyez-one-machine-c23\",\"status\":\"%s\","
+                  "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu,"
+                  "\"index_generation\":%llu,\"m1_tokenizer_vocab_size\":%u,\"m1_tokenizer_sha256\":",
+                  app.all_theorems_verified ? "verified" : "degraded",
+                  cat_count, eng->feed_count, eng->article_count, eng->inv_count,
+                  (unsigned long long)app.index_generation,
+                  ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u);
+    json_cstr(out_json, ctx->tokenizer ? ctx->tokenizer->sha256 : "");
+    buffer_format(out_json,
+                  ",\"all_theorems_verified\":%s,\"theorems_verified_count\":%u,\"theorems_total_count\":%u,"
+                  "\"memory\":{\"total_resident_bytes\":%zu,\"struct_base_bytes\":%zu,"
+                  "\"arena_bytes_used\":%zu,\"arena_bytes_capacity\":%zu,\"arena_block_count\":%zu,"
+                  "\"feed_and_article_table_bytes\":%zu,\"inverted_index_bytes\":%zu,"
+                  "\"bitset_fiber_bytes\":%zu,\"lsh_and_dedup_bytes\":%zu,"
+                  "\"query_cache_bytes\":%zu,\"query_cache_valid_entries\":%zu},"
+                  "\"mathematical_invariants\":{\"leinster_magnitude\":%.8f,\"euler_characteristic\":%d,"
+                  "\"fiedler_eigenvalue\":%.6f,\"cheeger_constant\":%.6f,\"gauss_bonnet_total\":%.8f,"
+                  "\"ihara_zeta_val\":%.6f,\"tropical_eigenvalue\":%.6f,\"sinkhorn_divergence\":%.6f,"
+                  "\"fisher_rao_geodesic\":%.6f,\"day_adjunction_defect\":%.12e,"
+                  "\"rota_baxter_defect\":%.12e,\"max_numerical_defect\":%.12e},"
+                  "\"atmospheric_physics\":{\"lorenz_state\":[%.4f,%.4f,%.4f],\"lyapunov_max\":%.6f,"
+                  "\"lyapunov_sum_div\":%.4f,\"kaplan_yorke_dim\":%.6f,\"predictability_horizon\":%.4f,"
+                  "\"saturation_vapor_hpa\":%.4f,\"wet_bulb_celsius\":%.4f,\"rossby_phase_speed\":%.4f,"
+                  "\"rossby_stationary_k\":%.4f,\"omega_blocking_regime\":%s},"
+                  "\"situation_room\":{\"cyber_strategic_articles\":%zu,\"frontier_ai_articles\":%zu,"
+                  "\"severe_weather_articles\":%zu,\"macro_active_articles\":%zu,\"sports_articles\":%zu,"
+                  "\"emerging_category\":",
+                  app.all_theorems_verified ? "true" : "false",
+                  app.theorems_verified_count,
+                  app.theorems_total_count,
+                  app.total_resident_bytes,
+                  app.struct_base_bytes,
+                  app.arena_bytes_used,
+                  app.arena_bytes_capacity,
+                  app.arena_block_count,
+                  app.feed_and_article_table_bytes,
+                  app.inverted_index_bytes,
+                  app.bitset_fiber_bytes,
+                  app.lsh_and_dedup_bytes,
+                  app.query_cache_bytes,
+                  app.query_cache_valid_entries,
+                  app.leinster_magnitude,
+                  app.euler_characteristic,
+                  app.fiedler_eigenvalue,
+                  app.cheeger_constant,
+                  app.gauss_bonnet_total,
+                  app.ihara_zeta_val,
+                  app.tropical_eigenvalue,
+                  app.sinkhorn_divergence,
+                  app.fisher_rao_geodesic,
+                  app.day_adjunction_defect,
+                  app.rota_baxter_defect,
+                  app.max_numerical_defect,
+                  app.weather_physics.lorenz_state[0],
+                  app.weather_physics.lorenz_state[1],
+                  app.weather_physics.lorenz_state[2],
+                  app.weather_physics.lyapunov_max,
+                  app.weather_physics.lyapunov_sum_div,
+                  app.weather_physics.kaplan_yorke_dim,
+                  app.weather_physics.predictability_horizon,
+                  app.weather_physics.saturation_vapor_hpa,
+                  app.weather_physics.wet_bulb_celsius,
+                  app.weather_physics.rossby_phase_speed,
+                  app.weather_physics.rossby_stationary_k,
+                  app.weather_physics.omega_blocking_regime ? "true" : "false",
+                  app.cyber_strategic_articles,
+                  app.frontier_ai_articles,
+                  app.severe_weather_articles,
+                  app.macro_active_articles,
+                  app.sports_articles);
+    json_cstr(out_json, app.emerging_category_slug);
+    buffer_format(out_json,
+                  ",\"emerging_acceleration_z\":%.4f},"
+                  "\"automation\":{\"active_watchpoint_rules\":%zu,\"total_watchpoint_alerts\":%zu,"
+                  "\"total_bandit_pulls\":%llu,\"auto_poll_interval_sec\":%u,\"auto_cycles_completed\":%u,"
+                  "\"top_bandit_feeds\":[",
+                  app.emerging_acceleration_z,
+                  app.active_watchpoint_rules,
+                  app.total_watchpoint_alerts,
+                  (unsigned long long)app.total_bandit_pulls,
+                  app.auto_poll_interval_sec,
+                  app.auto_cycles_completed);
+    for(size_t i = 0; i < app.top_bandit_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      buffer_format(out_json, "{\"feed_id\":%u,\"title\":", app.top_bandit_feeds[i].feed_id);
+      json_cstr(out_json, app.top_bandit_feeds[i].title ? app.top_bandit_feeds[i].title : "");
+      buffer_text(out_json, ",\"category\":");
+      json_cstr(out_json, app.top_bandit_feeds[i].category ? app.top_bandit_feeds[i].category : "");
+      buffer_format(out_json, ",\"ucb1_score\":%.4f}", app.top_bandit_feeds[i].ucb1_score);
+    }
+    buffer_text(out_json, "]}}");
+    return 0;
+  }
+
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
     char q_str[256], cat[64], ex_cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
     char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[64], sp_str[32];
+    char wx_str[32], wxs_str[32];
     char reg[64], ctry[16], mctry[16], lang[16], tier[32];
     char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
     query_param(qs, "q", q_str, sizeof(q_str));
@@ -1336,6 +2008,8 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "ai_license", ail_str, sizeof(ail_str));
     query_param(qs, "hf_repo", hfr_str, sizeof(hfr_str));
     query_param(qs, "sport", sp_str, sizeof(sp_str));
+    query_param(qs, "weather", wx_str, sizeof(wx_str));
+    query_param(qs, "weather_severity", wxs_str, sizeof(wxs_str));
     query_param(qs, "region", reg, sizeof(reg));
     query_param(qs, "country", ctry, sizeof(ctry));
     query_param(qs, "mentioned_country", mctry, sizeof(mctry));
@@ -1366,13 +2040,17 @@ int http_handle_request(ServerContext *ctx,
     aq.ai_license = ail_str[0] ? ail_str : NULL;
     aq.hf_repo = hfr_str[0] ? hfr_str : NULL;
     aq.sport = sp_str[0] ? sp_str : NULL;
+    aq.weather = wx_str[0] ? wx_str : NULL;
+    aq.weather_severity = wxs_str[0] ? wxs_str : NULL;
     aq.region = reg[0] ? reg : NULL;
     aq.country = ctry[0] ? ctry : NULL;
     aq.mentioned_country = mctry[0] ? mctry : NULL;
     aq.language = lang[0] ? lang : NULL;
     aq.source_tier = tier[0] ? tier : NULL;
     aq.feed_id = fid_str[0] ? (uint32_t)strtoul(fid_str, NULL, 10) : 0u;
-    aq.diversify_mmr = (strcmp(div_str, "1") == 0 || strcmp(div_str, "true") == 0);
+    aq.diversify_mmr = (strcmp(div_str, "2") == 0 || strcmp(div_str, "dpp") == 0)
+                           ? 2
+                           : ((strcmp(div_str, "1") == 0 || strcmp(div_str, "true") == 0) ? 1 : 0);
     aq.mmr_lambda = lam_str[0] ? strtod(lam_str, NULL) : 0.65;
     aq.limit = lim_str[0] ? (size_t)strtoul(lim_str, NULL, 10) : 50u;
     aq.offset = off_str[0] ? (size_t)strtoul(off_str, NULL, 10) : 0u;
@@ -1520,6 +2198,13 @@ int http_handle_request(ServerContext *ctx,
     for(size_t i = 0; i < ent.sport_count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
       json_cstr(out_json, ent.sports[i]);
+    }
+    buffer_text(out_json, "],\"weather_severity\":");
+    json_cstr(out_json, weather_severity_slug(ent.weather_severity));
+    buffer_format(out_json, ",\"weather_score\":%.2f,\"weather\":[", ent.weather_score);
+    for(size_t i = 0; i < ent.weather_count; ++i) {
+      if(i > 0) buffer_text(out_json, ",");
+      json_cstr(out_json, ent.weather[i]);
     }
     buffer_text(out_json, "]}}");
 
@@ -1762,9 +2447,10 @@ void http_serve_client(ServerContext *ctx, int client) {
     const char *body = req + hdr_len;
     size_t body_len = expected_body;
 
-    int is_write = (strcmp(method, "POST") == 0 &&
+    int is_write = ((strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0) &&
                     (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
-                     strncmp(target, "/api/v1/feeds/poll", 18u) == 0));
+                     strncmp(target, "/api/v1/feeds/poll", 18u) == 0 ||
+                     strncmp(target, "/api/v1/automation/", 19u) == 0));
     if(is_write) engine_write_lock(ctx->engine);
     else engine_read_lock(ctx->engine);
 
@@ -1816,6 +2502,27 @@ static void *http_client_worker(void *arg) {
   return NULL;
 }
 
+static void *http_auto_daemon_worker(void *arg) {
+  ServerContext *ctx = (ServerContext *)arg;
+  for(;;) {
+    engine_read_lock(ctx->engine);
+    uint32_t interval_sec = ctx->engine->auto_poll_interval_sec;
+    engine_unlock(ctx->engine);
+    if(interval_sec == 0u) {
+      sleep(5u);
+      continue;
+    }
+    sleep(interval_sec);
+    engine_write_lock(ctx->engine);
+    if(ctx->engine->auto_poll_interval_sec > 0u) {
+      engine_poll_bandit_auto(ctx->engine, 8u, 4u);
+      if(ctx->snapshot_path) engine_save_snapshot(ctx->engine, ctx->snapshot_path);
+    }
+    engine_unlock(ctx->engine);
+  }
+  return NULL;
+}
+
 int http_server_listen(ServerContext *ctx) {
   if(!ctx) return -1;
   signal(SIGPIPE, SIG_IGN);
@@ -1840,10 +2547,16 @@ int http_server_listen(ServerContext *ctx) {
     return -1;
   }
 
-  printf("oyez c23 server listening on http://127.0.0.1:%u (feeds=%zu, articles=%zu)\n",
+  pthread_t auto_tid;
+  if(pthread_create(&auto_tid, NULL, http_auto_daemon_worker, ctx) == 0) {
+    pthread_detach(auto_tid);
+  }
+
+  printf("oyez c23 server listening on http://127.0.0.1:%u (feeds=%zu, articles=%zu, rules=%zu)\n",
          ctx->port ? ctx->port : 8787u,
          ctx->engine->feed_count,
-         ctx->engine->article_count);
+         ctx->engine->article_count,
+         ctx->engine->automation_rule_count);
   fflush(stdout);
 
   for(;;) {

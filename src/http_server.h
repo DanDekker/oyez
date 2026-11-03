@@ -19,6 +19,7 @@ int http_url_is_public(const char *url);
 int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted);
 size_t engine_poll_all(OyezEngine *engine, size_t max_feeds);
 size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count);
+size_t engine_poll_bandit_auto(OyezEngine *engine, size_t batch_size, size_t thread_count);
 
 int http_handle_request(ServerContext *ctx,
                         const char *method,

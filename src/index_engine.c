@@ -341,6 +341,215 @@ static const InvertedBucket *inv_lookup(const OyezEngine *engine, const char *te
   return NULL;
 }
 
+static const char *const k_auto_action_slugs[4] = {
+    "alert-ring",
+    "jsonl-log",
+    "webhook-post",
+    "snapshot-checkpoint",
+};
+
+const char *automation_action_slug(AutomationActionType act) {
+  if((unsigned)act >= 4u) return "alert-ring";
+  return k_auto_action_slugs[act];
+}
+
+int automation_action_from_slug(const char *slug, AutomationActionType *out) {
+  if(!slug || !out) return -1;
+  for(uint32_t i = 0; i < 4u; ++i) {
+    if(strcmp(slug, k_auto_action_slugs[i]) == 0) {
+      *out = (AutomationActionType)i;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int equals_icase(const char *a, const char *b) {
+  if(!a || !b) return 0;
+  while(*a && *b) {
+    if(tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static int contains_icase(const char *haystack, const char *needle) {
+  if(!haystack || !needle || !needle[0]) return 0;
+  size_t nlen = strlen(needle);
+  for(const char *p = haystack; *p; ++p) {
+    size_t k = 0;
+    while(k < nlen && p[k] && tolower((unsigned char)p[k]) == tolower((unsigned char)needle[k])) {
+      k++;
+    }
+    if(k == nlen) return 1;
+  }
+  return 0;
+}
+
+static int article_matches_automation_rule(const ArticleRecord *a, const AutomationRule *r, double *out_score) {
+  if(!a || !r || !r->enabled) return 0;
+  if(a->clearance < r->min_clearance) return 0;
+  if(a->ai_tier < r->min_ai_tier) return 0;
+  if(a->weather_severity < r->min_weather_severity) return 0;
+  if(r->fiscal_stance != FISCAL_NEUTRAL && a->fiscal_stance != r->fiscal_stance) return 0;
+
+  if(r->category[0] != '\0') {
+    OntologyNodeId node = ONTO_ROOT;
+    if(ontology_from_slug(r->category, &node) == 0 && node != ONTO_ROOT) {
+      if((a->closure_ontology_mask & (1u << node)) == 0u) return 0;
+    }
+  }
+  if(r->region[0] != '\0') {
+    WorldRegion reg = REGION_GLOBAL;
+    if(world_region_from_slug(r->region, &reg) == 0 && reg != REGION_GLOBAL) {
+      if(a->feed_region != reg) return 0;
+    }
+  }
+  if(r->weather[0] != '\0') {
+    int found_wx = 0;
+    for(size_t i = 0; i < a->mentioned_weather_count; ++i) {
+      if(equals_icase(a->mentioned_weather[i], r->weather)) {
+        found_wx = 1;
+        break;
+      }
+    }
+    if(!found_wx) return 0;
+  }
+  if(r->query[0] != '\0') {
+    int found_q = 0;
+    if(a->title && contains_icase(a->title, r->query)) found_q = 1;
+    else if(a->summary && contains_icase(a->summary, r->query)) found_q = 1;
+    if(!found_q) return 0;
+  }
+
+  double composite = a->opsec_score + a->macro_score + a->ai_compute_score + a->weather_score + a->sports_score;
+  if(r->min_score > 0.0 && composite < r->min_score) return 0;
+  if(out_score) *out_score = composite > 0.0 ? composite : 1.0;
+  return 1;
+}
+
+static size_t evaluate_article_automation_rules(OyezEngine *engine, const ArticleRecord *a) {
+  if(!engine || !a) return 0;
+  size_t fired = 0;
+  for(size_t i = 0; i < engine->automation_rule_count; ++i) {
+    AutomationRule *r = &engine->automation_rules[i];
+    double trig_score = 0.0;
+    if(!article_matches_automation_rule(a, r, &trig_score)) continue;
+
+    /* Avoid duplicate alert for the same (rule_id, article_id) in ring buffer */
+    int already = 0;
+    for(size_t k = 0; k < engine->automation_alert_count; ++k) {
+      if(engine->automation_alerts[k].rule_id == r->id &&
+         engine->automation_alerts[k].article_id == a->id) {
+        already = 1;
+        break;
+      }
+    }
+    if(already) continue;
+
+    r->hit_count++;
+    r->last_triggered_ms = a->published_ms > 0 ? a->published_ms : wall_time_ms();
+
+    size_t slot = engine->automation_alert_head % MAX_AUTOMATION_ALERTS;
+    engine->automation_alert_head = (engine->automation_alert_head + 1u) % MAX_AUTOMATION_ALERTS;
+    if(engine->automation_alert_count < MAX_AUTOMATION_ALERTS) {
+      engine->automation_alert_count++;
+    }
+
+    AutomationAlert *al = &engine->automation_alerts[slot];
+    memset(al, 0, sizeof(*al));
+    al->alert_id = engine->next_alert_id++;
+    al->rule_id = r->id;
+    strncpy(al->rule_name, r->name, sizeof(al->rule_name) - 1u);
+    al->article_id = a->id;
+    strncpy(al->article_title, a->title ? a->title : "", sizeof(al->article_title) - 1u);
+    strncpy(al->article_url, a->url ? a->url : "", sizeof(al->article_url) - 1u);
+    strncpy(al->category_slug, a->feed_category ? a->feed_category : "all-news", sizeof(al->category_slug) - 1u);
+    strncpy(al->weather_severity_slug, weather_severity_slug(a->weather_severity), sizeof(al->weather_severity_slug) - 1u);
+    strncpy(al->clearance_slug, clearance_level_slug(a->clearance), sizeof(al->clearance_slug) - 1u);
+    al->trigger_score = trig_score;
+    al->triggered_at_ms = r->last_triggered_ms;
+    al->action_taken = r->action;
+
+    if(r->action == AUTO_ACTION_JSONL_LOG) {
+      const char *log_path = (r->target[0] != '\0') ? r->target : "data/alerts.jsonl";
+      /* Only write to safe relative paths inside data/ */
+      if(strncmp(log_path, "data/", 5u) == 0 && strstr(log_path, "..") == NULL) {
+        FILE *fp = fopen(log_path, "ab");
+        if(fp) {
+          fprintf(fp,
+                  "{\"alert_id\":%llu,\"rule\":\"%s\",\"article_id\":%u,\"weather_severity\":\"%s\",\"score\":%.2f}\n",
+                  (unsigned long long)al->alert_id,
+                  al->rule_name,
+                  al->article_id,
+                  al->weather_severity_slug,
+                  al->trigger_score);
+          fclose(fp);
+        }
+      }
+    } else if(r->action == AUTO_ACTION_SNAPSHOT) {
+      const char *snap_path = (r->target[0] != '\0') ? r->target : "data/oyez_auto.ix";
+      if(strncmp(snap_path, "data/", 5u) == 0 && strstr(snap_path, "..") == NULL &&
+         strstr(snap_path, ".ix") != NULL) {
+        (void)engine_save_snapshot(engine, snap_path);
+      }
+    }
+    fired++;
+  }
+  return fired;
+}
+
+static void seed_default_automation_rules(OyezEngine *engine) {
+  engine->automation_rule_count = 0;
+  engine->next_rule_id = 1u;
+  engine->next_alert_id = 1u;
+
+  AutomationRule r1 = {0};
+  r1.id = engine->next_rule_id++;
+  strcpy(r1.name, "severe-weather-hazard");
+  r1.min_weather_severity = WEATHER_WARNING;
+  r1.action = AUTO_ACTION_ALERT_RING;
+  r1.enabled = 1;
+  engine->automation_rules[engine->automation_rule_count++] = r1;
+
+  AutomationRule r2 = {0};
+  r2.id = engine->next_rule_id++;
+  strcpy(r2.name, "zero-day-cyber-alert");
+  strcpy(r2.category, "cyber");
+  r2.min_clearance = CLEARANCE_ZERO_DAY;
+  r2.action = AUTO_ACTION_ALERT_RING;
+  r2.enabled = 1;
+  engine->automation_rules[engine->automation_rule_count++] = r2;
+
+  AutomationRule r3 = {0};
+  r3.id = engine->next_rule_id++;
+  strcpy(r3.name, "frontier-ai-release");
+  strcpy(r3.category, "ai");
+  r3.min_ai_tier = AI_TIER_FRONTIER_PRETRAINING;
+  r3.action = AUTO_ACTION_ALERT_RING;
+  r3.enabled = 1;
+  engine->automation_rules[engine->automation_rule_count++] = r3;
+
+  AutomationRule r4 = {0};
+  r4.id = engine->next_rule_id++;
+  strcpy(r4.name, "macro-central-bank-shock");
+  strcpy(r4.category, "finance");
+  r4.min_score = 4.5;
+  r4.action = AUTO_ACTION_ALERT_RING;
+  r4.enabled = 1;
+  engine->automation_rules[engine->automation_rule_count++] = r4;
+
+  AutomationRule r5 = {0};
+  r5.id = engine->next_rule_id++;
+  strcpy(r5.name, "catastrophic-planetary-emergency");
+  r5.min_weather_severity = WEATHER_CATASTROPHIC;
+  r5.action = AUTO_ACTION_JSONL_LOG;
+  strcpy(r5.target, "data/automation_alerts.jsonl");
+  r5.enabled = 1;
+  engine->automation_rules[engine->automation_rule_count++] = r5;
+}
+
 void engine_init(OyezEngine *engine) {
   ontology_init();
   memset(engine, 0, sizeof(*engine));
@@ -348,6 +557,7 @@ void engine_init(OyezEngine *engine) {
   pthread_mutex_init(&engine->cache_lock, NULL);
   engine->next_feed_id = 1u;
   engine->next_article_id = 1u;
+  seed_default_automation_rules(engine);
   inv_table_grow(engine);
   dedup_table_grow(engine);
   for(int b = 0; b < 4; ++b) {
@@ -414,6 +624,7 @@ void engine_free(OyezEngine *engine) {
   for(size_t i = 0; i < FISCAL_STANCE_COUNT; ++i) bitset_free(&engine->by_fiscal_stance[i]);
   for(size_t i = 0; i < AI_TIER_COUNT; ++i) bitset_free(&engine->by_ai_tier[i]);
   for(size_t i = 0; i < AI_LICENSE_COUNT; ++i) bitset_free(&engine->by_ai_license[i]);
+  for(size_t i = 0; i < WEATHER_SEVERITY_COUNT; ++i) bitset_free(&engine->by_weather_severity[i]);
   for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
@@ -430,6 +641,7 @@ void engine_free(OyezEngine *engine) {
     if(engine->by_ai_infra[i].occupied) bitset_free(&engine->by_ai_infra[i].bits);
     if(engine->by_hf_repo[i].occupied) bitset_free(&engine->by_hf_repo[i].bits);
     if(engine->by_sport[i].occupied) bitset_free(&engine->by_sport[i].bits);
+    if(engine->by_weather[i].occupied) bitset_free(&engine->by_weather[i].bits);
   }
   for(size_t i = 0; i < 64u; ++i) {
     if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
@@ -551,6 +763,9 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   if((unsigned)a->ai_license < AI_LICENSE_COUNT) {
     bitset_set(&engine->by_ai_license[a->ai_license], slot);
   }
+  if((unsigned)a->weather_severity < WEATHER_SEVERITY_COUNT) {
+    bitset_set(&engine->by_weather_severity[a->weather_severity], slot);
+  }
   for(uint32_t node = 0; node < ONTOLOGY_NODE_COUNT; ++node) {
     if(a->direct_ontology_mask & (1u << node)) {
       bitset_set(&engine->by_direct_ontology[node], slot);
@@ -598,6 +813,10 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
     BitSet *sp_cb = country_fiber_get(engine->by_sport, 128u, a->mentioned_sports[i], 1);
     if(sp_cb) bitset_set(sp_cb, slot);
+  }
+  for(size_t i = 0; i < a->mentioned_weather_count; ++i) {
+    BitSet *wx_cb = country_fiber_get(engine->by_weather, 128u, a->mentioned_weather[i], 1);
+    if(wx_cb) bitset_set(wx_cb, slot);
   }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
@@ -731,6 +950,8 @@ int engine_ingest_article(OyezEngine *engine,
   a->ai_license = ent.ai_license;
   a->openness_score = ent.openness_score;
   a->sports_score = ent.sports_score;
+  a->weather_severity = ent.weather_severity;
+  a->weather_score = ent.weather_score;
   a->direct_ontology_mask = ent.direct_ontology_mask;
   a->closure_ontology_mask = ent.closure_ontology_mask;
 
@@ -754,6 +975,9 @@ int engine_ingest_article(OyezEngine *engine,
   }
   for(size_t i = 0; i < ent.sport_count && a->mentioned_sport_count < MAX_EXTRACTED_SPORTS; ++i) {
     strcpy(a->mentioned_sports[a->mentioned_sport_count++], ent.sports[i]);
+  }
+  for(size_t i = 0; i < ent.weather_count && a->mentioned_weather_count < MAX_EXTRACTED_WEATHER; ++i) {
+    strcpy(a->mentioned_weather[a->mentioned_weather_count++], ent.weather[i]);
   }
 
   /* Always include feed country if valid 2-letter ISO code */
@@ -791,6 +1015,7 @@ int engine_ingest_article(OyezEngine *engine,
 
   index_article_record(engine, a);
   feed->article_count++;
+  evaluate_article_automation_rules(engine, a);
   pthread_mutex_lock(&engine->cache_lock);
   engine->index_generation++;
   for(size_t c = 0; c < 64u; ++c) {
@@ -862,6 +1087,8 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   h ^= mix64(hash_exact_cstr(q->ai_license ? q->ai_license : "") + 18u);
   h ^= mix64(hash_exact_cstr(q->hf_repo ? q->hf_repo : "") + 19u);
   h ^= mix64(hash_exact_cstr(q->sport ? q->sport : "") + 20u);
+  h ^= mix64(hash_exact_cstr(q->weather ? q->weather : "") + 22u);
+  h ^= mix64(hash_exact_cstr(q->weather_severity ? q->weather_severity : "") + 23u);
   h ^= mix64(hash_exact_cstr(q->region ? q->region : "") + 8u);
   h ^= mix64(hash_exact_cstr(q->country ? q->country : "") + 9u);
   h ^= mix64(hash_exact_cstr(q->mentioned_country ? q->mentioned_country : "") + 10u);
@@ -873,7 +1100,7 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   size_t norm_limit = q->limit > 0 ? q->limit : 50u;
   if(norm_limit > 500u) norm_limit = 500u;
   h ^= mix64(((uint64_t)q->feed_id << 32u) | ((uint64_t)(q->use_category_morphism != 0) << 16u) |
-             ((uint64_t)(q->diversify_mmr != 0) << 15u));
+             ((uint64_t)(q->diversify_mmr & 3) << 14u));
   h ^= mix64(lambda_bits ^ 0xB5AD4ECEDA1CE2A9ULL);
   h ^= mix64((uint64_t)norm_limit ^ 0xA57B57D5A57B57D5ULL);
   h ^= mix64((uint64_t)q->offset ^ 0xC6A4A7935BD1E995ULL);
@@ -1045,6 +1272,25 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
+  if(q->weather && q->weather[0]) {
+    const BitSet *wxb = country_fiber_get((CountryFiber *)engine->by_weather, 128u, q->weather, 0);
+    if(wxb) bitset_and_inplace(&candidates, wxb);
+    else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
+  if(q->weather_severity && q->weather_severity[0]) {
+    WeatherSeverity ws;
+    if(weather_severity_from_slug(q->weather_severity, &ws) == 0) {
+      bitset_and_inplace(&candidates, &engine->by_weather_severity[ws]);
+    } else {
+      bitset_free(&candidates);
+      return 0;
+    }
+  }
+
   if(q->category && q->category[0]) {
     OntologyNodeId node;
     if(ontology_from_slug(q->category, &node) == 0) {
@@ -1189,7 +1435,9 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     return 0;
   }
 
-  if(q->diversify_mmr && pool_count > 1u) {
+  if(q->diversify_mmr == 2 && pool_count > 1u) {
+    engine_dpp_rerank(pool, pool_count, q->mmr_lambda);
+  } else if(q->diversify_mmr && pool_count > 1u) {
     size_t window = pool_count < 120u ? pool_count : 120u;
     double max_rel = pool[0].score > 0.0 ? pool[0].score : 1.0;
     double lambda = (q->mmr_lambda > 0.0 && q->mmr_lambda <= 1.0) ? q->mmr_lambda : 0.65;
@@ -1275,6 +1523,65 @@ void search_response_free(SearchResponse *res) {
   if(!res) return;
   free(res->hits);
   memset(res, 0, sizeof(*res));
+}
+
+double engine_dpp_rerank(ScoredArticle *pool, size_t count, double lambda) {
+  /* Fast Greedy Determinantal Point Process (DPP) MAP Inference (Chen et al. NeurIPS 2018)
+   * via Incremental Cholesky Orthogonalization:
+   * Given quality scores q_i and positive-definite Gram similarity kernel S_{i,j},
+   * constructs L_{i,j} = q_i * S_{i,j} * q_j + eps * delta_{i,j} and greedily maximizes
+   * the parallelotope volume log det(L_Y) = sum_{t=0}^{W-1} ln(d_{j_t^*}^2) in O(W^3). */
+  if(!pool || count == 0u) return 0.0;
+  size_t W = count < 48u ? count : 48u;
+  double max_rel = pool[0].score > 0.0 ? pool[0].score : 1.0;
+  double lam = (lambda > 0.0 && lambda <= 1.0) ? lambda : 0.65;
+
+  double q_vec[48];
+  double d_sq[48];
+  double chol[48][48];
+  uint8_t selected[48] = {0};
+  ScoredArticle reranked[48];
+  memset(chol, 0, sizeof(chol));
+
+  for(size_t i = 0; i < W; ++i) {
+    double norm_r = pool[i].score > 0.0 ? (pool[i].score / max_rel) : 0.01;
+    q_vec[i] = 0.5 + lam * norm_r;
+    d_sq[i] = q_vec[i] * q_vec[i] * 1.02; /* Diagonal L_{i,i} with Tikhonov regularization */
+  }
+
+  double log_det = 0.0;
+  for(size_t t = 0; t < W; ++t) {
+    size_t best_j = 0;
+    double best_d2 = -1.0;
+    for(size_t i = 0; i < W; ++i) {
+      if(!selected[i] && d_sq[i] > best_d2) {
+        best_d2 = d_sq[i];
+        best_j = i;
+      }
+    }
+    if(best_d2 <= 1e-12) break;
+    selected[best_j] = 1u;
+    reranked[t] = pool[best_j];
+    log_det += log(best_d2);
+    double sigma = sqrt(best_d2);
+    double inv_sigma = 1.0 / sigma;
+
+    for(size_t i = 0; i < W; ++i) {
+      if(selected[i]) continue;
+      double s_ji = (1.0 - lam) * article_similarity(pool[best_j].article, pool[i].article);
+      double l_ji = q_vec[best_j] * s_ji * q_vec[i];
+      double dot = 0.0;
+      for(size_t s = 0; s < t; ++s) {
+        dot += chol[best_j][s] * chol[i][s];
+      }
+      double e_i = (l_ji - dot) * inv_sigma;
+      chol[i][t] = e_i;
+      double next_d2 = d_sq[i] - e_i * e_i;
+      d_sq[i] = next_d2 > 1e-12 ? next_d2 : 1e-12;
+    }
+  }
+  memcpy(pool, reranked, W * sizeof(ScoredArticle));
+  return log_det;
 }
 
 size_t engine_find_near_duplicates(const OyezEngine *engine,
@@ -1965,6 +2272,115 @@ void engine_temporal_sheaf(const OyezEngine *engine,
   out_temporal->highest_acceleration_node = best_a_node;
 }
 
+void engine_topos_state(const OyezEngine *engine,
+                        WorldRegion source_region,
+                        WorldRegion target_region,
+                        OntologyNodeId prop_a,
+                        OntologyNodeId prop_b,
+                        ToposState *out_topos) {
+  if(!out_topos) return;
+  memset(out_topos, 0, sizeof(*out_topos));
+  out_topos->source_region = (uint32_t)source_region < WORLD_REGION_COUNT ? source_region : REGION_EAST_ASIA;
+  out_topos->target_region = (uint32_t)target_region < WORLD_REGION_COUNT ? target_region : REGION_EUROPE;
+  out_topos->prop_a = (uint32_t)prop_a < ONTOLOGY_NODE_COUNT ? prop_a : ONTO_AI;
+  out_topos->prop_b = (uint32_t)prop_b < ONTOLOGY_NODE_COUNT ? prop_b : ONTO_TECHNOLOGY;
+
+  uint32_t mask_a = 1u << out_topos->prop_a;
+  uint32_t mask_b = 1u << out_topos->prop_b;
+  out_topos->ideal_a = ontology_downward_closure(mask_a);
+  out_topos->ideal_b = ontology_downward_closure(mask_b);
+  out_topos->heyting_implication_ab = ontology_heyting_implication(mask_a, mask_b);
+  out_topos->heyting_negation_a = ontology_heyting_negation(mask_a);
+  out_topos->lawvere_tierney_sheaf_a = ontology_lawvere_tierney_sheafify(mask_a);
+  out_topos->coheyting_subtraction_ab = ontology_coheyting_subtraction(mask_a, mask_b);
+  out_topos->coheyting_supplement_a = ontology_coheyting_negation(mask_a);
+  out_topos->lawvere_boundary_a = ontology_coheyting_boundary(mask_a);
+  out_topos->lawvere_boundary_b = ontology_coheyting_boundary(mask_b);
+
+  uint32_t meet_ab = out_topos->ideal_a & out_topos->ideal_b;
+  out_topos->lawvere_boundary_meet_ab = ontology_coheyting_boundary(meet_ab);
+  uint32_t leibniz_rhs = (out_topos->lawvere_boundary_a & out_topos->ideal_b) |
+                         (out_topos->ideal_a & out_topos->lawvere_boundary_b);
+  out_topos->leibniz_rule_holds = (out_topos->lawvere_boundary_meet_ab == leibniz_rhs) ? 1 : 0;
+  out_topos->universal_quantifier_ab = ontology_universal_quantifier(out_topos->ideal_a | out_topos->ideal_b);
+  ontology_subobject_classifier_omega(mask_a, out_topos->omega_truth_a);
+
+  double f_src[ONTOLOGY_NODE_COUNT];
+  double f_dst[ONTOLOGY_NODE_COUNT];
+  double f_dual[ONTOLOGY_NODE_COUNT];
+  const double k_scalar = 100.0;
+
+  const int has_src_reg = (engine && engine->article_count > 0 &&
+                           bitset_popcount(&engine->by_region[out_topos->source_region]) > 0);
+  const int has_dst_reg = (engine && engine->article_count > 0 &&
+                           bitset_popcount(&engine->by_region[out_topos->target_region]) > 0);
+
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    double sc = has_src_reg
+                    ? (double)bitset_intersect_count(&engine->by_region[out_topos->source_region],
+                                                     &engine->by_closure_ontology[c])
+                    : (double)popcnt64((uint64_t)ontology_node((OntologyNodeId)c)->downward_mask);
+    double dc = has_dst_reg
+                    ? (double)bitset_intersect_count(&engine->by_region[out_topos->target_region],
+                                                     &engine->by_closure_ontology[c])
+                    : (double)popcnt64((uint64_t)ontology_node((OntologyNodeId)c)->upward_mask);
+    f_src[c] = sc;
+    f_dst[c] = dc;
+    f_dual[c] = k_scalar - dc;
+
+    double diff = fabs(sc - dc);
+    double scale = (sc + dc) > 1.0 ? (sc + dc) : 1.0;
+    if(diff <= 0.35 * scale) {
+      out_topos->equalizer_mask |= (1u << c);
+    }
+    out_topos->coequalizer_quotient[c] = 0.5 * (sc + dc) + 0.5 * diff * ontology_node_magnitude_weight((OntologyNodeId)c);
+  }
+  /* Close equalizer subobject downward so Eq(F_src, F_dst) is a genuine subpresheaf sieve */
+  out_topos->equalizer_mask = ontology_universal_quantifier(out_topos->equalizer_mask);
+
+  ontology_isbell_conjugate_covariant(f_src, out_topos->isbell_covariant_star);
+  ontology_isbell_conjugate_contravariant(out_topos->isbell_covariant_star, out_topos->isbell_double_hull);
+  out_topos->isbell_envelope_defect = ontology_isbell_envelope_defect(f_src);
+  out_topos->profunctor_end = ontology_profunctor_end(f_src, f_dst);
+  out_topos->profunctor_coend = ontology_profunctor_coend(f_src, f_dst);
+  out_topos->weighted_colimit = ontology_weighted_colimit(f_src, f_dst);
+  out_topos->weighted_limit = ontology_weighted_limit(f_src, f_dst);
+  double lim_dual = ontology_weighted_limit(f_src, f_dual);
+  out_topos->tensor_hom_adjunction_defect = fabs((k_scalar - out_topos->weighted_colimit) - lim_dual);
+
+  /* Day Convolution, Day Internal Hom, and Day Tensor-Hom Adjunction Defect */
+  ontology_day_convolution(f_src, f_dst, out_topos->day_convolution_fg);
+  ontology_day_internal_hom(f_dst, out_topos->coequalizer_quotient, out_topos->day_internal_hom_gh);
+  out_topos->day_adjunction_defect = ontology_day_adjunction_defect(f_src, f_dst, out_topos->coequalizer_quotient);
+
+  /* Quillen Model Category Factorization A ~-> M ->> (A v B) */
+  ontology_quillen_factorize(mask_a, mask_b,
+                             &out_topos->quillen_acyclic_cofibration_m,
+                             &out_topos->quillen_fibration_target,
+                             &out_topos->quillen_weak_equivalence_holds);
+
+  /* Spivak Polynomial Endofunctor P_C(X) & Dependent Co-Design Lens */
+  ontology_polynomial_functor_eval(f_src, out_topos->polynomial_functor_px, out_topos->polynomial_codesign_lens);
+
+  /* Spectral Heat Kernel Semigroup H_t = exp(-t L_0) */
+  ontology_heat_kernel_propagate(f_src, 0.25, out_topos->heat_diffused_src);
+
+  /* Entropic Sinkhorn-Knopp Optimal Transport, Debiased Sinkhorn Divergence & Fisher-Rao Geodesic */
+  ontology_sinkhorn_optimal_transport(f_src, f_dst, 0.75, &out_topos->sinkhorn_ot);
+
+  /* Grothendieck-Leray Spectral Sequence (E_r^{p,q}, d_r) of Rank-Filtered Nerve F_p N(C) */
+  ontology_spectral_sequence(f_src, &out_topos->spectral_seq);
+
+  /* Simplicial Gauss-Bonnet-Chern, Forman-Ricci, Ollivier-Ricci Curvature & Discrete Ricci Flow */
+  ontology_ricci_curvature(f_src, &out_topos->ricci_curv);
+
+  /* Ihara-Bass Graph Zeta Function zeta_C(u), Karp's Tropical Eigenvalue & Tropical Polytope Hull */
+  ontology_ihara_zeta_and_tropical(f_src, 0.15, &out_topos->zeta_tropical);
+
+  /* Commutative Rota-Baxter Algebra (A, R) of Weight theta = -1 & Atkinson Birkhoff Factorization */
+  ontology_rota_baxter_algebra(f_src, f_dst, &out_topos->rota_baxter);
+}
+
 size_t engine_operad_compose(const OyezEngine *engine,
                              const char *region_a,
                              const char *region_b,
@@ -2183,6 +2599,20 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     }
   }
 
+  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
+    if(engine->by_weather[i].occupied) {
+      uint32_t deg = bitset_popcount(&engine->by_weather[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[ent_count] = &engine->by_weather[i].bits;
+      RankedEntity *e = &ents[ent_count++];
+      snprintf(e->id, sizeof(e->id), "weather:%s", engine->by_weather[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", engine->by_weather[i].key);
+      e->kind = "weather";
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+
   if(ent_count == 0) return 0;
   size_t N_art = engine->article_count;
   double *art_scores = malloc(N_art * sizeof(double));
@@ -2357,6 +2787,44 @@ int engine_save_snapshot(const OyezEngine *engine, const char *path) {
     wire_append_cstr(&buf, a->image_url);
   }
 
+  /* Consolidated One-Machine Extension Block ("OYEZAU01"):
+   * Persists per-feed UCB1 bandit telemetry, automation scheduler counters,
+   * and all custom/default watchpoint rules inside the single atomic snapshot. */
+  buffer_append(&buf, "OYEZAU01", 8u);
+  for(size_t i = 0; i < engine->feed_count; ++i) {
+    const FeedRecord *f = &engine->feeds[i];
+    wire_append_u32(&buf, f->fetch_count);
+    wire_append_u32(&buf, f->error_count);
+    wire_append_u64(&buf, f->last_fetched_ms);
+  }
+  wire_append_u64(&buf, engine->total_bandit_pulls);
+  wire_append_u32(&buf, engine->auto_poll_interval_sec);
+  wire_append_u64(&buf, engine->last_auto_cycle_ms);
+  wire_append_u64(&buf, engine->auto_cycles_completed);
+  wire_append_u32(&buf, engine->next_rule_id);
+  wire_append_u32(&buf, (uint32_t)engine->automation_rule_count);
+  for(size_t i = 0; i < engine->automation_rule_count; ++i) {
+    const AutomationRule *r = &engine->automation_rules[i];
+    wire_append_u32(&buf, r->id);
+    wire_append_cstr(&buf, r->name);
+    wire_append_cstr(&buf, r->query);
+    wire_append_cstr(&buf, r->category);
+    wire_append_cstr(&buf, r->region);
+    wire_append_cstr(&buf, r->weather);
+    wire_append_u32(&buf, (uint32_t)r->min_clearance);
+    wire_append_u32(&buf, (uint32_t)r->fiscal_stance);
+    wire_append_u32(&buf, (uint32_t)r->min_ai_tier);
+    wire_append_u32(&buf, (uint32_t)r->min_weather_severity);
+    uint64_t score_bits = 0;
+    memcpy(&score_bits, &r->min_score, sizeof(score_bits));
+    wire_append_u64(&buf, score_bits);
+    wire_append_u32(&buf, (uint32_t)r->action);
+    wire_append_cstr(&buf, r->target);
+    wire_append_u32(&buf, r->hit_count);
+    wire_append_u64(&buf, r->last_triggered_ms);
+    wire_append_u32(&buf, (uint32_t)(r->enabled ? 1u : 0u));
+  }
+
   if(buf.truncated || !buf.data) {
     buffer_free(&buf);
     return -1;
@@ -2504,6 +2972,114 @@ int engine_load_snapshot(OyezEngine *engine, const char *path) {
     if(ingest_rc != 0 || !inserted) goto fail;
   }
 
+  if(off + 8u <= payload_len && memcmp(bytes + off, "OYEZAU01", 8u) == 0) {
+    off += 8u;
+    for(uint32_t i = 0; i < fcount; ++i) {
+      uint32_t f_cnt = 0;
+      uint32_t e_cnt = 0;
+      uint64_t last_ms = 0;
+      if(!wire_read_u32(bytes, payload_len, &off, &f_cnt) ||
+         !wire_read_u32(bytes, payload_len, &off, &e_cnt) ||
+         !wire_read_u64(bytes, payload_len, &off, &last_ms)) {
+        goto fail;
+      }
+      staged.feeds[i].fetch_count = f_cnt;
+      staged.feeds[i].error_count = e_cnt;
+      staged.feeds[i].last_fetched_ms = last_ms;
+    }
+    uint64_t b_pulls = 0;
+    uint32_t poll_sec = 0;
+    uint64_t last_cyc_ms = 0;
+    uint64_t cyc_done = 0;
+    uint32_t next_rid = 1u;
+    uint32_t rcount = 0;
+    if(!wire_read_u64(bytes, payload_len, &off, &b_pulls) ||
+       !wire_read_u32(bytes, payload_len, &off, &poll_sec) ||
+       !wire_read_u64(bytes, payload_len, &off, &last_cyc_ms) ||
+       !wire_read_u64(bytes, payload_len, &off, &cyc_done) ||
+       !wire_read_u32(bytes, payload_len, &off, &next_rid) ||
+       !wire_read_u32(bytes, payload_len, &off, &rcount) ||
+       rcount > MAX_AUTOMATION_RULES) {
+      goto fail;
+    }
+    staged.total_bandit_pulls = b_pulls;
+    staged.auto_poll_interval_sec = poll_sec;
+    staged.last_auto_cycle_ms = last_cyc_ms;
+    staged.auto_cycles_completed = cyc_done;
+    staged.next_rule_id = next_rid > 0 ? next_rid : 1u;
+    staged.automation_rule_count = 0;
+    uint32_t saved_hits[MAX_AUTOMATION_RULES] = {0};
+    uint64_t saved_last_ms[MAX_AUTOMATION_RULES] = {0};
+
+    for(uint32_t i = 0; i < rcount; ++i) {
+      uint32_t rid = 0;
+      if(!wire_read_u32(bytes, payload_len, &off, &rid)) goto fail;
+      char *rname = wire_read_cstr(bytes, payload_len, &off);
+      char *rquery = wire_read_cstr(bytes, payload_len, &off);
+      char *rcat = wire_read_cstr(bytes, payload_len, &off);
+      char *rreg = wire_read_cstr(bytes, payload_len, &off);
+      char *rwx = wire_read_cstr(bytes, payload_len, &off);
+      uint32_t rclr = 0, rfisc = 0, rai = 0, rwxsev = 0, ract = 0, rhits = 0, ren = 0;
+      uint64_t rscore_bits = 0, rlast = 0;
+      if(!rname || !rquery || !rcat || !rreg || !rwx ||
+         !wire_read_u32(bytes, payload_len, &off, &rclr) ||
+         !wire_read_u32(bytes, payload_len, &off, &rfisc) ||
+         !wire_read_u32(bytes, payload_len, &off, &rai) ||
+         !wire_read_u32(bytes, payload_len, &off, &rwxsev) ||
+         !wire_read_u64(bytes, payload_len, &off, &rscore_bits)) {
+        free(rname); free(rquery); free(rcat); free(rreg); free(rwx);
+        goto fail;
+      }
+      if(!wire_read_u32(bytes, payload_len, &off, &ract)) {
+        free(rname); free(rquery); free(rcat); free(rreg); free(rwx);
+        goto fail;
+      }
+      char *rtarg = wire_read_cstr(bytes, payload_len, &off);
+      if(!rtarg ||
+         !wire_read_u32(bytes, payload_len, &off, &rhits) ||
+         !wire_read_u64(bytes, payload_len, &off, &rlast) ||
+         !wire_read_u32(bytes, payload_len, &off, &ren)) {
+        free(rname); free(rquery); free(rcat); free(rreg); free(rwx); free(rtarg);
+        goto fail;
+      }
+      AutomationRule *dst = &staged.automation_rules[staged.automation_rule_count++];
+      memset(dst, 0, sizeof(*dst));
+      dst->id = rid > 0 ? rid : (i + 1u);
+      if(dst->id >= staged.next_rule_id) staged.next_rule_id = dst->id + 1u;
+      strncpy(dst->name, rname, sizeof(dst->name) - 1u);
+      strncpy(dst->query, rquery, sizeof(dst->query) - 1u);
+      strncpy(dst->category, rcat, sizeof(dst->category) - 1u);
+      strncpy(dst->region, rreg, sizeof(dst->region) - 1u);
+      strncpy(dst->weather, rwx, sizeof(dst->weather) - 1u);
+      dst->min_clearance = rclr < CLEARANCE_LEVEL_COUNT ? (ClearanceLevel)rclr : CLEARANCE_PUBLIC;
+      dst->fiscal_stance = rfisc < FISCAL_STANCE_COUNT ? (FiscalStance)rfisc : FISCAL_NEUTRAL;
+      dst->min_ai_tier = rai < AI_TIER_COUNT ? (AiComputeTier)rai : AI_TIER_NONE;
+      dst->min_weather_severity = rwxsev < WEATHER_SEVERITY_COUNT ? (WeatherSeverity)rwxsev : WEATHER_CALM;
+      memcpy(&dst->min_score, &rscore_bits, sizeof(dst->min_score));
+      dst->action = ract <= (uint32_t)AUTO_ACTION_SNAPSHOT ? (AutomationActionType)ract : AUTO_ACTION_ALERT_RING;
+      strncpy(dst->target, rtarg, sizeof(dst->target) - 1u);
+      dst->hit_count = rhits;
+      dst->last_triggered_ms = rlast;
+      dst->enabled = ren ? 1 : 0;
+      saved_hits[i] = rhits;
+      saved_last_ms[i] = rlast;
+      free(rname); free(rquery); free(rcat); free(rreg); free(rwx); free(rtarg);
+    }
+    /* Re-populate the in-memory alert ring buffer against restored watchpoint rules */
+    staged.automation_alert_count = 0;
+    staged.automation_alert_head = 0;
+    staged.next_alert_id = 1u;
+    (void)engine_evaluate_all_automation_rules(&staged);
+    for(uint32_t i = 0; i < rcount; ++i) {
+      if(saved_hits[i] > staged.automation_rules[i].hit_count) {
+        staged.automation_rules[i].hit_count = saved_hits[i];
+      }
+      if(saved_last_ms[i] > 0) {
+        staged.automation_rules[i].last_triggered_ms = saved_last_ms[i];
+      }
+    }
+  }
+
   if(off != payload_len) goto fail;
   free(bytes);
   pthread_mutex_destroy(&staged.cache_lock);
@@ -2518,4 +3094,335 @@ fail:
   engine_free(&staged);
   free(bytes);
   return -1;
+}
+
+int engine_upsert_automation_rule(OyezEngine *engine, const AutomationRule *rule, uint32_t *out_rule_id) {
+  if(!engine || !rule || !rule->name[0]) return -1;
+  for(size_t i = 0; i < engine->automation_rule_count; ++i) {
+    if(strcmp(engine->automation_rules[i].name, rule->name) == 0 ||
+       (rule->id > 0 && engine->automation_rules[i].id == rule->id)) {
+      uint32_t keep_id = engine->automation_rules[i].id;
+      uint32_t keep_hits = engine->automation_rules[i].hit_count;
+      uint64_t keep_last = engine->automation_rules[i].last_triggered_ms;
+      engine->automation_rules[i] = *rule;
+      engine->automation_rules[i].id = keep_id;
+      engine->automation_rules[i].hit_count = keep_hits;
+      engine->automation_rules[i].last_triggered_ms = keep_last;
+      if(out_rule_id) *out_rule_id = keep_id;
+      return 0;
+    }
+  }
+  if(engine->automation_rule_count >= MAX_AUTOMATION_RULES) return -1;
+  AutomationRule *dst = &engine->automation_rules[engine->automation_rule_count++];
+  *dst = *rule;
+  dst->id = engine->next_rule_id++;
+  dst->hit_count = 0;
+  dst->last_triggered_ms = 0;
+  if(out_rule_id) *out_rule_id = dst->id;
+  return 0;
+}
+
+int engine_delete_automation_rule(OyezEngine *engine, uint32_t rule_id) {
+  if(!engine || rule_id == 0) return -1;
+  for(size_t i = 0; i < engine->automation_rule_count; ++i) {
+    if(engine->automation_rules[i].id == rule_id) {
+      for(size_t j = i + 1u; j < engine->automation_rule_count; ++j) {
+        engine->automation_rules[j - 1u] = engine->automation_rules[j];
+      }
+      engine->automation_rule_count--;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+size_t engine_evaluate_all_automation_rules(OyezEngine *engine) {
+  if(!engine) return 0;
+  size_t total_fired = 0;
+  for(size_t i = 0; i < engine->article_count; ++i) {
+    total_fired += evaluate_article_automation_rules(engine, &engine->articles[i]);
+  }
+  return total_fired;
+}
+
+static int compare_bandit_desc(const void *a, const void *b) {
+  const BanditFeedPriority *pa = (const BanditFeedPriority *)a;
+  const BanditFeedPriority *pb = (const BanditFeedPriority *)b;
+  if(pb->ucb1_score > pa->ucb1_score) return 1;
+  if(pb->ucb1_score < pa->ucb1_score) return -1;
+  if(pa->feed_id < pb->feed_id) return -1;
+  if(pa->feed_id > pb->feed_id) return 1;
+  return 0;
+}
+
+size_t engine_bandit_select_feeds(const OyezEngine *engine,
+                                  BanditFeedPriority *out_priorities,
+                                  size_t max_out) {
+  if(!engine || engine->feed_count == 0 || !out_priorities || max_out == 0) return 0;
+  BanditFeedPriority *all = malloc(engine->feed_count * sizeof(BanditFeedPriority));
+  if(!all) return 0;
+
+  uint64_t total_pulls = engine->total_bandit_pulls;
+  for(size_t i = 0; i < engine->feed_count; ++i) {
+    total_pulls += engine->feeds[i].fetch_count;
+  }
+  double ln_t = log(2.0 + (double)total_pulls);
+  uint64_t now_ms = wall_time_ms();
+
+  for(size_t i = 0; i < engine->feed_count; ++i) {
+    const FeedRecord *f = &engine->feeds[i];
+    double n_i = 1.0 + (double)f->fetch_count;
+    double emp_yield = (double)f->article_count / n_i;
+    /* Auer-Cesa-Bianchi-Fischer UCB1 upper confidence bound */
+    double explore = 1.41421356 * sqrt((2.0 * ln_t) / n_i);
+    double err_pen = 1.5 * ((double)f->error_count / (n_i + (double)f->error_count));
+    double stale = 0.0;
+    if(f->last_fetched_ms == 0) {
+      stale = 0.85;
+    } else if(now_ms > f->last_fetched_ms) {
+      double age_min = (double)(now_ms - f->last_fetched_ms) / 60000.0;
+      stale = age_min > 120.0 ? 0.75 : (age_min / 160.0);
+    }
+    /* High-tempo category priority boost (weather/climate, cyber, ai, finance) */
+    if(f->category &&
+       (strcmp(f->category, "climate") == 0 || strcmp(f->category, "cyber") == 0 ||
+        strcmp(f->category, "ai") == 0 || strcmp(f->category, "finance") == 0)) {
+      stale += 0.25;
+    }
+    all[i].feed_id = f->id;
+    all[i].title = f->title;
+    all[i].category = f->category;
+    all[i].empirical_yield = emp_yield;
+    all[i].exploration_bonus = explore;
+    all[i].staleness_bonus = stale;
+    all[i].error_penalty = err_pen;
+    all[i].ucb1_score = emp_yield + explore + stale - err_pen;
+  }
+
+  qsort(all, engine->feed_count, sizeof(BanditFeedPriority), compare_bandit_desc);
+  size_t take = engine->feed_count < max_out ? engine->feed_count : max_out;
+  memcpy(out_priorities, all, take * sizeof(BanditFeedPriority));
+  free(all);
+  return take;
+}
+
+static size_t cstr_heap_bytes(const char *s) {
+  return s ? (strlen(s) + 1u) : 0u;
+}
+
+static size_t country_fiber_array_bytes(const CountryFiber *arr, size_t count) {
+  size_t total = 0;
+  for(size_t i = 0; i < count; ++i) {
+    if(arr[i].occupied && arr[i].bits.words) {
+      total += arr[i].bits.word_cap * sizeof(uint64_t);
+    }
+  }
+  return total;
+}
+
+void engine_appliance_state(const OyezEngine *engine,
+                            EngineApplianceState *out_app) {
+  if(!out_app) return;
+  memset(out_app, 0, sizeof(*out_app));
+  if(!engine) return;
+
+  /* 1. Single-Machine Resident Memory Accounting */
+  out_app->struct_base_bytes = sizeof(OyezEngine);
+  for(const struct StringArenaBlock *b = engine->arena_head; b != NULL; b = b->next) {
+    out_app->arena_block_count++;
+    out_app->arena_bytes_used += b->used;
+    out_app->arena_bytes_capacity += sizeof(*b) + b->cap;
+  }
+
+  size_t feed_str_bytes = 0;
+  for(size_t i = 0; i < engine->feed_count; ++i) {
+    const FeedRecord *f = &engine->feeds[i];
+    feed_str_bytes += cstr_heap_bytes(f->title) + cstr_heap_bytes(f->feed_url) +
+                      cstr_heap_bytes(f->site_url) + cstr_heap_bytes(f->category) +
+                      cstr_heap_bytes(f->country) + cstr_heap_bytes(f->subregion) +
+                      cstr_heap_bytes(f->language) + cstr_heap_bytes(f->source_tier) +
+                      cstr_heap_bytes(f->editorial_focus);
+  }
+  out_app->feed_and_article_table_bytes =
+      engine->feed_cap * sizeof(FeedRecord) +
+      engine->article_cap * sizeof(ArticleRecord) +
+      feed_str_bytes;
+
+  size_t inv_bytes = engine->inv_cap * sizeof(InvertedBucket);
+  for(size_t i = 0; i < engine->inv_cap; ++i) {
+    if(engine->inv_table && engine->inv_table[i].occupied) {
+      inv_bytes += (size_t)engine->inv_table[i].cap *
+                   (sizeof(uint32_t) + sizeof(float) + sizeof(uint32_t));
+    }
+  }
+  out_app->inverted_index_bytes = inv_bytes;
+
+  size_t bit_bytes = engine->all_articles.word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < WORLD_REGION_COUNT; ++i) bit_bytes += engine->by_region[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < NEWS_TYPE_COUNT; ++i) bit_bytes += engine->by_news_type[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < CLEARANCE_LEVEL_COUNT; ++i) bit_bytes += engine->by_clearance[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < FISCAL_STANCE_COUNT; ++i) bit_bytes += engine->by_fiscal_stance[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < AI_TIER_COUNT; ++i) bit_bytes += engine->by_ai_tier[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < AI_LICENSE_COUNT; ++i) bit_bytes += engine->by_ai_license[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < WEATHER_SEVERITY_COUNT; ++i) bit_bytes += engine->by_weather_severity[i].word_cap * sizeof(uint64_t);
+  for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    bit_bytes += engine->by_direct_ontology[i].word_cap * sizeof(uint64_t);
+    bit_bytes += engine->by_closure_ontology[i].word_cap * sizeof(uint64_t);
+  }
+  bit_bytes += country_fiber_array_bytes(engine->by_source_country, 256u);
+  bit_bytes += country_fiber_array_bytes(engine->by_mentioned_country, 256u);
+  bit_bytes += country_fiber_array_bytes(engine->by_asset, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_fiscal_event, 64u);
+  bit_bytes += country_fiber_array_bytes(engine->by_cve, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_org, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_ai_model, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_ai_infra, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_hf_repo, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_sport, 128u);
+  bit_bytes += country_fiber_array_bytes(engine->by_weather, 128u);
+  out_app->bitset_fiber_bytes = bit_bytes;
+
+  size_t lsh_bytes = engine->dedup_cap * sizeof(engine->dedup_table[0]);
+  for(size_t band = 0; band < 4u; ++band) {
+    if(engine->lsh_bands[band]) {
+      lsh_bytes += 4096u * sizeof(SimHashBucket);
+      for(size_t b = 0; b < 4096u; ++b) {
+        lsh_bytes += (size_t)engine->lsh_bands[band][b].cap * sizeof(uint32_t);
+      }
+    }
+  }
+  out_app->lsh_and_dedup_bytes = lsh_bytes;
+
+  size_t qcache_bytes = 0;
+  size_t qcache_valid = 0;
+  for(size_t c = 0; c < 64u; ++c) {
+    if(engine->query_cache[c].valid) {
+      qcache_valid++;
+      qcache_bytes += engine->query_cache[c].count * (sizeof(uint32_t) + sizeof(double));
+    }
+  }
+  out_app->query_cache_bytes = qcache_bytes;
+  out_app->query_cache_valid_entries = qcache_valid;
+  out_app->index_generation = engine->index_generation;
+  out_app->total_resident_bytes =
+      out_app->struct_base_bytes +
+      out_app->arena_bytes_capacity +
+      out_app->feed_and_article_table_bytes +
+      out_app->inverted_index_bytes +
+      out_app->bitset_fiber_bytes +
+      out_app->lsh_and_dedup_bytes +
+      out_app->query_cache_bytes;
+
+  /* 2. 12-Theorem Mathematical & Topos Self-Verification */
+  double raw_f[ONTOLOGY_NODE_COUNT];
+  double clos_f[ONTOLOGY_NODE_COUNT];
+  for(size_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    double r = (double)bitset_popcount(&engine->by_direct_ontology[i]);
+    double c = (double)bitset_popcount(&engine->by_closure_ontology[i]);
+    raw_f[i] = r + 1.0 + 0.1 * (double)(i + 1u);
+    clos_f[i] = c + 1.5 + 0.15 * (double)(i + 1u);
+  }
+
+  SheafCohomology cohom;
+  ontology_sheaf_cohomology(raw_f, clos_f, &cohom);
+
+  AdjunctionMonadState monad;
+  ontology_adjunction_monad(raw_f, &monad);
+
+  ToposState topos;
+  engine_topos_state(engine, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
+
+  size_t severe_wx_cnt =
+      bitset_popcount(&engine->by_weather_severity[WEATHER_WARNING]) +
+      bitset_popcount(&engine->by_weather_severity[WEATHER_CATASTROPHIC]);
+  double wx_forcing = (double)severe_wx_cnt / (double)(engine->article_count > 0 ? engine->article_count : 1u);
+  ontology_atmospheric_dynamics(29.0, 74.0, 17.5, 45.0, wx_forcing, &out_app->weather_physics);
+
+  double leinster_mag = ontology_leinster_magnitude();
+  double weight_sum = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    weight_sum += ontology_node_magnitude_weight((OntologyNodeId)u);
+  }
+  uint32_t passed = 0;
+  if(leinster_mag > 10.0 && fabs(leinster_mag - weight_sum) < 1e-11) passed++;              /* 1. Leinster Magnitude */
+  if(cohom.euler_characteristic == 1 &&
+     cohom.betti_numbers[0] == 1u && cohom.betti_numbers[1] == 0u) passed++;                /* 2. Nerve Euler-Poincare */
+  if(cohom.cochain_exactness_norm < 1e-11) passed++;                                        /* 3. Hodge Cochain d^1 o d^0 = 0 */
+  if(monad.zig_zag_triangle_defect < 1e-10 &&
+     monad.beck_coequalizer_defect < 1e-10 &&
+     monad.isbell_adjunction_defect < 1e-10) passed++;                                      /* 4. Kan/Beck/Isbell Monadicity */
+  if(topos.spectral_seq.euler_e0 == 1 && topos.spectral_seq.euler_e_inf == 1 &&
+     topos.spectral_seq.differential_nilpotency_defect < 1e-11) passed++;                   /* 5. Grothendieck Spectral Sequence */
+  if(topos.day_adjunction_defect < 1e-10 &&
+     topos.tensor_hom_adjunction_defect < 1e-10) passed++;                                  /* 6. Day & Weighted Tensor-Hom Adjunction */
+  if(topos.sinkhorn_ot.cheeger_buser_holds == 1 &&
+     topos.sinkhorn_ot.marginal_defect_l1 < 1e-6) passed++;                                 /* 7. Cheeger-Buser & Sinkhorn OT */
+  if(topos.ricci_curv.gauss_bonnet_defect < 1e-10 &&
+     topos.ricci_curv.ricci_flow_volume_defect < 1e-10) passed++;                           /* 8. Gauss-Bonnet & Ricci Flow */
+  if(topos.zeta_tropical.ihara_det_at_zero_defect < 1e-10 &&
+     topos.zeta_tropical.ihara_det_at_one_defect < 1e-10 &&
+     topos.zeta_tropical.tropical_idempotence_defect < 1e-10) passed++;                     /* 9. Ihara-Bass & Tropical Hull */
+  if(topos.rota_baxter.rota_baxter_identity_defect < 1e-10 &&
+     topos.rota_baxter.spitzer_birkhoff_defect < 1e-10) passed++;                           /* 10. Rota-Baxter & Spitzer-Birkhoff */
+  if(topos.quillen_weak_equivalence_holds == 1 &&
+     topos.leibniz_rule_holds == 1) passed++;                                               /* 11. Quillen & Bi-Heyting Leibniz */
+  if(out_app->weather_physics.lyapunov_max > 0.1 &&
+     out_app->weather_physics.kaplan_yorke_dim > 2.0 &&
+     out_app->weather_physics.kaplan_yorke_dim < 2.2) passed++;                             /* 12. Lorenz-63 Strange Attractor */
+
+  double max_def = cohom.cochain_exactness_norm;
+  if(monad.zig_zag_triangle_defect > max_def) max_def = monad.zig_zag_triangle_defect;
+  if(topos.day_adjunction_defect > max_def) max_def = topos.day_adjunction_defect;
+  if(topos.ricci_curv.gauss_bonnet_defect > max_def) max_def = topos.ricci_curv.gauss_bonnet_defect;
+  if(topos.zeta_tropical.tropical_idempotence_defect > max_def) max_def = topos.zeta_tropical.tropical_idempotence_defect;
+  if(topos.rota_baxter.rota_baxter_identity_defect > max_def) max_def = topos.rota_baxter.rota_baxter_identity_defect;
+
+  out_app->theorems_verified_count = passed;
+  out_app->theorems_total_count = 12u;
+  out_app->all_theorems_verified = (passed == 12u) ? 1 : 0;
+  out_app->leinster_magnitude = leinster_mag;
+  out_app->euler_characteristic = cohom.euler_characteristic;
+  out_app->fiedler_eigenvalue = cohom.fiedler_eigenvalue;
+  out_app->cheeger_constant = topos.sinkhorn_ot.cheeger_constant;
+  out_app->gauss_bonnet_total = topos.ricci_curv.gauss_bonnet_total;
+  out_app->ihara_zeta_val = topos.zeta_tropical.ihara_zeta_val;
+  out_app->tropical_eigenvalue = topos.zeta_tropical.tropical_eigenvalue;
+  out_app->sinkhorn_divergence = topos.sinkhorn_ot.sinkhorn_divergence;
+  out_app->fisher_rao_geodesic = topos.sinkhorn_ot.fisher_rao_geodesic;
+  out_app->day_adjunction_defect = topos.day_adjunction_defect;
+  out_app->rota_baxter_defect = topos.rota_baxter.rota_baxter_identity_defect;
+  out_app->max_numerical_defect = max_def;
+
+  /* 3. Cross-Domain Intelligence Situation Room */
+  out_app->cyber_strategic_articles =
+      bitset_popcount(&engine->by_clearance[CLEARANCE_ZERO_DAY]) +
+      bitset_popcount(&engine->by_clearance[CLEARANCE_STRATEGIC]);
+  out_app->frontier_ai_articles =
+      bitset_popcount(&engine->by_ai_tier[AI_TIER_NEOCLOUD_CLUSTER]) +
+      bitset_popcount(&engine->by_ai_tier[AI_TIER_FRONTIER_PRETRAINING]);
+  out_app->severe_weather_articles = severe_wx_cnt;
+  out_app->macro_active_articles =
+      bitset_popcount(&engine->by_fiscal_stance[FISCAL_HAWKISH]) +
+      bitset_popcount(&engine->by_fiscal_stance[FISCAL_DOVISH]) +
+      bitset_popcount(&engine->by_fiscal_stance[FISCAL_BULLISH]) +
+      bitset_popcount(&engine->by_fiscal_stance[FISCAL_BEARISH]);
+  out_app->sports_articles = bitset_popcount(&engine->by_direct_ontology[ONTO_SPORTS]);
+
+  TemporalSheafState temp;
+  engine_temporal_sheaf(engine, &temp);
+  const OntologyNode *em = ontology_node(temp.fastest_emerging_node);
+  strncpy(out_app->emerging_category_slug, em ? em->slug : "ai", sizeof(out_app->emerging_category_slug) - 1u);
+  out_app->emerging_acceleration_z = temp.acceleration[temp.fastest_emerging_node];
+
+  /* 4. Autonomous Watchpoints & UCB1 Bandit Scheduler Summary */
+  size_t active_rules = 0;
+  for(size_t i = 0; i < engine->automation_rule_count; ++i) {
+    if(engine->automation_rules[i].enabled) active_rules++;
+  }
+  out_app->active_watchpoint_rules = active_rules;
+  out_app->total_watchpoint_alerts = engine->automation_alert_count;
+  out_app->total_bandit_pulls = engine->total_bandit_pulls;
+  out_app->auto_poll_interval_sec = engine->auto_poll_interval_sec;
+  out_app->auto_cycles_completed = (uint32_t)engine->auto_cycles_completed;
+  out_app->top_bandit_count = engine_bandit_select_feeds(engine, out_app->top_bandit_feeds, 4u);
 }

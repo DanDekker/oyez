@@ -76,6 +76,8 @@ typedef struct {
   size_t mentioned_hf_repo_count;
   char mentioned_sports[MAX_EXTRACTED_SPORTS][24];
   size_t mentioned_sport_count;
+  char mentioned_weather[MAX_EXTRACTED_WEATHER][24];
+  size_t mentioned_weather_count;
   ClearanceLevel clearance;
   double opsec_score;
   FiscalStance fiscal_stance;
@@ -85,6 +87,8 @@ typedef struct {
   AiWeightLicense ai_license;
   double openness_score;
   double sports_score;
+  WeatherSeverity weather_severity;
+  double weather_score;
   uint32_t word_count;
   uint32_t reading_time_minutes;
   uint64_t simhash64;
@@ -127,6 +131,113 @@ typedef struct {
   int occupied;
 } CountryFiber;
 
+#define MAX_AUTOMATION_RULES 64
+#define MAX_AUTOMATION_ALERTS 256
+
+typedef enum {
+  AUTO_ACTION_ALERT_RING = 0,   /* Record structured alert in in-memory ring buffer */
+  AUTO_ACTION_JSONL_LOG = 1,    /* Append JSONL event line to local file (e.g. data/alerts.jsonl) */
+  AUTO_ACTION_WEBHOOK = 2,      /* Dispatch JSON payload to verified public webhook URL */
+  AUTO_ACTION_SNAPSHOT = 3      /* Trigger atomic index snapshot checkpoint */
+} AutomationActionType;
+
+typedef struct {
+  uint32_t id;
+  char name[48];
+  char query[64];
+  char category[32];
+  char region[32];
+  char weather[24];
+  ClearanceLevel min_clearance;
+  FiscalStance fiscal_stance;
+  AiComputeTier min_ai_tier;
+  WeatherSeverity min_weather_severity;
+  double min_score;
+  AutomationActionType action;
+  char target[128];
+  uint32_t hit_count;
+  uint64_t last_triggered_ms;
+  int enabled;
+} AutomationRule;
+
+typedef struct {
+  uint64_t alert_id;
+  uint32_t rule_id;
+  char rule_name[48];
+  uint32_t article_id;
+  char article_title[160];
+  char article_url[160];
+  char category_slug[32];
+  char weather_severity_slug[32];
+  char clearance_slug[32];
+  double trigger_score;
+  uint64_t triggered_at_ms;
+  AutomationActionType action_taken;
+} AutomationAlert;
+
+typedef struct {
+  uint32_t feed_id;
+  const char *title;
+  const char *category;
+  double ucb1_score;
+  double empirical_yield;
+  double exploration_bonus;
+  double staleness_bonus;
+  double error_penalty;
+} BanditFeedPriority;
+
+typedef struct {
+  /* Single-Machine Resident Memory Accounting (Bytes) */
+  size_t struct_base_bytes;
+  size_t arena_bytes_used;
+  size_t arena_bytes_capacity;
+  size_t arena_block_count;
+  size_t feed_and_article_table_bytes;
+  size_t inverted_index_bytes;
+  size_t bitset_fiber_bytes;
+  size_t lsh_and_dedup_bytes;
+  size_t query_cache_bytes;
+  size_t total_resident_bytes;
+  size_t query_cache_valid_entries;
+  uint64_t index_generation;
+
+  /* 12-Theorem Algebraic, Topological, Differential-Geometric & Dynamical Self-Verification */
+  uint32_t theorems_verified_count;
+  uint32_t theorems_total_count;
+  int all_theorems_verified;
+  double leinster_magnitude;
+  int32_t euler_characteristic;
+  double fiedler_eigenvalue;
+  double cheeger_constant;
+  double gauss_bonnet_total;
+  double ihara_zeta_val;
+  double tropical_eigenvalue;
+  double sinkhorn_divergence;
+  double fisher_rao_geodesic;
+  double day_adjunction_defect;
+  double rota_baxter_defect;
+  double max_numerical_defect;
+
+  /* Unified Cross-Domain Situation Room & Atmospheric Physics */
+  WeatherPhysicsState weather_physics;
+  size_t cyber_strategic_articles;
+  size_t frontier_ai_articles;
+  size_t severe_weather_articles;
+  size_t macro_active_articles;
+  size_t sports_articles;
+  char emerging_category_slug[32];
+  double emerging_acceleration_z;
+
+  /* Autonomous Watchpoints & UCB1 Bandit Scheduler Summary */
+  size_t active_watchpoint_rules;
+  size_t total_watchpoint_alerts;
+  uint64_t total_bandit_pulls;
+  uint32_t auto_poll_interval_sec;
+  uint32_t auto_cycles_completed;
+  BanditFeedPriority top_bandit_feeds[4];
+  size_t top_bandit_count;
+} EngineApplianceState;
+
 typedef struct {
   FeedRecord *feeds;
   size_t feed_count;
@@ -146,6 +257,7 @@ typedef struct {
   BitSet by_fiscal_stance[FISCAL_STANCE_COUNT];
   BitSet by_ai_tier[AI_TIER_COUNT];
   BitSet by_ai_license[AI_LICENSE_COUNT];
+  BitSet by_weather_severity[WEATHER_SEVERITY_COUNT];
   BitSet by_direct_ontology[ONTOLOGY_NODE_COUNT];
   BitSet by_closure_ontology[ONTOLOGY_NODE_COUNT];
 
@@ -159,6 +271,7 @@ typedef struct {
   CountryFiber by_ai_infra[128];
   CountryFiber by_hf_repo[128];
   CountryFiber by_sport[128];
+  CountryFiber by_weather[128];
 
   InvertedBucket *inv_table;
   size_t inv_cap;
@@ -178,6 +291,19 @@ typedef struct {
 
   /* Contiguous 64 KB Block String Arena for O(1) Cache-Local Article String Allocation */
   struct StringArenaBlock *arena_head;
+
+  /* Autonomous Watchpoint Rule Engine, Alert Ring Buffer & UCB1 Bandit Telemetry */
+  AutomationRule automation_rules[MAX_AUTOMATION_RULES];
+  size_t automation_rule_count;
+  uint32_t next_rule_id;
+  AutomationAlert automation_alerts[MAX_AUTOMATION_ALERTS];
+  size_t automation_alert_head;
+  size_t automation_alert_count;
+  uint64_t next_alert_id;
+  uint64_t total_bandit_pulls;
+  uint32_t auto_poll_interval_sec;
+  uint64_t last_auto_cycle_ms;
+  uint64_t auto_cycles_completed;
 
   /* 64-entry FNV-1a Open-Addressed Query Response Cache */
   struct {
@@ -211,6 +337,8 @@ typedef struct {
   const char *ai_license;
   const char *hf_repo;
   const char *sport;
+  const char *weather;
+  const char *weather_severity;
   const char *region;
   const char *country;
   const char *mentioned_country;
@@ -322,6 +450,50 @@ typedef struct {
 } OperadChain;
 
 typedef struct {
+  WorldRegion source_region;
+  WorldRegion target_region;
+  OntologyNodeId prop_a;
+  OntologyNodeId prop_b;
+  uint32_t ideal_a;
+  uint32_t ideal_b;
+  uint32_t heyting_implication_ab;
+  uint32_t heyting_negation_a;
+  uint32_t lawvere_tierney_sheaf_a;
+  uint32_t coheyting_subtraction_ab;
+  uint32_t coheyting_supplement_a;
+  uint32_t lawvere_boundary_a;
+  uint32_t lawvere_boundary_b;
+  uint32_t lawvere_boundary_meet_ab;
+  int leibniz_rule_holds;
+  uint32_t universal_quantifier_ab;
+  double omega_truth_a[ONTOLOGY_NODE_COUNT];
+  uint32_t equalizer_mask;
+  double coequalizer_quotient[ONTOLOGY_NODE_COUNT];
+  double isbell_covariant_star[ONTOLOGY_NODE_COUNT];
+  double isbell_double_hull[ONTOLOGY_NODE_COUNT];
+  double isbell_envelope_defect;
+  double profunctor_end;
+  double profunctor_coend;
+  double weighted_colimit;
+  double weighted_limit;
+  double tensor_hom_adjunction_defect;
+  double day_convolution_fg[ONTOLOGY_NODE_COUNT];
+  double day_internal_hom_gh[ONTOLOGY_NODE_COUNT];
+  double day_adjunction_defect;
+  uint32_t quillen_acyclic_cofibration_m;
+  uint32_t quillen_fibration_target;
+  int quillen_weak_equivalence_holds;
+  double polynomial_functor_px[ONTOLOGY_NODE_COUNT];
+  double polynomial_codesign_lens[ONTOLOGY_NODE_COUNT];
+  double heat_diffused_src[ONTOLOGY_NODE_COUNT];
+  SinkhornTransportState sinkhorn_ot;
+  SpectralSequenceState spectral_seq;
+  RicciCurvatureState ricci_curv;
+  ZetaTropicalState zeta_tropical;
+  RotaBaxterState rota_baxter;
+} ToposState;
+
+typedef struct {
   char id[80];
   char label[64];
   const char *kind;
@@ -371,6 +543,7 @@ int engine_ingest_article(OyezEngine *engine,
 const ArticleRecord *engine_get_article_by_id(const OyezEngine *engine, uint32_t id);
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out);
 void search_response_free(SearchResponse *res);
+double engine_dpp_rerank(ScoredArticle *pool, size_t count, double lambda);
 
 size_t engine_find_near_duplicates(const OyezEngine *engine,
                                    uint32_t article_id,
@@ -411,6 +584,13 @@ size_t engine_grothendieck_fibration(const OyezEngine *engine,
 void engine_temporal_sheaf(const OyezEngine *engine,
                            TemporalSheafState *out_temporal);
 
+void engine_topos_state(const OyezEngine *engine,
+                        WorldRegion source_region,
+                        WorldRegion target_region,
+                        OntologyNodeId prop_a,
+                        OntologyNodeId prop_b,
+                        ToposState *out_topos);
+
 size_t engine_operad_compose(const OyezEngine *engine,
                              const char *region_a,
                              const char *region_b,
@@ -433,5 +613,16 @@ size_t engine_story_clusters(const OyezEngine *engine,
 
 int engine_save_snapshot(const OyezEngine *engine, const char *path);
 int engine_load_snapshot(OyezEngine *engine, const char *path);
+
+const char *automation_action_slug(AutomationActionType act);
+int automation_action_from_slug(const char *slug, AutomationActionType *out);
+int engine_upsert_automation_rule(OyezEngine *engine, const AutomationRule *rule, uint32_t *out_rule_id);
+int engine_delete_automation_rule(OyezEngine *engine, uint32_t rule_id);
+size_t engine_evaluate_all_automation_rules(OyezEngine *engine);
+size_t engine_bandit_select_feeds(const OyezEngine *engine,
+                                  BanditFeedPriority *out_priorities,
+                                  size_t max_out);
+void engine_appliance_state(const OyezEngine *engine,
+                            EngineApplianceState *out_app);
 
 #endif

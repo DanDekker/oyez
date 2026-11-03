@@ -317,8 +317,208 @@ static void test_category_theory_and_ontology(void) {
   AdjunctionMonadState monad;
   ontology_adjunction_monad(raw, &monad);
   assert(monad.zig_zag_triangle_defect < 1e-12);
+  assert(monad.beck_coequalizer_defect < 1e-12);
+  assert(monad.isbell_adjunction_defect < 1e-12);
   assert(monad.kleisli_entropy > 0.5);
   assert(monad.eilenberg_moore_mask != 0u);
+  assert(monad.codensity_monad[ONTO_AI] >= raw[ONTO_AI] - 1e-9);
+  assert(monad.bousfield_localized[ONTO_TECHNOLOGY] > 0.0);
+
+  /* 1-Simplicial Hodge Coexact/Harmonic Pythagorean Decomposition:
+   * ||R||_2^2 == ||F_coexact||_2^2 + ||F_harm||_2^2 and Tr(L_1) == 2*f_1 + 3*f_2 */
+  double sol_pythag_err = sheaf.hodge_solenoidal_norm - (sheaf.hodge_coexact_norm + sheaf.hodge_harmonic_norm);
+  if(sol_pythag_err < 0.0) sol_pythag_err = -sol_pythag_err;
+  assert(sol_pythag_err < 1e-9);
+  assert(sheaf.laplacian_1_trace == 2.0 * (double)sheaf.nerve_f_vector[1] + 3.0 * (double)sheaf.nerve_f_vector[2]);
+  assert(sheaf.isbell_codensity_defect < 1e-12);
+
+  /* Bi-Heyting Topos Calculus:
+   * 1. Co-Heyting subtraction (A \co B) <= C  <==>  v(A) <= v(B) | v(C)
+   * 2. Co-Heyting supplement ~A = 1 \co A satisfies Excluded Middle: v(A) | ~A == 0xFFFFFFFFu
+   * 3. Lawvere Boundary d(A) = v(A) & ~A satisfies exact Leibniz derivation rule on downward-closed ideals:
+   *      d(I & J) == (d(I) & J) | (I & d(J))
+   * 4. Universal Quantifier ForAll(S) satisfies Galois adjunction: v(A) <= S  <==>  A <= ForAll(S)
+   * 5. Subobject Classifier chi_A: 1 -> Omega has chi_A(c) == 1.0 iff c in v(A). */
+  uint32_t ideal_tech = ontology_downward_closure(1u << ONTO_TECHNOLOGY);
+  uint32_t ideal_sec = ontology_downward_closure(1u << ONTO_SECURITY);
+  uint32_t co_sub_ts = ontology_coheyting_subtraction(ideal_tech, ideal_sec);
+  /* Left-adjointness of co-Heyting subtraction: ideal_tech <= (ideal_sec | co_sub_ts) */
+  assert((ideal_tech & ~(ideal_sec | co_sub_ts)) == 0u);
+  /* Excluded middle of co-Heyting negation ~I: I | ~I == 0xFFFFFFFFu */
+  uint32_t co_neg_tech = ontology_coheyting_negation(ideal_tech);
+  assert((ideal_tech | co_neg_tech) == 0xFFFFFFFFu);
+  /* Lawvere Boundary Leibniz Rule: d(I & J) == (d(I) & J) | (I & d(J)) */
+  uint32_t bd_tech = ontology_coheyting_boundary(ideal_tech);
+  uint32_t bd_sec = ontology_coheyting_boundary(ideal_sec);
+  uint32_t bd_meet = ontology_coheyting_boundary(ideal_tech & ideal_sec);
+  uint32_t leibniz_rhs = (bd_tech & ideal_sec) | (ideal_tech & bd_sec);
+  assert(bd_meet == leibniz_rhs);
+  /* Universal Quantifier right-adjointness */
+  uint32_t s_arbitrary_mask = ideal_tech | (1u << ONTO_ROOT);
+  uint32_t forall_s = ontology_universal_quantifier(s_arbitrary_mask);
+  assert(forall_s == ideal_tech);
+  /* Subobject Classifier Omega */
+  double omega_tech[ONTOLOGY_NODE_COUNT] = {0};
+  ontology_subobject_classifier_omega(1u << ONTO_TECHNOLOGY, omega_tech);
+  assert(omega_tech[ONTO_AI] == 1.0);
+  assert(omega_tech[ONTO_TECHNOLOGY] == 1.0);
+  assert(omega_tech[ONTO_SPORTS] == 0.0);
+  assert(omega_tech[ONTO_ROOT] > 0.0 && omega_tech[ONTO_ROOT] < 1.0);
+
+  /* Enriched Isbell Conjugacy (O^* -| Spec_#):
+   * 1. Unit F <= (F^*)^# and Counit (G^#)^* <= G
+   * 2. Exact Triple Conjugation Identity ((F^*)^#)^* == F^*
+   * 3. Representable Presheaf Y_c(u) = K - d_L(c, u) is an exact Isbell fixed point (Y_c^*)^# == Y_c */
+  double f_star[ONTOLOGY_NODE_COUNT];
+  double f_star_sharp[ONTOLOGY_NODE_COUNT];
+  ontology_isbell_conjugate_covariant(raw, f_star);
+  ontology_isbell_conjugate_contravariant(f_star, f_star_sharp);
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    assert(raw[u] <= f_star_sharp[u] + 1e-9);
+  }
+  assert(ontology_isbell_envelope_defect(raw) < 1e-12);
+  double rep_ai[ONTOLOGY_NODE_COUNT];
+  double rep_star[ONTOLOGY_NODE_COUNT];
+  double rep_hull[ONTOLOGY_NODE_COUNT];
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    rep_ai[u] = 10.0 - ontology_lawvere_distance(1u << ONTO_AI, 1u << u);
+  }
+  ontology_isbell_conjugate_covariant(rep_ai, rep_star);
+  ontology_isbell_conjugate_contravariant(rep_star, rep_hull);
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    double rdiff = rep_hull[u] > rep_ai[u] ? (rep_hull[u] - rep_ai[u]) : (rep_ai[u] - rep_hull[u]);
+    assert(rdiff < 1e-9);
+  }
+
+  /* Enriched Profunctor End & Weighted Colimit-Limit Tensor-Hom Adjunction:
+   *   K - colim_W^L(F) == lim_L^W(K - F) */
+  double end_val = ontology_profunctor_end(kan, kan);
+  assert(end_val > 0.0);
+  double w_colim = ontology_weighted_colimit(raw, kan);
+  double w_lim = ontology_weighted_limit(raw, kan);
+  assert(w_colim >= w_lim);
+  double dual_kan[ONTOLOGY_NODE_COUNT];
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) dual_kan[u] = 100.0 - kan[u];
+  double w_lim_dual = ontology_weighted_limit(raw, dual_kan);
+  double th_err = (100.0 - w_colim) - w_lim_dual;
+  if(th_err < 0.0) th_err = -th_err;
+  assert(th_err < 1e-12);
+
+  /* Day Convolution (F *_Day G), Day Internal Hom [G, H]_Day & Day Tensor-Hom Adjunction:
+   *   Hom(F *_Day G, H) == Hom(F, [G, H]_Day) */
+  double day_fg[ONTOLOGY_NODE_COUNT];
+  double day_hom_gh[ONTOLOGY_NODE_COUNT];
+  ontology_day_convolution(raw, kan, day_fg);
+  ontology_day_internal_hom(kan, ran, day_hom_gh);
+  assert(day_fg[ONTO_ROOT] >= raw[ONTO_AI] + kan[ONTO_CYBER]);
+  assert(ontology_day_adjunction_defect(raw, kan, ran) < 1e-12);
+
+  /* Entropic Sinkhorn-Knopp Optimal Transport & Debiased Sinkhorn Divergence:
+   *   1. S_eps(p, p) == 0.0 (exact self-debiased zero)
+   *   2. S_eps(p, q) > 0.0 for distinct densities p != q
+   *   3. Marginal scaling defect ||Pi*1 - p||_1 + ||Pi^T*1 - q||_1 < 1e-6 */
+  SinkhornTransportState ot_self, ot_pq;
+  ontology_sinkhorn_optimal_transport(raw, raw, 0.75, &ot_self);
+  assert(ot_self.sinkhorn_divergence < 1e-12);
+  assert(ot_self.fisher_rao_geodesic < 1e-12);
+  assert(ot_self.marginal_defect_l1 < 1e-6);
+  ontology_sinkhorn_optimal_transport(raw, kan, 0.75, &ot_pq);
+  assert(ot_pq.entropic_wasserstein > 0.0);
+  assert(ot_pq.sinkhorn_divergence > 0.0);
+  assert(ot_pq.coupling_entropy > 0.0);
+  assert(ot_pq.marginal_defect_l1 < 1e-6);
+  assert(ot_pq.cheeger_constant > 0.0);
+  assert(ot_pq.cheeger_buser_holds == 1);
+
+  /* Riemannian Fisher-Rao Geodesic Metric on Statistical Simplex Delta^31(C):
+   *   1. d_FR(p, p) == 0
+   *   2. Symmetry d_FR(p, q) == d_FR(q, p)
+   *   3. Triangle inequality d_FR(p, r) <= d_FR(p, q) + d_FR(q, r) */
+  double dfr_pp = ontology_fisher_rao_distance(raw, raw);
+  double dfr_pq = ontology_fisher_rao_distance(raw, kan);
+  double dfr_qp = ontology_fisher_rao_distance(kan, raw);
+  double dfr_qr = ontology_fisher_rao_distance(kan, ran);
+  double dfr_pr = ontology_fisher_rao_distance(raw, ran);
+  assert(dfr_pp < 1e-12);
+  assert(dfr_pq > 0.0);
+  double dfr_sym = dfr_pq > dfr_qp ? (dfr_pq - dfr_qp) : (dfr_qp - dfr_pq);
+  assert(dfr_sym < 1e-12);
+  assert(dfr_pr <= dfr_pq + dfr_qr + 1e-5);
+
+  /* Spectral Heat Kernel Semigroup H_t = exp(-t L_0):
+   *   1. Exact total mass conservation <1, H_t f> == <1, f>
+   *   2. Constant sheaf 1 is an exact harmonic fixed point H_t(1) == 1 */
+  double diffused[ONTOLOGY_NODE_COUNT];
+  ontology_heat_kernel_propagate(raw, 0.35, diffused);
+  double mass_before = 0.0, mass_after = 0.0;
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    mass_before += raw[u];
+    mass_after += diffused[u];
+  }
+  double mass_err = mass_before > mass_after ? (mass_before - mass_after) : (mass_after - mass_before);
+  assert(mass_err < 1e-9);
+  double const_sheaf[ONTOLOGY_NODE_COUNT];
+  double const_diff[ONTOLOGY_NODE_COUNT];
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) const_sheaf[u] = 5.0;
+  ontology_heat_kernel_propagate(const_sheaf, 0.5, const_diff);
+  for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
+    double c_err = const_diff[u] > 5.0 ? (const_diff[u] - 5.0) : (5.0 - const_diff[u]);
+    assert(c_err < 1e-12);
+  }
+
+  /* Grothendieck-Leray Spectral Sequence (E_r^{p,q}, d_r) of Rank-Filtered Nerve F_p N(C):
+   *   chi(E_0) == chi(E_1) == chi(E_2) == chi(E_infty) == 1 */
+  SpectralSequenceState spec_seq;
+  ontology_spectral_sequence(raw, &spec_seq);
+  assert(spec_seq.euler_e0 == 1);
+  assert(spec_seq.euler_e1 == 1);
+  assert(spec_seq.euler_e2 == 1);
+  assert(spec_seq.euler_e_inf == 1);
+  assert(spec_seq.differential_nilpotency_defect == 0.0);
+  assert(spec_seq.e1_stratum_energy[0] > 0.0);
+
+  /* Quillen Model Category Factorization A ~-> M ->> (A v B):
+   *   j(M) == j(v(A)) and M <= (v(A) | v(B)) */
+  uint32_t q_m = 0, q_fib = 0;
+  int q_weq = 0;
+  ontology_quillen_factorize(1u << ONTO_AI, 1u << ONTO_SECURITY, &q_m, &q_fib, &q_weq);
+  assert(q_weq == 1);
+  assert((q_m & ~q_fib) == 0u);
+  assert(ontology_lawvere_tierney_sheafify(q_m) == ontology_lawvere_tierney_sheafify(1u << ONTO_AI));
+
+  /* Spivak Polynomial Endofunctor P_C(X) & Dependent Co-Design Lens */
+  double poly_px[ONTOLOGY_NODE_COUNT], poly_lens[ONTOLOGY_NODE_COUNT];
+  ontology_polynomial_functor_eval(raw, poly_px, poly_lens);
+  assert(poly_px[ONTO_ROOT] > 0.0 && poly_px[ONTO_ROOT] <= 1.0);
+  assert(poly_lens[ONTO_AI] > 0.0);
+
+  /* Simplicial Gauss-Bonnet-Chern, Forman-Ricci, Ollivier-Ricci Curvature & Discrete Ricci Flow:
+   *   1. Exact Simplicial Gauss-Bonnet-Chern sum_{u in C} K_GB(u) == chi(N(C)) == 1.0
+   *   2. Normalized Hamilton-Ollivier Discrete Ricci Flow volume conservation */
+  RicciCurvatureState ricci;
+  ontology_ricci_curvature(raw, &ricci);
+  assert(ricci.gauss_bonnet_defect < 1e-12);
+  assert(ricci.ricci_flow_volume_defect < 1e-12);
+  assert(ricci.ollivier_max_cluster >= ricci.ollivier_min_bridge);
+
+  /* Ihara-Bass Graph Zeta Function, Bass Deformed Determinant & Tropical Convex Geometry:
+   *   1. det(I - uA + u^2(D-I))|_{u=0} == 1.0 and det|_{u=1} == det(L_0) == 0.0
+   *   2. Exact Tropical Convex Hull Idempotence ||pi_trop(pi_trop(F)) - pi_trop(F)||_2 == 0.0 */
+  ZetaTropicalState zt;
+  ontology_ihara_zeta_and_tropical(raw, 0.15, &zt);
+  assert(zt.ihara_det_at_zero_defect < 1e-12);
+  assert(zt.ihara_det_at_one_defect < 1e-11);
+  assert(zt.ihara_bass_det > 0.0);
+  assert(zt.ihara_zeta_val > 1.0);
+  assert(zt.hashimoto_spectral_radius > 1.0);
+  assert(zt.tropical_idempotence_defect < 1e-12);
+
+  /* Commutative Rota-Baxter Algebra (A, R) of Weight theta = -1 & Atkinson Birkhoff Factorization:
+   *   ||R(f) * R(g) - R(R(f)*g + f*R(g) - f*g)||_2 == 0.0 */
+  RotaBaxterState rb;
+  ontology_rota_baxter_algebra(raw, kan, &rb);
+  assert(rb.rota_baxter_identity_defect < 1e-11);
+  assert(rb.spitzer_birkhoff_defect < 1e-11);
 
   uint32_t m1_landmarks = 0;
   uint64_t m1_sk = m1_structural_sketch64("DeepMind AlphaFold FlashAttention CVE-2026-1337 FOMC", 52u, &m1_landmarks);
@@ -412,14 +612,43 @@ static void test_category_theory_and_ontology(void) {
   assert(dm_sp_ent.sport_count >= 4u);
   assert(dm_sp_ent.sports_score > 10.0);
   assert((dm_sp_ent.direct_ontology_mask & (1u << ONTO_SPORTS)) != 0u);
+
+  /* Atmospheric Physics (Lorenz-63 Chaos, Clausius-Clapeyron, Stull Wet-Bulb, Rossby Waves)
+   * & Severe Weather Entity Extraction */
+  WeatherPhysicsState wx_phys;
+  ontology_atmospheric_dynamics(28.0, 75.0, 18.0, 38.0, 4.0, &wx_phys);
+  assert(wx_phys.lyapunov_max > 0.5 && wx_phys.lyapunov_max < 1.8);
+  assert(wx_phys.lyapunov_sum_div < -13.6 && wx_phys.lyapunov_sum_div > -13.7);
+  assert(wx_phys.kaplan_yorke_dim > 2.02 && wx_phys.kaplan_yorke_dim < 2.15);
+  assert(wx_phys.predictability_horizon > 0.5);
+  assert(wx_phys.saturation_vapor_hpa > 37.0 && wx_phys.saturation_vapor_hpa < 38.5);
+  assert(wx_phys.wet_bulb_celsius > 23.5 && wx_phys.wet_bulb_celsius < 25.5);
+  assert(wx_phys.rossby_stationary_k > 3.0 && wx_phys.rossby_stationary_k < 8.0);
+
+  ExtractedEntities wx_ent;
+  entities_extract("NOAA National Hurricane Center issues Category 4 hurricane warning as rapid intensification and storm surge threaten coast",
+                   "Storm Prediction Center tornado watch and geomagnetic storm X-class solar flare alert accompany USGS M7.1 earthquake.",
+                   "ECMWF and GraphCast AI weather forecast track atmospheric river and polar vortex jet stream omega block.",
+                   "weather",
+                   NULL,
+                   0,
+                   &wx_ent);
+  assert(wx_ent.weather_severity == WEATHER_CATASTROPHIC);
+  assert(wx_ent.weather_score > 20.0);
+  assert(wx_ent.weather_count >= 5u);
+  assert((wx_ent.direct_ontology_mask & (1u << ONTO_CLIMATE)) != 0u);
+  assert((wx_ent.closure_ontology_mask & (1u << ONTO_PLANETARY_SYSTEMS)) != 0u);
 }
 
 static void test_engine_search_and_categorical_endpoints(void) {
   OyezEngine eng;
   engine_init(&eng);
 
+  size_t cat_total = 0;
+  catalog_entries(&cat_total);
+  assert(cat_total == 750u);
   size_t seeded = engine_seed_catalog(&eng, NULL, NULL);
-  assert(seeded >= 640u);
+  assert(seeded == 750u);
 
   uint32_t f_tw = 0, f_eu = 0;
   CatalogEntry ce_tw = {"Focus Taiwan", "https://focustaiwan.tw/RSS", "https://focustaiwan.tw",
@@ -613,9 +842,74 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(strstr(json.data, "\"fiedler_eigenvalue\":") != NULL);
   assert(strstr(json.data, "\"leinster_magnitude\":") != NULL);
   assert(strstr(json.data, "\"hodge_gradient_norm\":") != NULL);
+  assert(strstr(json.data, "\"hodge_coexact_norm\":") != NULL);
+  assert(strstr(json.data, "\"hodge_harmonic_norm\":") != NULL);
+  assert(strstr(json.data, "\"laplacian_1_trace\":") != NULL);
+  assert(strstr(json.data, "\"isbell_codensity_defect\":") != NULL);
+  assert(strstr(json.data, "\"profunctor_end_self\":") != NULL);
+  assert(strstr(json.data, "\"weighted_colimit_self\":") != NULL);
+  assert(strstr(json.data, "\"cheeger_constant\":") != NULL);
+  assert(strstr(json.data, "\"cheeger_buser_holds\":true") != NULL);
+  assert(strstr(json.data, "\"day_adjunction_defect_self\":") != NULL);
+  assert(strstr(json.data, "\"coheyting_subtraction\":") != NULL);
+  assert(strstr(json.data, "\"lawvere_boundary_a\":") != NULL);
   assert(strstr(json.data, "\"yoneda_kan_score\":") != NULL);
   assert(strstr(json.data, "\"lawvere_distance_ab\":") != NULL);
   assert(strstr(json.data, "\"lawvere_tierney_sheaf_a\":") != NULL);
+  buffer_free(&json);
+
+  ToposState topos_st;
+  engine_topos_state(&eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos_st);
+  assert(topos_st.leibniz_rule_holds == 1);
+  assert(topos_st.isbell_envelope_defect < 1e-12);
+  assert(topos_st.tensor_hom_adjunction_defect < 1e-12);
+  assert(topos_st.day_adjunction_defect < 1e-12);
+  assert(topos_st.quillen_weak_equivalence_holds == 1);
+  assert(topos_st.sinkhorn_ot.cheeger_buser_holds == 1);
+  assert(topos_st.sinkhorn_ot.marginal_defect_l1 < 1e-6);
+  assert(topos_st.spectral_seq.euler_e0 == 1 && topos_st.spectral_seq.euler_e_inf == 1);
+  assert(topos_st.ricci_curv.gauss_bonnet_defect < 1e-12);
+  assert(topos_st.ricci_curv.ricci_flow_volume_defect < 1e-12);
+  assert(topos_st.zeta_tropical.ihara_det_at_zero_defect < 1e-12);
+  assert(topos_st.zeta_tropical.ihara_det_at_one_defect < 1e-11);
+  assert(topos_st.zeta_tropical.tropical_idempotence_defect < 1e-12);
+  assert(topos_st.rota_baxter.rota_baxter_identity_defect < 1e-11);
+  assert(topos_st.rota_baxter.spitzer_birkhoff_defect < 1e-11);
+  assert(topos_st.profunctor_end > 0.0);
+  assert(topos_st.profunctor_coend > 0.0);
+  assert(topos_st.omega_truth_a[ONTO_AI] == 1.0);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/topos?source_region=east-asia&target_region=europe&a=ai&b=technology", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"leibniz_rule_holds\":true") != NULL);
+  assert(strstr(json.data, "\"isbell_and_enriched_limits\":") != NULL);
+  assert(strstr(json.data, "\"subobject_classifier_omega\":") != NULL);
+  assert(strstr(json.data, "\"equalizer_subobject\":") != NULL);
+  assert(strstr(json.data, "\"day_convolution\":") != NULL);
+  assert(strstr(json.data, "\"quillen_model_factorization\":{\"weak_equivalence_holds\":true") != NULL);
+  assert(strstr(json.data, "\"sinkhorn_optimal_transport\":") != NULL);
+  assert(strstr(json.data, "\"spectral_sequence\":{\"euler_e0\":1,\"euler_e1\":1,\"euler_e2\":1,\"euler_e_inf\":1") != NULL);
+  assert(strstr(json.data, "\"polynomial_functor_codesign\":") != NULL);
+  assert(strstr(json.data, "\"ricci_curvature\":") != NULL);
+  assert(strstr(json.data, "\"ihara_zeta_and_tropical\":") != NULL);
+  assert(strstr(json.data, "\"rota_baxter_algebra\":") != NULL);
+  buffer_free(&json);
+
+  /* Fast Greedy Determinantal Point Process (DPP) Cholesky MAP reranking (?diversify=dpp) */
+  ArticleQuery dpp_q;
+  memset(&dpp_q, 0, sizeof(dpp_q));
+  dpp_q.query = "semiconductor";
+  dpp_q.category = "knowledge-economy";
+  dpp_q.use_category_morphism = 1;
+  dpp_q.diversify_mmr = 2; /* Cholesky MAP DPP */
+  dpp_q.mmr_lambda = 0.55;
+  dpp_q.limit = 10u;
+  assert(engine_search(&eng, &dpp_q, &res) == 0);
+  assert(res.total == 3u && res.count == 3u);
+  search_response_free(&res);
+  assert(http_handle_request(&ctx, "GET", "/api/v1/articles?q=semiconductor&diversify=dpp&lambda=0.55", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"total\":3") != NULL);
   buffer_free(&json);
 
   CartesianLift lifts[16];
@@ -758,6 +1052,85 @@ static void test_engine_search_and_categorical_endpoints(void) {
   assert(strstr(json.data, "\"sports_articles_count\":1") != NULL);
   assert(strstr(json.data, "\"UEFA-CHAMPIONS-LEAGUE\":1") != NULL);
   assert(strstr(json.data, "\"FORMULA-1\":1") != NULL);
+  buffer_free(&json);
+
+  /* Ingest a Severe Weather / Tropical Cyclone / Space Weather article and test ?weather=, ?weather_severity=,
+   * /api/v1/weather, UCB1 Bandit Scheduling, and /api/v1/automation */
+  uint32_t a6 = 0;
+  engine_ingest_article(&eng,
+                        f_tw,
+                        "tw-wx-6",
+                        "NOAA National Hurricane Center issues Category 4 super typhoon hurricane warning with storm surge and X-class solar flare",
+                        "https://focustaiwan.tw/6",
+                        "Weather Desk",
+                        "Rapid intensification and tornado watch accompany geomagnetic storm and atmospheric river.",
+                        "<p>NOAA NHC Category 4 hurricane warning, storm surge, and X-class solar flare geomagnetic storm.</p>",
+                        "2026-11-03T05:00:00Z",
+                        1762131500000ULL,
+                        "",
+                        NULL,
+                        0,
+                        &a6,
+                        &ins);
+  assert(ins == 1);
+
+  ArticleQuery wx_q;
+  memset(&wx_q, 0, sizeof(wx_q));
+  wx_q.weather = "Tropical-Cyclone";
+  wx_q.weather_severity = "catastrophic";
+  wx_q.limit = 10u;
+  assert(engine_search(&eng, &wx_q, &res) == 0);
+  assert(res.total == 1u);
+  assert(res.hits[0].article->id == a6);
+  search_response_free(&res);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/weather?temp_c=29.0&humidity=78.0", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"weather_articles_count\":1") != NULL);
+  assert(strstr(json.data, "\"catastrophic-emergency\":1") != NULL);
+  assert(strstr(json.data, "\"TROPICAL-CYCLONE\":1") != NULL);
+  assert(strstr(json.data, "\"atmospheric_physics\":{\"lorenz_63_attractor\":") != NULL);
+  assert(strstr(json.data, "\"kaplan_yorke_dimension\":") != NULL);
+  assert(strstr(json.data, "\"wet_bulb_temperature_c\":") != NULL);
+  buffer_free(&json);
+
+  /* Verify built-in automation rules triggered on the severe weather & AI articles */
+  assert(eng.automation_rule_count >= 5u);
+  assert(eng.automation_alert_count >= 2u);
+
+  BanditFeedPriority bandit_prio[8];
+  size_t b_sel = engine_bandit_select_feeds(&eng, bandit_prio, 8u);
+  assert(b_sel == 8u);
+  assert(bandit_prio[0].ucb1_score >= bandit_prio[1].ucb1_score);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/automation", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"rule_count\":5") != NULL);
+  assert(strstr(json.data, "\"bandit_schedule\":[") != NULL);
+  assert(strstr(json.data, "\"severe-weather-hazard\"") != NULL);
+  buffer_free(&json);
+
+  const char *new_rule_body =
+      "{\"name\":\"Custom Taiwan Chip Watch\",\"category\":\"semiconductors\","
+      "\"query\":\"TSMC\",\"action\":\"alert-ring\"}";
+  assert(http_handle_request(&ctx, "POST", "/api/v1/automation/rules",
+                             new_rule_body, strlen(new_rule_body), &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"rule_id\":6") != NULL);
+  assert(strstr(json.data, "\"rule_count\":6") != NULL);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "POST", "/api/v1/automation/run",
+                             "{\"auto_poll_interval_sec\":120}", 30u, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"auto_cycles_completed\":1") != NULL);
+  assert(eng.auto_poll_interval_sec == 120u);
+  buffer_free(&json);
+
+  assert(http_handle_request(&ctx, "DELETE", "/api/v1/automation/rules?id=6", "", 0, &status, &json) == 0);
+  assert(status == 200);
+  assert(strstr(json.data, "\"status\":\"deleted\"") != NULL);
+  assert(eng.automation_rule_count == 5u);
   buffer_free(&json);
 
   m1_tokenizer_free(&tok);
@@ -1210,6 +1583,115 @@ static void test_url_fetch_redirect_policy(void) {
   rmdir(dir);
 }
 
+static void test_one_machine_consolidation_and_appliance(void) {
+  OyezEngine eng;
+  engine_init(&eng);
+
+  uint32_t fid_wx = 0, fid_ai = 0;
+  CatalogEntry c_wx = {"NOAA Hurricane Center", "https://nhc.noaa.example/rss", "https://nhc.noaa.example",
+                       "weather", REGION_NORTH_AMERICA, "US", "North America", "en", "official", "Severe Weather"};
+  CatalogEntry c_ai = {"Frontier AI Lab", "https://ai.example/rss", "https://ai.example",
+                       "ai", REGION_NORTH_AMERICA, "US", "North America", "en", "specialist", "AI Models"};
+  assert(engine_upsert_feed(&eng, &c_wx, &fid_wx) == 0);
+  assert(engine_upsert_feed(&eng, &c_ai, &fid_ai) == 0);
+
+  eng.feeds[0].fetch_count = 17u;
+  eng.feeds[0].error_count = 2u;
+  eng.feeds[0].last_fetched_ms = 1762140000000ULL;
+  eng.feeds[1].fetch_count = 9u;
+  eng.feeds[1].error_count = 0u;
+  eng.feeds[1].last_fetched_ms = 1762141000000ULL;
+  eng.total_bandit_pulls = 26ULL;
+  eng.auto_poll_interval_sec = 90u;
+  eng.last_auto_cycle_ms = 1762142000000ULL;
+  eng.auto_cycles_completed = 5ULL;
+
+  AutomationRule custom = {0};
+  strcpy(custom.name, "typhoon-polar-vortex-watch");
+  strcpy(custom.query, "super typhoon");
+  strcpy(custom.category, "weather");
+  custom.min_weather_severity = WEATHER_WARNING;
+  custom.action = AUTO_ACTION_ALERT_RING;
+  custom.enabled = 1;
+  uint32_t custom_rid = 0;
+  assert(engine_upsert_automation_rule(&eng, &custom, &custom_rid) == 0);
+  assert(custom_rid >= 5u);
+
+  int ins = 0;
+  assert(engine_ingest_article(&eng,
+                               fid_wx,
+                               "wx-snap-1",
+                               "Catastrophic Emergency: Super Typhoon & Category 5 Hurricane Storm Surge",
+                               "https://nhc.noaa.example/typhoon-1",
+                               "NHC Forecaster",
+                               "Extreme hazard warning for super typhoon storm surge and flash flood emergency.",
+                               "<p>Catastrophic super typhoon storm surge warning.</p>",
+                               "2026-11-03T08:00:00Z",
+                               1762150000000ULL,
+                               "",
+                               NULL,
+                               0,
+                               NULL,
+                               &ins) == 0 && ins == 1);
+
+  const char *snap_file = "/tmp/oyez_one_machine_test.ix";
+  assert(engine_save_snapshot(&eng, snap_file) == 0);
+
+  OyezEngine restored;
+  engine_init(&restored);
+  assert(engine_load_snapshot(&restored, snap_file) == 0);
+  remove(snap_file);
+
+  assert(restored.feed_count == 2u);
+  assert(restored.article_count == 1u);
+  assert(restored.feeds[0].fetch_count == 17u);
+  assert(restored.feeds[0].error_count == 2u);
+  assert(restored.feeds[0].last_fetched_ms == 1762140000000ULL);
+  assert(restored.feeds[1].fetch_count == 9u);
+  assert(restored.total_bandit_pulls == 26ULL);
+  assert(restored.auto_poll_interval_sec == 90u);
+  assert(restored.auto_cycles_completed == 5ULL);
+  assert(restored.automation_rule_count == 6u);
+
+  int found_custom = 0;
+  for(size_t i = 0; i < restored.automation_rule_count; ++i) {
+    if(strcmp(restored.automation_rules[i].name, "typhoon-polar-vortex-watch") == 0) {
+      found_custom = 1;
+      assert(restored.automation_rules[i].hit_count >= 1u);
+      assert(restored.automation_rules[i].min_weather_severity == WEATHER_WARNING);
+    }
+  }
+  assert(found_custom == 1);
+  assert(restored.automation_alert_count >= 2u);
+
+  EngineApplianceState app;
+  engine_appliance_state(&restored, &app);
+  assert(app.all_theorems_verified == 1);
+  assert(app.theorems_verified_count == 12u);
+  assert(app.theorems_total_count == 12u);
+  assert(app.max_numerical_defect < 1e-10);
+  assert(app.total_resident_bytes > app.struct_base_bytes);
+  assert(app.arena_bytes_used > 0u);
+  assert(app.arena_bytes_capacity >= 65536u);
+  assert(app.severe_weather_articles == 1u);
+  assert(app.active_watchpoint_rules == 6u);
+  assert(app.top_bandit_count == 2u);
+
+  ServerContext ctx = {&restored, NULL, NULL, 0};
+  int status = 0;
+  Buffer out;
+  assert(http_handle_request(&ctx, "GET", "/api/v1/appliance", "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "\"appliance\":\"oyez-one-machine-c23\"") != NULL);
+  assert(strstr(out.data, "\"all_theorems_verified\":true") != NULL);
+  assert(strstr(out.data, "\"theorems_verified_count\":12") != NULL);
+  assert(strstr(out.data, "\"total_resident_bytes\":") != NULL);
+  buffer_free(&out);
+
+  engine_free(&restored);
+  engine_free(&eng);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
@@ -1219,6 +1701,7 @@ int main(void) {
   test_hardening_and_concurrency();
   test_http_connection_framing();
   test_url_fetch_redirect_policy();
+  test_one_machine_consolidation_and_appliance();
   printf("ALL C23 OYEZ TESTS PASSED\n");
   return 0;
 }

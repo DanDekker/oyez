@@ -56,7 +56,7 @@ static int run_bench(void) {
       "Investigative whistleblower audit offshore financial secrecy",
       "Naval defense maritime security ceasefire diplomatic summit",
       "Artificial intelligence neural network open source kernel linux",
-      "Epidemiology clinical trial vaccine public health hospital"};
+      "NOAA NHC Hurricane Category 4 Tornado Warning Solar Flare X-Class USGS M7.2"};
 
   size_t N = 2000u;
   uint64_t t0 = monotonic_ns();
@@ -182,24 +182,57 @@ static int run_bench(void) {
   ontology_adjunction_monad(raw_s, &monad);
   OperadChain chains[16];
   size_t op_cnt = engine_operad_compose(&eng, "east-asia", "north-america", "europe", chains, 16u);
+  ToposState topos;
+  engine_topos_state(&eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
   uint64_t po1 = monotonic_ns();
-  printf("6. Pushout, Fibration, Temporal Sheaf, Persistent Homology & Operad:\n");
-  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, operads=%zu, PH_L1=%.2f, H_kl=%.3f)\n",
+  printf("6. Pushout, Fibration, Temporal Sheaf, Topos Bi-Heyting, Sinkhorn OT & Spectral Seq:\n");
+  printf("   Total Time:  %.3f ms (amalgams=%zu, lifts=%zu, operads=%zu, W_eps=%.3f, S_eps=%.3f, d_FR=%.3f, day_err=%.1e)\n",
          (double)(po1 - po0) / 1e6,
          po_cnt,
          fib_cnt,
          op_cnt,
-         barcode.total_persistence_l1,
-         monad.kleisli_entropy);
+         topos.sinkhorn_ot.entropic_wasserstein,
+         topos.sinkhorn_ot.sinkhorn_divergence,
+         topos.sinkhorn_ot.fisher_rao_geodesic,
+         topos.day_adjunction_defect);
+
+  uint64_t wx0 = monotonic_ns();
+  WeatherPhysicsState phys;
+  ontology_atmospheric_dynamics(28.5, 74.0, 16.0, 36.0, 4.5, &phys);
+  BanditFeedPriority prio[16];
+  size_t bandit_cnt = engine_bandit_select_feeds(&eng, prio, 16u);
+  uint64_t wx1 = monotonic_ns();
+  printf("7. Lorenz-63 Chaos RK4 + Benettin QR Lyapunov & UCB1 Bandit Automation:\n");
+  printf("   Total Time:  %.3f ms (lambda_1=%.4f, D_KY=%.4f, T_w=%.2fC, K_s=%.2f, alerts=%zu, bandit_k=%zu)\n",
+         (double)(wx1 - wx0) / 1e6,
+         phys.lyapunov_max,
+         phys.kaplan_yorke_dim,
+         phys.wet_bulb_celsius,
+         phys.rossby_stationary_k,
+         eng.automation_alert_count,
+         bandit_cnt);
 
   M1Tokenizer m1;
   uint64_t m0 = monotonic_ns();
   train_default_m1(&m1);
   uint64_t m1_ns = monotonic_ns();
-  printf("7. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
+  printf("8. M1 Structured BPE Tokenizer Training + SHA-256 Seal:\n");
   printf("   Vocab Size:  %u (trained in %.2f ms)\n",
          m1_tokenizer_vocab_size(&m1),
          (double)(m1_ns - m0) / 1e6);
+
+  uint64_t ap0 = monotonic_ns();
+  EngineApplianceState app;
+  engine_appliance_state(&eng, &app);
+  uint64_t ap1 = monotonic_ns();
+  printf("9. Consolidated One-Machine Appliance Self-Verification & Memory Audit:\n");
+  printf("   Total Time:  %.3f ms (theorems=%u/%u, resident=%.2f MB, arena=%.1f KB, max_defect=%.2e)\n",
+         (double)(ap1 - ap0) / 1e6,
+         app.theorems_verified_count,
+         app.theorems_total_count,
+         (double)app.total_resident_bytes / (1024.0 * 1024.0),
+         (double)app.arena_bytes_used / 1024.0,
+         app.max_numerical_defect);
 
   m1_tokenizer_free(&m1);
   engine_free(&eng);
@@ -249,19 +282,92 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if(strcmp(cmd, "stats") == 0) {
-    printf("feeds: %zu\narticles: %zu\ninverted_terms: %zu\nm1_vocab: %u\nm1_sha256: %s\n",
+  if(strcmp(cmd, "automate") == 0 || strcmp(cmd, "watch") == 0) {
+    size_t batch = argc > 2 ? (size_t)strtoul(argv[2], NULL, 10) : 0u;
+    BanditFeedPriority prio[8];
+    size_t sel = engine_bandit_select_feeds(&eng, prio, 8u);
+    printf("UCB1 Bandit Top-%zu Priority Feeds:\n", sel);
+    for(size_t i = 0; i < sel; ++i) {
+      printf("  [%zu] feed_id=%u ucb1=%.3f yield=%.2f cat=%s (%s)\n",
+             i + 1u, prio[i].feed_id, prio[i].ucb1_score, prio[i].empirical_yield,
+             prio[i].category, prio[i].title);
+    }
+    size_t ins = 0;
+    if(batch > 0u) {
+      ins = engine_poll_bandit_auto(&eng, batch, 4u);
+    } else {
+      engine_evaluate_all_automation_rules(&eng);
+      eng.auto_cycles_completed++;
+    }
+    engine_save_snapshot(&eng, snap_path);
+    printf("Automation cycle #%llu complete: newly_ingested=%zu active_rules=%zu total_alerts=%zu\n",
+           (unsigned long long)eng.auto_cycles_completed, ins,
+           eng.automation_rule_count, eng.automation_alert_count);
+    size_t show = eng.automation_alert_count < 5u ? eng.automation_alert_count : 5u;
+    for(size_t k = 0; k < show; ++k) {
+      size_t idx = (eng.automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
+      const AutomationAlert *al = &eng.automation_alerts[idx];
+      printf("  ALERT #%llu [rule=%s score=%.2f]: %s (%s)\n",
+             (unsigned long long)al->alert_id, al->rule_name, al->trigger_score,
+             al->article_title, al->weather_severity_slug);
+    }
+    m1_tokenizer_free(&tok);
+    engine_free(&eng);
+    return 0;
+  }
+
+  if(strcmp(cmd, "weather") == 0) {
+    WeatherPhysicsState phys;
+    ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &phys);
+    printf("Weather/Climate Fiber Articles: %u | Lorenz-63 Attractor: (%.3f, %.3f, %.3f)\n",
+           bitset_popcount(&eng.by_closure_ontology[ONTO_CLIMATE]),
+           phys.lorenz_state[0], phys.lorenz_state[1], phys.lorenz_state[2]);
+    printf("Max Lyapunov lambda_1: %.4f | Kaplan-Yorke Dim D_KY: %.4f | Horizon: %.3f\n",
+           phys.lyapunov_max, phys.kaplan_yorke_dim, phys.predictability_horizon);
+    printf("Saturation Vapor e_s: %.2f hPa | Wet-Bulb T_w: %.2f C | Rossby K_s: %.2f (blocking=%s)\n",
+           phys.saturation_vapor_hpa, phys.wet_bulb_celsius, phys.rossby_stationary_k,
+           phys.omega_blocking_regime ? "YES" : "NO");
+    m1_tokenizer_free(&tok);
+    engine_free(&eng);
+    return 0;
+  }
+
+  if(strcmp(cmd, "stats") == 0 || strcmp(cmd, "status") == 0 ||
+     strcmp(cmd, "appliance") == 0 || strcmp(cmd, "machine") == 0) {
+    EngineApplianceState app;
+    engine_appliance_state(&eng, &app);
+    printf("feeds: %zu\narticles: %zu\ninverted_terms: %zu\nm1_vocab: %u\nm1_sha256: %s\n"
+           "theorems_verified: %u/%u (%s)\nmax_numerical_defect: %.3e\n"
+           "resident_memory_bytes: %zu (%.2f MB)\narena_used_bytes: %zu / %zu (%zu blocks)\n"
+           "inverted_index_bytes: %zu\nbitset_fiber_bytes: %zu\nlsh_and_dedup_bytes: %zu\n"
+           "automation_rules: %zu\nautomation_alerts: %zu\n",
            eng.feed_count,
            eng.article_count,
            eng.inv_count,
            m1_tokenizer_vocab_size(&tok),
-           tok.sha256);
+           tok.sha256,
+           app.theorems_verified_count,
+           app.theorems_total_count,
+           app.all_theorems_verified ? "VERIFIED" : "DEGRADED",
+           app.max_numerical_defect,
+           app.total_resident_bytes,
+           (double)app.total_resident_bytes / (1024.0 * 1024.0),
+           app.arena_bytes_used,
+           app.arena_bytes_capacity,
+           app.arena_block_count,
+           app.inverted_index_bytes,
+           app.bitset_fiber_bytes,
+           app.lsh_and_dedup_bytes,
+           app.active_watchpoint_rules,
+           app.total_watchpoint_alerts);
     m1_tokenizer_free(&tok);
     engine_free(&eng);
     return 0;
   }
 
   if(strcmp(cmd, "tui") == 0 || strcmp(cmd, "top") == 0) {
+    EngineApplianceState app;
+    engine_appliance_state(&eng, &app);
     double raw_s[ONTOLOGY_NODE_COUNT], clo_s[ONTOLOGY_NODE_COUNT];
     for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
       raw_s[i] = (double)bitset_popcount(&eng.by_direct_ontology[i]);
@@ -275,24 +381,76 @@ int main(int argc, char **argv) {
     ontology_adjunction_monad(raw_s, &monad);
     TemporalSheafState temp;
     engine_temporal_sheaf(&eng, &temp);
+    ToposState topos;
+    engine_topos_state(&eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
+    WeatherPhysicsState wx_phys;
+    ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &wx_phys);
 
     printf("\033[1;36m========================================================================\033[0m\n");
-    printf("\033[1;37m  OYEZ // C23 CATEGORY-THEORETIC & TOPOS INTELLIGENCE TUI DASHBOARD\033[0m\n");
+    printf("\033[1;37m  OYEZ // C23 ONE-MACHINE AUTONOMOUS INTELLIGENCE APPLIANCE DASHBOARD\033[0m\n");
     printf("\033[1;36m========================================================================\033[0m\n");
     printf("  Feeds: \033[1;32m%zu\033[0m | Articles: \033[1;32m%zu\033[0m | Terms: \033[1;32m%zu\033[0m | M1 Vocab: \033[1;33m%u\033[0m\n",
            eng.feed_count, eng.article_count, eng.inv_count, m1_tokenizer_vocab_size(&tok));
+    printf("  Resident RAM: \033[1;32m%.2f MB\033[0m (Arena: %.1f/%.1f KB | InvIdx: %.1f KB | Fibers: %.1f KB)\n",
+           (double)app.total_resident_bytes / (1024.0 * 1024.0),
+           (double)app.arena_bytes_used / 1024.0,
+           (double)app.arena_bytes_capacity / 1024.0,
+           (double)app.inverted_index_bytes / 1024.0,
+           (double)app.bitset_fiber_bytes / 1024.0);
+    printf("  Self-Verification: \033[1;32m%u/%u THEOREMS PASS\033[0m (Max Defect: %.2e | Gen: %llu)\n",
+           app.theorems_verified_count, app.theorems_total_count,
+           app.max_numerical_defect, (unsigned long long)app.index_generation);
     printf("------------------------------------------------------------------------\n");
-    printf("  \033[1;35m[Homological & Enriched Category Invariants]\033[0m\n");
+    printf("  \033[1;35m[Homological, Bi-Heyting Topos & Enriched Category Invariants]\033[0m\n");
     printf("  Leinster Magnitude |C|_L : %8.4f   Euler Char chi(N(C)) : %d\n",
            sheaf.leinster_magnitude, sheaf.euler_characteristic);
     printf("  Fiedler Connectivity l_2 : %8.4f   Cochain ||d1*d0||_2  : %.2e\n",
            sheaf.fiedler_eigenvalue, sheaf.cochain_exactness_norm);
     printf("  Hodge Gradient ||d0*phi||: %8.2f   Hodge Solenoidal Curl: %8.2f\n",
            sheaf.hodge_gradient_norm, sheaf.hodge_solenoidal_norm);
+    printf("  Hodge Coexact ||d1^T*psi|: %8.2f   Hodge Harmonic Resid : %8.2f\n",
+           sheaf.hodge_coexact_norm, sheaf.hodge_harmonic_norm);
+    printf("  1-Laplacian Trace Tr(L1) : %8.2f   Isbell Hull Defect   : %.2e\n",
+           sheaf.laplacian_1_trace, topos.isbell_envelope_defect);
+    printf("  Tensor-Hom Adjunction Err: %.2e   Lawvere Leibniz Rule : %s\n",
+           topos.tensor_hom_adjunction_defect, topos.leibniz_rule_holds ? "EXACT" : "FAIL");
+    printf("  Day Conv Adjunction Err  : %.2e   Quillen Factor j(M)=j(A): %s\n",
+           topos.day_adjunction_defect, topos.quillen_weak_equivalence_holds ? "EXACT" : "FAIL");
+    printf("  Sinkhorn W_eps / S_eps   : %.3f/%.3f  Fisher-Rao Geodesic  : %8.4f\n",
+           topos.sinkhorn_ot.entropic_wasserstein,
+           topos.sinkhorn_ot.sinkhorn_divergence,
+           topos.sinkhorn_ot.fisher_rao_geodesic);
+    printf("  Cheeger Const h(C)       : %8.4f   Cheeger-Buser Bound  : %s\n",
+           topos.sinkhorn_ot.cheeger_constant,
+           topos.sinkhorn_ot.cheeger_buser_holds ? "HOLDS" : "FAIL");
+    printf("  Spectral Seq chi(E0..inf): %d/%d/%d/%d    Spectral d_r^2 Defect: %.2e\n",
+           topos.spectral_seq.euler_e0,
+           topos.spectral_seq.euler_e1,
+           topos.spectral_seq.euler_e2,
+           topos.spectral_seq.euler_e_inf,
+           topos.spectral_seq.differential_nilpotency_defect);
+    printf("  Gauss-Bonnet sum K_GB    : %8.6f   Forman/Ollivier Curv : %.2f / %.3f\n",
+           topos.ricci_curv.gauss_bonnet_total,
+           topos.ricci_curv.forman_mean_curvature,
+           topos.ricci_curv.ollivier_mean_curvature);
+    printf("  Ihara Zeta zeta_C(0.15)  : %8.4f   Tropical Idem Defect : %.2e\n",
+           topos.zeta_tropical.ihara_zeta_val,
+           topos.zeta_tropical.tropical_idempotence_defect);
+    printf("  Rota-Baxter Id Defect    : %.2e   Atkinson Birkhoff Err: %.2e\n",
+           topos.rota_baxter.rota_baxter_identity_defect,
+           topos.rota_baxter.spitzer_birkhoff_defect);
     printf("  Kleisli Monad Entropy    : %8.4f   Zig-Zag Defect       : %.2e\n",
            monad.kleisli_entropy, monad.zig_zag_triangle_defect);
     printf("  Temporal Sheaf Laplacian : %8.4f   Emerging Fiber       : %s\n",
            temp.connection_laplacian_norm, ontology_node(temp.fastest_emerging_node)->slug);
+    printf("------------------------------------------------------------------------\n");
+    printf("  \033[1;33m[Atmospheric Physics (Lorenz-63 Chaos) & Autonomous Watchpoints]\033[0m\n");
+    printf("  Lorenz-63 Max Lyapunov   : %8.4f   Kaplan-Yorke Dim D_KY: %8.4f\n",
+           wx_phys.lyapunov_max, wx_phys.kaplan_yorke_dim);
+    printf("  Clausius-Clapeyron e_s   : %6.2f hPa  Stull Wet-Bulb T_w   : %6.2f C\n",
+           wx_phys.saturation_vapor_hpa, wx_phys.wet_bulb_celsius);
+    printf("  Rossby Stationary K_s    : %8.4f   Automation Rules/Hits: %zu / %zu\n",
+           wx_phys.rossby_stationary_k, eng.automation_rule_count, eng.automation_alert_count);
     printf("------------------------------------------------------------------------\n");
     printf("  \033[1;34m[Persistent Homology Filtration Barcode (N_eps(C))]\033[0m\n");
     for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
