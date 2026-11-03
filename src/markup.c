@@ -178,41 +178,38 @@ int markup_strip_html(const char *html, size_t len, Buffer *out) {
   while(i < len) {
     if(i + 9u <= len && memcmp(html + i, "<![CDATA[", 9u) == 0) {
       const char *end = ci_find(html + i + 9u, len - (i + 9u), "]]>");
-      if(end) {
-        Buffer sub;
-        buffer_init(&sub);
-        markup_strip_html(html + i + 9u, (size_t)(end - (html + i + 9u)), &sub);
-        if(sub.len > 0) {
-          buffer_append(&raw, " ", 1u);
-          buffer_append(&raw, sub.data, sub.len);
-          buffer_append(&raw, " ", 1u);
-        }
-        buffer_free(&sub);
-        i = (size_t)((end + 3u) - html);
-        continue;
+      size_t cdata_len = end ? (size_t)(end - (html + i + 9u)) : (len - (i + 9u));
+      Buffer sub;
+      buffer_init(&sub);
+      markup_strip_html(html + i + 9u, cdata_len, &sub);
+      if(sub.len > 0) {
+        buffer_append(&raw, " ", 1u);
+        buffer_append(&raw, sub.data, sub.len);
+        buffer_append(&raw, " ", 1u);
       }
+      buffer_free(&sub);
+      if(!end) break;
+      i = (size_t)((end + 3u) - html);
+      continue;
     }
     if(i + 4u <= len && memcmp(html + i, "<!--", 4u) == 0) {
       const char *end = ci_find(html + i + 4u, len - (i + 4u), "-->");
-      if(end) {
-        i = (size_t)((end + 3u) - html);
-        continue;
-      }
+      if(!end) break;
+      i = (size_t)((end + 3u) - html);
+      continue;
     }
     if(html[i] == '<') {
       if(ci_starts_with(html + i, len - i, "<script")) {
         const char *end = ci_find(html + i + 7u, len - (i + 7u), "</script>");
-        if(end) {
-          i = (size_t)((end + 9u) - html);
-          continue;
-        }
+        if(!end) break;
+        i = (size_t)((end + 9u) - html);
+        continue;
       }
       if(ci_starts_with(html + i, len - i, "<style")) {
         const char *end = ci_find(html + i + 6u, len - (i + 6u), "</style>");
-        if(end) {
-          i = (size_t)((end + 8u) - html);
-          continue;
-        }
+        if(!end) break;
+        i = (size_t)((end + 8u) - html);
+        continue;
       }
       size_t close = i + 1u;
       while(close < len && html[close] != '>') close++;
@@ -370,17 +367,48 @@ static int find_xml_tag(const char *xml,
         }
         const char *inner_start = xml + gt + 1u;
         size_t search = gt + 1u;
+        int depth = 1;
         while(search < len) {
-          if(xml[search] == '<' && search + 2u < len && xml[search + 1u] == '/') {
-            if(tag_name_matches(xml + search + 2u, len - (search + 2u), tag_name)) {
-              size_t close_gt = search + 2u;
-              while(close_gt < len && xml[close_gt] != '>') close_gt++;
-              if(close_gt < len) {
-                if(out_open_start) *out_open_start = xml + pos;
-                if(out_inner_start) *out_inner_start = inner_start;
-                if(out_inner_end) *out_inner_end = xml + search;
-                if(out_after_close) *out_after_close = xml + close_gt + 1u;
-                return 1;
+          if(xml[search] == '<' && search + 1u < len) {
+            if(xml[search + 1u] == '/' && search + 2u < len) {
+              if(tag_name_matches(xml + search + 2u, len - (search + 2u), tag_name)) {
+                size_t close_gt = search + 2u;
+                while(close_gt < len && xml[close_gt] != '>') close_gt++;
+                if(close_gt < len) {
+                  depth--;
+                  if(depth == 0) {
+                    if(out_open_start) *out_open_start = xml + pos;
+                    if(out_inner_start) *out_inner_start = inner_start;
+                    if(out_inner_end) *out_inner_end = xml + search;
+                    if(out_after_close) *out_after_close = xml + close_gt + 1u;
+                    return 1;
+                  }
+                  search = close_gt + 1u;
+                  continue;
+                }
+              }
+            } else if(xml[search + 1u] != '!' && xml[search + 1u] != '?' &&
+                      tag_name_matches(xml + search + 1u, len - (search + 1u), tag_name)) {
+              size_t sub_gt = search + 1u;
+              int sub_q = 0;
+              char sub_qc = 0;
+              while(sub_gt < len) {
+                if(sub_q) {
+                  if(xml[sub_gt] == sub_qc) sub_q = 0;
+                } else {
+                  if(xml[sub_gt] == '"' || xml[sub_gt] == '\'') {
+                    sub_q = 1;
+                    sub_qc = xml[sub_gt];
+                  } else if(xml[sub_gt] == '>') {
+                    break;
+                  }
+                }
+                sub_gt++;
+              }
+              if(sub_gt < len) {
+                if(xml[sub_gt - 1u] != '/') depth++;
+                search = sub_gt + 1u;
+                continue;
               }
             }
           }
@@ -1128,11 +1156,18 @@ int readability_extract(const char *html, size_t len, const char *url, Extracted
   if(out->excerpt[0] == '\0' && out->text_content[0] != '\0') {
     free(out->excerpt);
     size_t elen = strlen(out->text_content);
-    if(elen > 240u) elen = 240u;
+    if(elen > 240u) {
+      elen = 240u;
+      while(elen > 0 && ((unsigned char)out->text_content[elen] & 0xC0u) == 0x80u) {
+        elen--;
+      }
+    }
     out->excerpt = malloc(elen + 1u);
     if(out->excerpt) {
       memcpy(out->excerpt, out->text_content, elen);
       out->excerpt[elen] = '\0';
+    } else {
+      out->excerpt = dup_cstr("");
     }
   }
 
