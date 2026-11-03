@@ -269,7 +269,7 @@ static int inv_table_grow(OyezEngine *engine) {
   return 0;
 }
 
-static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_t slot, float weight) {
+static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_t slot, float weight, uint32_t pos_mask) {
   if((engine->inv_count + 1u) * 10u >= engine->inv_cap * 7u) {
     if(inv_table_grow(engine) != 0) return -1;
   }
@@ -282,17 +282,21 @@ static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_
         uint32_t ncap = b->cap ? (b->cap * 2u) : 8u;
         uint32_t *nslots = realloc(b->slots, ncap * sizeof(uint32_t));
         float *nw = realloc(b->weights, ncap * sizeof(float));
-        if(!nslots || !nw) {
+        uint32_t *npm = realloc(b->pos_masks, ncap * sizeof(uint32_t));
+        if(!nslots || !nw || !npm) {
           if(nslots) b->slots = nslots;
           if(nw) b->weights = nw;
+          if(npm) b->pos_masks = npm;
           return -1;
         }
         b->slots = nslots;
         b->weights = nw;
+        b->pos_masks = npm;
         b->cap = ncap;
       }
       b->slots[b->count] = slot;
       b->weights[b->count] = weight;
+      b->pos_masks[b->count] = pos_mask;
       b->count++;
       return 0;
     }
@@ -307,9 +311,11 @@ static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_
   b->cap = 8u;
   b->slots = malloc(b->cap * sizeof(uint32_t));
   b->weights = malloc(b->cap * sizeof(float));
-  if(!b->slots || !b->weights) return -1;
+  b->pos_masks = malloc(b->cap * sizeof(uint32_t));
+  if(!b->slots || !b->weights || !b->pos_masks) return -1;
   b->slots[0] = slot;
   b->weights[0] = weight;
+  b->pos_masks[0] = pos_mask;
   b->count = 1u;
   engine->inv_count++;
   return 0;
@@ -423,6 +429,7 @@ void engine_free(OyezEngine *engine) {
     if(engine->inv_table[i].occupied) {
       free(engine->inv_table[i].slots);
       free(engine->inv_table[i].weights);
+      free(engine->inv_table[i].pos_masks);
     }
   }
   free(engine->inv_table);
@@ -616,7 +623,7 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   }
 
   for(size_t i = 0; i < term_count; ++i) {
-    inv_post(engine, terms[i].term, terms[i].hash, slot, terms[i].weight);
+    inv_post(engine, terms[i].term, terms[i].hash, slot, terms[i].weight, terms[i].pos_mask);
   }
 }
 
@@ -1067,6 +1074,8 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     const double b_param = 0.75;
     const double delta_plus = 1.0; /* BM25+ lower-bound TF normalization */
 
+    uint32_t *prev_pos = (qterm_count > 1u) ? calloc(engine->article_count, sizeof(uint32_t)) : NULL;
+
     for(size_t t = 0; t < qterm_count; ++t) {
       const InvertedBucket *bucket = inv_lookup(engine, qterms[t].term, qterms[t].hash);
       if(!bucket || bucket->count == 0) continue;
@@ -1078,10 +1087,20 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
         double tf = (double)bucket->weights[p];
         double dl = (double)engine->articles[slot].doc_len;
         double denom = tf + k1 * (1.0 - b_param + b_param * (dl / avgdl));
-        bm25_scores[slot] += idf * (((tf * (k1 + 1.0)) / denom) + delta_plus);
+        double term_bm25 = idf * (((tf * (k1 + 1.0)) / denom) + delta_plus);
+        if(prev_pos) {
+          uint32_t pm = bucket->pos_masks ? bucket->pos_masks[p] : 0u;
+          uint32_t prev_pm = prev_pos[slot];
+          if(prev_pm != 0u && ((pm & prev_pm) != 0u || (pm & (prev_pm << 1u)) != 0u)) {
+            term_bm25 *= 1.35; /* Positional phrase / proximity boost */
+          }
+          prev_pos[slot] = pm;
+        }
+        bm25_scores[slot] += term_bm25;
         bitset_set(&query_union, slot);
       }
     }
+    free(prev_pos);
     bitset_and_inplace(&candidates, &query_union);
     bitset_free(&query_union);
   }

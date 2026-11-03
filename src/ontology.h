@@ -215,6 +215,7 @@ typedef struct {
   uint64_t hash;
   float weight;
   uint32_t tf;
+  uint32_t pos_mask;
 } LexicalTerm;
 
 const char *world_region_slug(WorldRegion region);

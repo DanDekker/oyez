@@ -2573,6 +2573,7 @@ static void stem_word(char *w, size_t len) {
 static size_t push_lexical_term(const char *word,
                                 size_t wlen,
                                 float weight,
+                                uint32_t pos_bit,
                                 LexicalTerm *terms,
                                 size_t current_count,
                                 size_t max_terms) {
@@ -2581,6 +2582,7 @@ static size_t push_lexical_term(const char *word,
     if(terms[i].hash == h && strcmp(terms[i].term, word) == 0) {
       terms[i].weight += weight;
       terms[i].tf += 1u;
+      terms[i].pos_mask |= pos_bit;
       return current_count;
     }
   }
@@ -2590,6 +2592,7 @@ static size_t push_lexical_term(const char *word,
     terms[current_count].hash = h;
     terms[current_count].weight = weight;
     terms[current_count].tf = 1u;
+    terms[current_count].pos_mask = pos_bit;
     current_count++;
   }
   return current_count;
@@ -2603,6 +2606,7 @@ size_t lexical_analyze(const char *text,
                        uint32_t *out_word_tokens) {
   if(!text || !terms) return current_count;
   size_t p = 0;
+  uint32_t local_pos = out_word_tokens ? *out_word_tokens : 0u;
   while(text[p] != '\0') {
     while(text[p] != '\0' && !isalnum((unsigned char)text[p])) p++;
     if(text[p] == '\0') break;
@@ -2625,12 +2629,14 @@ size_t lexical_analyze(const char *text,
     wlen = strlen(word);
     if(wlen < 2u) continue;
 
+    uint32_t pos_bit = 1u << ((local_pos >> 1u) & 31u);
+    local_pos++;
     if(out_word_tokens) (*out_word_tokens)++;
-    current_count = push_lexical_term(word, wlen, field_weight, terms, current_count, max_terms);
+    current_count = push_lexical_term(word, wlen, field_weight, pos_bit, terms, current_count, max_terms);
 
     if(canonical) {
       size_t clen = strlen(canonical);
-      current_count = push_lexical_term(canonical, clen, field_weight * 0.85f, terms, current_count, max_terms);
+      current_count = push_lexical_term(canonical, clen, field_weight * 0.85f, pos_bit, terms, current_count, max_terms);
     }
   }
   return current_count;

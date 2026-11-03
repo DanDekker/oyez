@@ -98,6 +98,7 @@ typedef struct {
   uint64_t hash;
   uint32_t *slots;
   float *weights;
+  uint32_t *pos_masks;
   uint32_t count;
   uint32_t cap;
   int occupied;
