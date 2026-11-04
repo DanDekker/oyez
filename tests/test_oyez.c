@@ -10,7 +10,6 @@
 #include "wire.h"
 
 #include <assert.h>
-#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,9 +47,59 @@ static double abs_diff(double a, double b) {
 }
 
 static void test_checksum_and_wire(void) {
-  const char *msg = "oyez-c23-wire-test";
+  const char *msg = "oyez-c99-wire-test";
   uint32_t crc = checksum_crc32(msg, strlen(msg));
   assert(crc != 0u);
+
+  /* Pure first-party C99 64-bit bit-manipulation and 128-bit limb multiplication checks */
+  assert(popcnt64(0ULL) == 0u);
+  assert(popcnt64(UINT64_MAX) == 64u);
+  assert(popcnt64(0x5555555555555555ULL) == 32u);
+  assert(popcnt64(0xAAAAAAAAAAAAAAAAULL) == 32u);
+  assert(ctz64(0ULL) == 64u);
+  assert(clz64(0ULL) == 64u);
+  for(unsigned b = 0; b < 64u; ++b) {
+    uint64_t single = 1ULL << b;
+    assert(popcnt64(single) == 1u);
+    assert(ctz64(single) == b);
+    assert(clz64(single) == 63u - b);
+    assert(rotl64(single, 0u) == single);
+    assert(rotl64(single, 64u) == single);
+  }
+  uint64_t lo = 0, hi = 0;
+  mul64x64_128(0ULL, UINT64_MAX, &lo, &hi);
+  assert(lo == 0ULL && hi == 0ULL);
+  mul64x64_128(1ULL, UINT64_MAX, &lo, &hi);
+  assert(lo == UINT64_MAX && hi == 0ULL);
+  mul64x64_128(UINT64_MAX, UINT64_MAX, &lo, &hi);
+  assert(lo == 1ULL && hi == UINT64_MAX - 1ULL);
+  assert(wyhash64(0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL) != 0ULL);
+
+  /* Pure first-party C99 IEEE-754 binary64 & transcendental math checks */
+  assert(f64_is_inf(f64_inf()) == 1);
+  assert(f64_is_inf(f64_neg_inf()) == 1);
+  assert(f64_is_finite(f64_inf()) == 0);
+  assert(f64_is_finite(f64_neg_inf()) == 0);
+  assert(f64_is_finite(0.0) == 1);
+  assert(f64_is_nan(f64_from_bits(0x7FF8000000000001ULL)) == 1);
+  assert(f64_is_finite(f64_from_bits(0x7FF8000000000001ULL)) == 0);
+  assert(f64_abs(-42.5) == 42.5);
+  assert(f64_abs(42.5) == 42.5);
+  assert(abs_diff(f64_sqrt(2.0), 1.4142135623730950488) < 1e-14);
+  assert(abs_diff(f64_sqrt(9.0), 3.0) < 1e-15);
+  assert(abs_diff(f64_ln(1.0), 0.0) < 1e-15);
+  assert(abs_diff(f64_ln(2.71828182845904523536), 1.0) < 1e-13);
+  assert(abs_diff(f64_exp(0.0), 1.0) < 1e-15);
+  assert(abs_diff(f64_exp(1.0), 2.71828182845904523536) < 1e-13);
+  assert(abs_diff(f64_ln(f64_exp(3.25)), 3.25) < 1e-12);
+  assert(abs_diff(f64_exp(f64_ln(17.5)), 17.5) < 1e-11);
+  assert(abs_diff(f64_atan(0.0), 0.0) < 1e-15);
+  assert(abs_diff(f64_atan(1.0), 0.78539816339744830962) < 1e-13);
+  assert(abs_diff(f64_atan(2.5) + f64_atan(0.4), 1.57079632679489661923) < 1e-13);
+  assert(abs_diff(f64_cos(0.0), 1.0) < 1e-15);
+  assert(abs_diff(f64_cos(1.04719755119659774615), 0.5) < 1e-12);
+  assert(abs_diff(f64_cos(3.14159265358979323846), -1.0) < 1e-12);
+  assert(abs_diff(f64_cos(-0.75), f64_cos(0.75)) < 1e-15);
 
   char hex[65];
   sha256_hex(msg, strlen(msg), hex);
@@ -453,7 +502,7 @@ static void test_category_theory_and_ontology(void) {
    * sup(empty) = 0 and inf(empty) = +infinity. */
   assert(ontology_lawvere_distance(0u, 0u) == 0.0);
   assert(ontology_lawvere_distance(0u, 1u << ONTO_AI) == 0.0);
-  assert(isinf(ontology_lawvere_distance(1u << ONTO_AI, 0u)));
+  assert(f64_is_inf(ontology_lawvere_distance(1u << ONTO_AI, 0u)));
   double dl_up = ontology_lawvere_distance(1u << ONTO_AI, 1u << ONTO_TECHNOLOGY);
   double dl_down = ontology_lawvere_distance(1u << ONTO_TECHNOLOGY, 1u << ONTO_AI);
   assert(dl_up < dl_down);
@@ -650,7 +699,7 @@ static void test_category_theory_and_ontology(void) {
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     assert(abs_diff(cocone_fg[c], cocone_gf[c]) < 1e-12);
     assert(abs_diff(cocone_left[c], cocone_right[c]) < 1e-12);
-    assert(isfinite(cocone_hom_gh[c]));
+    assert(f64_is_finite(cocone_hom_gh[c]));
     assert(abs_diff(cocone_in_place[c], cocone_fg[c]) < 1e-12);
     assert(abs_diff(hom_in_place[c], cocone_hom_gh[c]) < 1e-12);
     assert(abs_diff(isotone_unit_check[c], kan[c]) < 1e-12);
@@ -1870,6 +1919,126 @@ static void test_url_fetch_redirect_policy(void) {
   remove(script_path);
   remove(calls_path);
   rmdir(dir);
+
+  /* Pure first-party C99 RFC 3986 redirect resolution & HTTP/1.1 wire client tests */
+  char resolved[512];
+  assert(http_resolve_redirect_url("http://example.com:8080/feeds/dir/rss.xml",
+                                   "/atom.xml", resolved, sizeof(resolved)) == 0);
+  assert(strcmp(resolved, "http://example.com:8080/atom.xml") == 0);
+  assert(http_resolve_redirect_url("http://example.com/feeds/dir/rss.xml?v=1",
+                                   "sub/latest.xml", resolved, sizeof(resolved)) == 0);
+  assert(strcmp(resolved, "http://example.com/feeds/dir/sub/latest.xml") == 0);
+  assert(http_resolve_redirect_url("https://example.com/feeds/rss.xml",
+                                   "//cdn.example.org/feed.json#frag", resolved, sizeof(resolved)) == 0);
+  assert(strcmp(resolved, "https://cdn.example.org/feed.json") == 0);
+
+  /* First-party C99 HTTP/1.1 client exchange with Transfer-Encoding: chunked */
+  int cfd[2];
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, cfd) == 0);
+  const char *mock_chunked_resp =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: application/rss+xml\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "\r\n"
+      "6;ext=1\r\n"
+      "<rss><\r\n"
+      "7\r\n"
+      "/rss>\r\n\r\n"
+      "0\r\n"
+      "\r\n";
+  assert(write(cfd[1], mock_chunked_resp, strlen(mock_chunked_resp)) == (ssize_t)strlen(mock_chunked_resp));
+  assert(shutdown(cfd[1], SHUT_WR) == 0);
+  int c_status = 0;
+  char c_loc[256];
+  Buffer c_body;
+  buffer_init(&c_body);
+  assert(http_client_exchange_fd(cfd[0], "example.com", 80u, 80, "/rss.xml",
+                                 &c_status, c_loc, sizeof(c_loc), &c_body) == 0);
+  char req_seen[512];
+  ssize_t req_n = read(cfd[1], req_seen, sizeof(req_seen) - 1u);
+  assert(req_n > 0);
+  req_seen[req_n] = '\0';
+  assert(strstr(req_seen, "GET /rss.xml HTTP/1.1\r\n") != NULL);
+  assert(strstr(req_seen, "Host: example.com\r\n") != NULL);
+  close(cfd[0]);
+  close(cfd[1]);
+  assert(c_status == 200);
+  assert(strcmp(c_body.data, "<rss></rss>\r\n") == 0);
+  buffer_free(&c_body);
+
+  /* First-party C99 HTTP/1.1 client exchange with 301 Location & Content-Length */
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, cfd) == 0);
+  const char *mock_redir_resp =
+      "HTTP/1.1 301 Moved Permanently\r\n"
+      "Location: /new-feed.xml\r\n"
+      "Content-Length: 5\r\n"
+      "\r\n"
+      "moved";
+  assert(write(cfd[1], mock_redir_resp, strlen(mock_redir_resp)) == (ssize_t)strlen(mock_redir_resp));
+  assert(shutdown(cfd[1], SHUT_WR) == 0);
+  buffer_init(&c_body);
+  assert(http_client_exchange_fd(cfd[0], "example.com", 8080u, 80, "/old.xml",
+                                 &c_status, c_loc, sizeof(c_loc), &c_body) == 0);
+  req_n = read(cfd[1], req_seen, sizeof(req_seen) - 1u);
+  assert(req_n > 0);
+  req_seen[req_n] = '\0';
+  assert(strstr(req_seen, "Host: example.com:8080\r\n") != NULL);
+  close(cfd[0]);
+  close(cfd[1]);
+  assert(c_status == 301);
+  assert(strcmp(c_loc, "/new-feed.xml") == 0);
+  assert(strcmp(c_body.data, "moved") == 0);
+  buffer_free(&c_body);
+
+  /* RFC 3986 section 5.2.4 dot-segment normalization on relative Location headers */
+  assert(http_resolve_redirect_url("https://example.com/news/2026/index.html",
+                                   "../rss/./feed.xml?fmt=atom",
+                                   resolved, sizeof(resolved)) == 0);
+  assert(strcmp(resolved, "https://example.com/news/rss/feed.xml?fmt=atom") == 0);
+  assert(http_resolve_redirect_url("https://example.com/a/b/c/feed.xml",
+                                   "/x/y/../z/./atom.xml",
+                                   resolved, sizeof(resolved)) == 0);
+  assert(strcmp(resolved, "https://example.com/x/z/atom.xml") == 0);
+
+  /* Streaming chunked response with trailers on an open socket (no peer EOF required) */
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, cfd) == 0);
+  const char *mock_trailer_resp =
+      "HTTP/1.1 200 OK\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "\r\n"
+      "4;ext=1\r\n"
+      "pure\r\n"
+      "4\r\n"
+      "-c99\r\n"
+      "0\r\n"
+      "X-Oyez-Trailer: verified\r\n"
+      "\r\n";
+  assert(write(cfd[1], mock_trailer_resp, strlen(mock_trailer_resp)) == (ssize_t)strlen(mock_trailer_resp));
+  buffer_init(&c_body);
+  assert(http_client_exchange_fd(cfd[0], "example.com", 80u, 80, "/stream.xml",
+                                 &c_status, c_loc, sizeof(c_loc), &c_body) == 0);
+  close(cfd[0]);
+  close(cfd[1]);
+  assert(c_status == 200);
+  assert(c_body.len == 8u);
+  assert(strcmp(c_body.data, "pure-c99") == 0);
+  buffer_free(&c_body);
+
+  /* Bodyless 304 Not Modified response on an open socket returns immediately */
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, cfd) == 0);
+  const char *mock_304_resp =
+      "HTTP/1.1 304 Not Modified\r\n"
+      "ETag: \"oyez-c99\"\r\n"
+      "\r\n";
+  assert(write(cfd[1], mock_304_resp, strlen(mock_304_resp)) == (ssize_t)strlen(mock_304_resp));
+  buffer_init(&c_body);
+  assert(http_client_exchange_fd(cfd[0], "example.com", 80u, 80, "/cached.xml",
+                                 &c_status, c_loc, sizeof(c_loc), &c_body) == 0);
+  close(cfd[0]);
+  close(cfd[1]);
+  assert(c_status == 304);
+  assert(c_body.len == 0u);
+  buffer_free(&c_body);
 }
 
 static void test_one_machine_consolidation_and_appliance(void) {
@@ -1973,7 +2142,7 @@ static void test_one_machine_consolidation_and_appliance(void) {
   Buffer out;
   assert(http_handle_request(&ctx, "GET", "/api/v1/appliance", "", 0, &status, &out) == 0);
   assert(status == 200);
-  assert(strstr(out.data, "\"appliance\":\"oyez-one-machine-c23\"") != NULL);
+  assert(strstr(out.data, "\"appliance\":\"oyez-one-machine-c99\"") != NULL);
   assert(strstr(out.data, "\"status_deprecated\":true") != NULL);
   assert(strstr(out.data, "\"consistency_status\":\"passing\"") != NULL);
   assert(strstr(out.data, "\"all_checks_passed\":true") != NULL);
@@ -1988,6 +2157,183 @@ static void test_one_machine_consolidation_and_appliance(void) {
   engine_free(&eng);
 }
 
+static void test_deep_information_retrieval_and_enrichment(void) {
+  /* 1. JSON-LD structured extraction, \uXXXX Unicode escape decoding, <svg>/<template> stripping,
+   *    and link-density / boilerplate candidate scoring in readability_extract */
+  const char *rich_html =
+      "<html><head>"
+      "<meta name=\"citation_author\" content=\"Dr. Ada Lovelace\"/>"
+      "<script type=\"application/ld+json\">"
+      "{"
+      "  \"@context\": \"https://schema.org\","
+      "  \"@type\": \"NewsArticle\","
+      "  \"headline\": \"Quantum Lattice \\u2014 AlphaFold \\u03b1 Breakthrough\","
+      "  \"description\": \"Structured JSON-LD summary for deep retrieval.\","
+      "  \"datePublished\": \"2026-11-03T14:30:00Z\","
+      "  \"publisher\": {\"@type\": \"Organization\", \"name\": \"Oyez Science Press\"},"
+      "  \"image\": {\"@type\": \"ImageObject\", \"url\": \"https://example.org/lead.png\"}"
+      "}"
+      "</script>"
+      "</head><body>"
+      "<div class=\"sidebar nav related\">"
+      "<p><a href=\"/1\">Link one navigation item</a> <a href=\"/2\">Link two navigation item</a> "
+      "<a href=\"/3\">Link three navigation item</a> <a href=\"/4\">Link four navigation item</a> "
+      "<a href=\"/5\">Link five navigation item</a> <a href=\"/6\">Link six navigation item</a></p>"
+      "</div>"
+      "<div class=\"article-body\" itemprop=\"articleBody\">"
+      "<svg><text>HIDDEN_SVG_NOISE</text></svg>"
+      "<template><p>HIDDEN_TEMPLATE_NOISE</p></template>"
+      "<p>Researchers demonstrated post-quantum lattice cryptography alongside FlashAttention-3 "
+      "inference kernels on NVIDIA Blackwell GB200 clusters, achieving deterministic verification.</p>"
+      "<p>The benchmark confirmed zero-knowledge proof soundness across distributed nodes, "
+      "reducing latency while preserving full cryptographic integrity.</p>"
+      "</div>"
+      "</body></html>";
+
+  ExtractedContent ex;
+  assert(readability_extract(rich_html, strlen(rich_html), "https://example.org/paper", &ex) == 0);
+  assert(strstr(ex.title, "Quantum Lattice") != NULL);
+  assert(strstr(ex.title, "\xE2\x80\x94") != NULL); /* \u2014 decoded to UTF-8 em-dash */
+  assert(strstr(ex.title, "\xCE\xB1") != NULL);     /* \u03b1 decoded to UTF-8 alpha */
+  assert(strcmp(ex.byline, "Dr. Ada Lovelace") == 0);
+  assert(strcmp(ex.site_name, "Oyez Science Press") == 0);
+  assert(strcmp(ex.published_time, "2026-11-03T14:30:00Z") == 0);
+  assert(strcmp(ex.lead_image_url, "https://example.org/lead.png") == 0);
+  assert(strstr(ex.text_content, "HIDDEN_SVG_NOISE") == NULL);
+  assert(strstr(ex.text_content, "HIDDEN_TEMPLATE_NOISE") == NULL);
+  assert(strstr(ex.text_content, "Link one navigation") == NULL);
+  assert(strstr(ex.text_content, "FlashAttention-3") != NULL);
+  readability_free(&ex);
+
+  /* 2. Atom nested <author><name> and JSON Feed 1.1 tags + external_url + \uXXXX */
+  const char *atom_xml =
+      "<feed xmlns=\"http://www.w3.org/2005/Atom\">"
+      "<title>ArXiv Cryptography</title>"
+      "<entry>"
+      "<id>urn:arxiv:2611.00001</id>"
+      "<title>Lattice Signatures</title>"
+      "<link href=\"https://arxiv.org/abs/2611.00001\"/>"
+      "<author><name> Alan Turing </name><uri>https://arxiv.org/u/turing</uri></author>"
+      "<prism:publicationDate>2026-11-03T12:00:00Z</prism:publicationDate>"
+      "<dc:subject>cryptography</dc:subject>"
+      "<dc:description> Post-quantum lattice trapdoors. </dc:description>"
+      "</entry></feed>";
+  ParsedFeed p_atom;
+  assert(feed_parse(atom_xml, strlen(atom_xml), "https://arxiv.org", &p_atom) == 0);
+  assert(p_atom.item_count == 1u);
+  assert(strcmp(p_atom.items[0].author, "Alan Turing") == 0);
+  assert(strcmp(p_atom.items[0].published_at, "2026-11-03T12:00:00Z") == 0);
+  assert(p_atom.items[0].category_count == 1u);
+  assert(strcmp(p_atom.items[0].categories[0], "cryptography") == 0);
+  feed_free(&p_atom);
+
+  const char *jfeed =
+      "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"AI Dispatch\","
+      "\"items\":[{\"id\":\"jf-1\",\"title\":\"DeepSeek \\u2014 R1\",\"external_url\":\"https://ai.example/r1\","
+      "\"author\":{\"name\":\"Grace Hopper\"},\"date_modified\":\"2026-11-03T15:00:00Z\","
+      "\"content_text\":\"Open weights reasoning model.\",\"tags\":[\"ai\",\"semiconductors\"]}]}";
+  ParsedFeed p_jf;
+  assert(feed_parse(jfeed, strlen(jfeed), "https://ai.example", &p_jf) == 0);
+  assert(p_jf.item_count == 1u);
+  assert(strstr(p_jf.items[0].title, "\xE2\x80\x94") != NULL);
+  assert(strcmp(p_jf.items[0].url, "https://ai.example/r1") == 0);
+  assert(strcmp(p_jf.items[0].author, "Grace Hopper") == 0);
+  assert(strcmp(p_jf.items[0].published_at, "2026-11-03T15:00:00Z") == 0);
+  assert(p_jf.items[0].category_count == 2u);
+  assert(strcmp(p_jf.items[0].categories[0], "ai") == 0);
+  assert(strcmp(p_jf.items[0].categories[1], "semiconductors") == 0);
+  feed_free(&p_jf);
+
+  /* 3. Deep 32 KB window entity extraction (past old 4 KB truncation limit) */
+  char *long_doc = malloc(16384u);
+  assert(long_doc != NULL);
+  memset(long_doc, ' ', 16384u);
+  for(size_t i = 0; i < 12000u; i += 10u) {
+    memcpy(long_doc + i, "baseline. ", 10u);
+  }
+  const char *tail_payload =
+      "At offset 12KB we disclose CVE-2026-7788 affecting deepseek-ai/DeepSeek-R1-Zero "
+      "and NVIDIA Blackwell GB200 clusters monitored by the Federal Reserve in Japan.";
+  memcpy(long_doc + 12000u, tail_payload, strlen(tail_payload));
+  long_doc[12000u + strlen(tail_payload)] = '\0';
+
+  ExtractedEntities deep_ent;
+  entities_extract("Long-form Technical Dispatch", "Initial abstract.", long_doc,
+                   "public-affairs", NULL, 0, &deep_ent);
+  assert(deep_ent.cve_count == 1u);
+  assert(strcmp(deep_ent.cves[0], "CVE-2026-7788") == 0);
+  assert(deep_ent.hf_repo_count == 1u);
+  assert(strcmp(deep_ent.hf_repos[0], "deepseek-ai/deepseek-r1-zero") == 0);
+  assert(deep_ent.ai_infra_count >= 1u);
+  assert(deep_ent.org_count >= 1u);
+  assert(deep_ent.country_count >= 1u);
+  free(long_doc);
+
+  /* 4. Compound token sub-part search, canonical entity ticker search,
+   *    in-place article enrichment, and query-focused match_snippet */
+  OyezEngine eng;
+  engine_init(&eng);
+  CatalogEntry cat = {"Research Wire", "https://wire.example/rss", "https://wire.example",
+                      "technology", REGION_NORTH_AMERICA, "US", "North America", "en", "official", "Tech"};
+  uint32_t fid = 0;
+  assert(engine_upsert_feed(&eng, &cat, &fid) == 0);
+
+  uint32_t stub_id = 0;
+  int ins = 0;
+  assert(engine_ingest_article(&eng,
+                               fid,
+                               "stub-guid-1",
+                               "Hardware & Treasury Market Brief",
+                               "https://wire.example/articles/stub-1",
+                               "",
+                               "Short teaser stub.",
+                               "<p>Short teaser stub.</p>",
+                               "2026-11-03T16:00:00Z",
+                               1762185600000ULL,
+                               "",
+                               NULL,
+                               0,
+                               &stub_id,
+                               &ins) == 0 && ins == 1);
+
+  /* Enrich the stub article via POST /api/v1/articles/:id/enrich with full HTML body */
+  ServerContext ctx = {&eng, NULL, NULL, 0};
+  int status = 0;
+  Buffer out;
+  char enrich_path[64];
+  snprintf(enrich_path, sizeof(enrich_path), "/api/v1/articles/%u/enrich", stub_id);
+  const char *enrich_body =
+      "{\"html\":\"<html><head><meta name='author' content='Dr. Richard Feynman'/></head>"
+      "<body><article class='article-body'>"
+      "<p>Initial overview of global semiconductor supply chains and sovereign bond markets.</p>"
+      "<p>Deep in the report, NVIDIA Blackwell architecture and 10-year yield movements "
+      "coincide with patches for CVE-2026-4242 across DeepSeek-R1 inference clusters.</p>"
+      "</article></body></html>\"}";
+  assert(http_handle_request(&ctx, "POST", enrich_path, enrich_body, strlen(enrich_body), &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "\"status\":\"enriched\"") != NULL);
+  assert(strstr(out.data, "\"upgraded\":true") != NULL);
+  assert(strstr(out.data, "\"CVE-2026-4242\"") != NULL);
+  assert(strstr(out.data, "\"NVDA\"") != NULL);
+  assert(strstr(out.data, "\"UST10Y\"") != NULL);
+  buffer_free(&out);
+
+  /* Canonical ticker search (q=NVDA and q=UST10Y) and compound sub-part search (q=4242) */
+  assert(http_handle_request(&ctx, "GET", "/api/v1/articles?q=NVDA", "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "\"total\":1") != NULL);
+  assert(strstr(out.data, "\"match_snippet\":") != NULL);
+  buffer_free(&out);
+
+  assert(http_handle_request(&ctx, "GET", "/api/v1/articles?q=4242", "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(strstr(out.data, "\"total\":1") != NULL);
+  assert(strstr(out.data, "CVE-2026-4242") != NULL);
+  buffer_free(&out);
+
+  engine_free(&eng);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
@@ -1998,6 +2344,7 @@ int main(void) {
   test_http_connection_framing();
   test_url_fetch_redirect_policy();
   test_one_machine_consolidation_and_appliance();
-  printf("ALL C23 OYEZ TESTS PASSED\n");
+  test_deep_information_retrieval_and_enrichment();
+  printf("ALL C99 OYEZ TESTS PASSED\n");
   return 0;
 }
