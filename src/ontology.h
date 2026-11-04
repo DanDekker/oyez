@@ -23,8 +23,10 @@ enum {
   MAX_EXTRACTED_HF_REPOS = 8,
   MAX_EXTRACTED_SPORTS = 8,
   MAX_EXTRACTED_WEATHER = 8,
-  MAX_LEXICAL_TOKENS = 256
+  MAX_LEXICAL_TOKENS = 512
 };
+
+typedef char oyez_c99_ontology_node_count_assert[(ONTOLOGY_NODE_COUNT == 32) ? 1 : -1];
 
 typedef enum {
   WEATHER_CALM = 0,          /* Routine / non-weather baseline */

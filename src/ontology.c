@@ -3,7 +3,6 @@
 #include "core.h"
 
 #include <ctype.h>
-#include <math.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -920,7 +919,7 @@ double ontology_lawvere_distance(uint32_t mask_from, uint32_t mask_to) {
   /* The directed Hausdorff convention has sup(empty) = 0 and
    * inf(empty) = +infinity. */
   if(mask_from == 0u) return 0.0;
-  if(mask_to == 0u) return INFINITY;
+  if(mask_to == 0u) return f64_inf();
   /* Directed Hausdorff-Lawvere Quasimetric over the Cost Quantale ([0, inf], >=, +, 0):
    *   d_L(A, B) = sup_{u in A} inf_{v in B} d_L(u, v)
    * Reduces to g_lawvere_dist[u][v] on singletons (1u << u, 1u << v) and
@@ -1675,7 +1674,7 @@ void ontology_adjunction_monad(const double *raw_fiber_counts,
 }
 
 static double ontology_ideal_supremum(const double *values, uint32_t ideal) {
-  double supremum = -INFINITY;
+  double supremum = f64_neg_inf();
   while(ideal) {
     uint32_t u = ctz64((uint64_t)ideal);
     ideal &= (ideal - 1u);
@@ -1721,7 +1720,7 @@ void ontology_cocone_internal_hom(const double *presheaf_g,
     residual_at_stage[c] = presheaf_h[c] - g_sup[c];
   }
   for(uint32_t u = 0; u < ONTOLOGY_NODE_COUNT; ++u) {
-    double infimum = INFINITY;
+    double infimum = f64_inf();
     uint32_t filter = g_ontology[u].upward_mask;
     while(filter) {
       uint32_t c = ctz64((uint64_t)filter);
@@ -1743,8 +1742,8 @@ double ontology_cocone_adjunction_defect(const double *presheaf_f,
   double hom_gh[ONTOLOGY_NODE_COUNT];
   ontology_cocone_convolution(presheaf_f, presheaf_g, fg);
   ontology_cocone_internal_hom(presheaf_g, presheaf_h, hom_gh);
-  double lhs = INFINITY;
-  double rhs = INFINITY;
+  double lhs = f64_inf();
+  double rhs = f64_inf();
   for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
     double d_l = presheaf_h[c] - fg[c];
     if(d_l < lhs) lhs = d_l;
@@ -2574,7 +2573,7 @@ void ontology_atmospheric_dynamics(double temp_celsius,
   double div_f = -(sigma + 1.0 + beta);
   out_wx->lyapunov_sum_div = div_f;
   double lambda_3 = div_f - lambda_1;
-  out_wx->kaplan_yorke_dim = 2.0 + (lambda_1 / fabs(lambda_3));
+  out_wx->kaplan_yorke_dim = 2.0 + (lambda_1 / f64_abs(lambda_3));
   /* Predictability horizon for 10^-3 initial error amplification to O(1) */
   out_wx->predictability_horizon = 6.90775527898 / lambda_1;
 
@@ -2582,10 +2581,10 @@ void ontology_atmospheric_dynamics(double temp_celsius,
    *      e_s(T) = 6.112 * exp((17.67 * T) / (T + 243.5)) hPa */
   double T = (temp_celsius >= -60.0 && temp_celsius <= 60.0) ? temp_celsius : 22.0;
   double RH = (rel_humidity_pct >= 1.0 && rel_humidity_pct <= 100.0) ? rel_humidity_pct : 65.0;
-  out_wx->saturation_vapor_hpa = 6.112 * exp((17.67 * T) / (T + 243.5));
-  out_wx->wet_bulb_celsius = T * atan(0.151977 * sqrt(RH + 8.313659)) +
-                             atan(T + RH) - atan(RH - 1.676331) +
-                             0.00391838 * pow(RH, 1.5) * atan(0.023101 * RH) - 4.686035;
+  out_wx->saturation_vapor_hpa = 6.112 * f64_exp((17.67 * T) / (T + 243.5));
+  out_wx->wet_bulb_celsius = T * f64_atan(0.151977 * f64_sqrt(RH + 8.313659)) +
+                             f64_atan(T + RH) - f64_atan(RH - 1.676331) +
+                             0.00391838 * (RH * f64_sqrt(RH)) * f64_atan(0.023101 * RH) - 4.686035;
 
   /* 3. Barotropic Rossby-Haurwitz Planetary Wave Dispersion on the Beta-Plane:
    *      beta_Rossby = (2 * Omega * cos(phi)) / R_E
@@ -2593,15 +2592,15 @@ void ontology_atmospheric_dynamics(double temp_celsius,
    *      Stationary planetary wavenumber K_s = R_E * cos(phi) * sqrt(beta_Rossby / U) */
   const double omega_earth = 7.2921159e-5;
   const double r_earth = 6.371e6;
-  double lat_rad = ((latitude_deg >= -85.0 && latitude_deg <= 85.0) ? fabs(latitude_deg) : 45.0) * (3.1415926535897932 / 180.0);
-  double cos_phi = cos(lat_rad);
+  double lat_rad = ((latitude_deg >= -85.0 && latitude_deg <= 85.0) ? f64_abs(latitude_deg) : 45.0) * (3.1415926535897932 / 180.0);
+  double cos_phi = f64_cos(lat_rad);
   if(cos_phi < 0.1) cos_phi = 0.1;
   double beta_rossby = (2.0 * omega_earth * cos_phi) / r_earth;
   double U = (zonal_wind_ms > 2.0 && zonal_wind_ms < 90.0) ? zonal_wind_ms : 18.0;
   /* Synoptic wavenumber m = 6 planetary wave */
   double k_synoptic = 6.0 / (r_earth * cos_phi);
   out_wx->rossby_phase_speed = U - (beta_rossby / (k_synoptic * k_synoptic));
-  out_wx->rossby_stationary_k = (r_earth * cos_phi) * sqrt(beta_rossby / U);
+  out_wx->rossby_stationary_k = (r_earth * cos_phi) * f64_sqrt(beta_rossby / U);
   /* Quasi-stationary resonant amplification (Petoukhov-Coumou-Schellnhuber wavenumber 5-7 omega block) */
   out_wx->omega_blocking_regime = (out_wx->rossby_stationary_k >= 4.5 && out_wx->rossby_stationary_k <= 7.8) ? 1 : 0;
 }
@@ -2610,8 +2609,8 @@ typedef struct {
   uint64_t wb_filter[8];
   uint64_t char0_mask;
   uint16_t head[32];
-  uint16_t next[2048];
-  uint16_t pos[2048];
+  uint16_t next[8192];
+  uint16_t pos[8192];
   uint32_t word_count;
 } WordBloomIndex;
 
@@ -2626,7 +2625,7 @@ static void compute_char_mask(const char *s, size_t len, WordBloomIndex *wb) {
     unsigned char c0 = (unsigned char)s[i];
     if(!isalnum(c0)) continue;
     wb->char0_mask |= (1ULL << (c0 & 63u));
-    if(wb->word_count < 2048u && i <= 0xFFFEu) {
+    if(wb->word_count < 8192u && i <= 0xFFFEu) {
       uint32_t b = c0 & 31u;
       uint32_t w = wb->word_count++;
       wb->pos[w] = (uint16_t)i;
@@ -2823,7 +2822,7 @@ NewsType news_type_classify(const char *title,
                             const char *summary,
                             const char *content,
                             const char *feed_category) {
-  char lower[4096];
+  char lower[32768];
   size_t len = 0;
   build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
   WordBloomIndex alpha_mask;
@@ -3622,7 +3621,7 @@ void entities_extract(const char *title,
   ontology_init();
   memset(out, 0, sizeof(*out));
 
-  char lower[4096];
+  char lower[32768];
   size_t len = 0;
   build_lowercase_window(title, summary, content, lower, sizeof(lower), &len);
   WordBloomIndex alpha_mask;
@@ -4220,6 +4219,12 @@ size_t lexical_analyze(const char *text,
     /* Check canonical domain alias before stemming */
     const char *canonical = lookup_domain_alias(word);
 
+    char raw_compound[32];
+    int has_compound_sep = (strchr(word, '-') != NULL || strchr(word, '+') != NULL);
+    if(has_compound_sep) {
+      memcpy(raw_compound, word, wlen + 1u);
+    }
+
     stem_word(word, wlen);
     wlen = strlen(word);
     if(wlen < 2u) continue;
@@ -4232,6 +4237,35 @@ size_t lexical_analyze(const char *text,
     if(canonical) {
       size_t clen = strlen(canonical);
       current_count = push_lexical_term(canonical, clen, field_weight * 0.85f, pos_bit, terms, current_count, max_terms);
+    }
+
+    /* Also index alphanumeric sub-parts of hyphenated/compound tokens (e.g., deepseek-r1, cve-2026-1337, gpt-4o) */
+    if(has_compound_sep) {
+      size_t sp = 0;
+      while(raw_compound[sp] != '\0') {
+        while(raw_compound[sp] != '\0' && !isalnum((unsigned char)raw_compound[sp])) sp++;
+        if(raw_compound[sp] == '\0') break;
+        char sub[32];
+        size_t slen = 0;
+        while(raw_compound[sp] != '\0' && isalnum((unsigned char)raw_compound[sp])) {
+          if(slen < 30u) sub[slen++] = raw_compound[sp];
+          sp++;
+        }
+        sub[slen] = '\0';
+        if(slen >= 2u && !is_stopword(sub)) {
+          const char *sub_canon = lookup_domain_alias(sub);
+          stem_word(sub, slen);
+          slen = strlen(sub);
+          if(slen >= 2u && strcmp(sub, word) != 0) {
+            current_count = push_lexical_term(sub, slen, field_weight * 0.75f, pos_bit, terms,
+                                              current_count, max_terms);
+          }
+          if(sub_canon) {
+            current_count = push_lexical_term(sub_canon, strlen(sub_canon), field_weight * 0.70f,
+                                              pos_bit, terms, current_count, max_terms);
+          }
+        }
+      }
     }
   }
   return current_count;
