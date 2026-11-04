@@ -221,6 +221,24 @@ static int markup_strip_html_depth(const char *html, size_t len, Buffer *out, in
         i = (size_t)((end + 8u) - html);
         continue;
       }
+      if(ci_starts_with(html + i, len - i, "<svg")) {
+        const char *end = ci_find(html + i + 4u, len - (i + 4u), "</svg>");
+        if(!end) break;
+        i = (size_t)((end + 6u) - html);
+        continue;
+      }
+      if(ci_starts_with(html + i, len - i, "<noscript")) {
+        const char *end = ci_find(html + i + 9u, len - (i + 9u), "</noscript>");
+        if(!end) break;
+        i = (size_t)((end + 11u) - html);
+        continue;
+      }
+      if(ci_starts_with(html + i, len - i, "<template")) {
+        const char *end = ci_find(html + i + 9u, len - (i + 9u), "</template>");
+        if(!end) break;
+        i = (size_t)((end + 11u) - html);
+        continue;
+      }
       size_t close = i + 1u;
       while(close < len && html[close] != '>') close++;
       if(close < len) {
@@ -723,32 +741,50 @@ uint64_t parse_timestamp_ms(const char *str) {
 }
 
 static void extract_item_categories(const char *xml, size_t len, ParsedFeedItem *item) {
-  const char *cursor = xml;
-  size_t rem = len;
-  while(rem > 0) {
-    const char *open = NULL;
-    const char *is = NULL;
-    const char *ie = NULL;
-    const char *after = NULL;
-    if(!find_xml_tag(cursor, rem, "category", &open, &is, &ie, &after)) break;
-    size_t open_len = (size_t)((is > open ? is : after) - open);
-    char *term = extract_attr_value(open, open_len, "term");
-    if((!term || term[0] == '\0') && ie > is) {
-      free(term);
-      term = dup_span_clean(is, (size_t)(ie - is));
-    }
-    if(term && term[0] != '\0') {
-      char **grown = realloc(item->categories, (item->category_count + 1u) * sizeof(char *));
-      if(grown) {
-        item->categories = grown;
-        item->categories[item->category_count++] = term;
-        term = NULL;
+  static const char *const k_cat_tags[] = {"category", "dc:subject"};
+  for(size_t t = 0; t < 2u; ++t) {
+    const char *cursor = xml;
+    size_t rem = len;
+    while(rem > 0) {
+      const char *open = NULL;
+      const char *is = NULL;
+      const char *ie = NULL;
+      const char *after = NULL;
+      if(!find_xml_tag(cursor, rem, k_cat_tags[t], &open, &is, &ie, &after)) break;
+      size_t open_len = (size_t)((is > open ? is : after) - open);
+      char *term = extract_attr_value(open, open_len, "term");
+      if((!term || term[0] == '\0') && ie > is) {
+        free(term);
+        term = dup_span_clean(is, (size_t)(ie - is));
       }
+      if(term && term[0] != '\0') {
+        char **grown = realloc(item->categories, (item->category_count + 1u) * sizeof(char *));
+        if(grown) {
+          item->categories = grown;
+          item->categories[item->category_count++] = term;
+          term = NULL;
+        }
+      }
+      free(term);
+      rem = (size_t)((xml + len) - after);
+      cursor = after;
     }
-    free(term);
-    rem = (size_t)((xml + len) - after);
-    cursor = after;
   }
+}
+
+static int parse_hex4(const char *p, uint32_t *out_val) {
+  uint32_t v = 0;
+  for(size_t i = 0; i < 4u; ++i) {
+    char c = p[i];
+    uint32_t d = 0;
+    if(c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+    else if(c >= 'a' && c <= 'f') d = 10u + (uint32_t)(c - 'a');
+    else if(c >= 'A' && c <= 'F') d = 10u + (uint32_t)(c - 'A');
+    else return 0;
+    v = (v << 4u) | d;
+  }
+  *out_val = v;
+  return 1;
 }
 
 static char *extract_json_string_field(const char *json, size_t len, const char *key) {
@@ -770,9 +806,28 @@ static char *extract_json_string_field(const char *json, size_t len, const char 
     if(*p == '\\' && p + 1u < end) {
       p++;
       char c = *p;
+      if(c == 'u' && p + 4u < end) {
+        uint32_t cp = 0;
+        if(parse_hex4(p + 1u, &cp)) {
+          p += 4u;
+          if(cp >= 0xD800u && cp <= 0xDBFFu && p + 6u < end && p[1] == '\\' && p[2] == 'u') {
+            uint32_t low = 0;
+            if(parse_hex4(p + 3u, &low) && low >= 0xDC00u && low <= 0xDFFFu) {
+              cp = 0x10000u + (((cp - 0xD800u) << 10u) | (low - 0xDC00u));
+              p += 6u;
+            }
+          }
+          append_utf8_codepoint(&buf, cp);
+          p++;
+          continue;
+        }
+      }
       if(c == 'n') c = '\n';
       else if(c == 'r') c = '\r';
       else if(c == 't') c = '\t';
+      else if(c == 'b') c = '\b';
+      else if(c == 'f') c = '\f';
+      else if(c == '/') c = '/';
       buffer_append(&buf, &c, 1u);
     } else {
       buffer_append(&buf, p, 1u);
@@ -781,6 +836,44 @@ static char *extract_json_string_field(const char *json, size_t len, const char 
   }
   if(!buf.data) return dup_cstr("");
   return buf.data;
+}
+
+static void extract_json_string_array_tags(const char *json, size_t len, const char *key,
+                                           ParsedFeedItem *item) {
+  char pattern[64];
+  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+  const char *found = ci_find(json, len, pattern);
+  if(!found) return;
+  const char *end = json + len;
+  const char *p = found + strlen(pattern);
+  while(p < end && isspace((unsigned char)*p)) p++;
+  if(p >= end || *p != ':') return;
+  p++;
+  while(p < end && isspace((unsigned char)*p)) p++;
+  if(p >= end || *p != '[') return;
+  p++;
+  while(p < end && *p != ']') {
+    while(p < end && *p != '"' && *p != ']') p++;
+    if(p >= end || *p == ']') break;
+    p++;
+    Buffer tag;
+    buffer_init(&tag);
+    while(p < end && *p != '"') {
+      if(*p == '\\' && p + 1u < end) p++;
+      buffer_append(&tag, p, 1u);
+      p++;
+    }
+    if(p < end && *p == '"') p++;
+    if(tag.data && tag.len > 0) {
+      char **grown = realloc(item->categories, (item->category_count + 1u) * sizeof(char *));
+      if(grown) {
+        item->categories = grown;
+        item->categories[item->category_count++] = tag.data;
+        tag.data = NULL;
+      }
+    }
+    buffer_free(&tag);
+  }
 }
 
 static void parsed_feed_item_free(ParsedFeedItem *it) {
@@ -858,12 +951,20 @@ static int parse_json_feed(const char *raw, size_t len, const char *base_url, Pa
       item.title = dup_cstr("Untitled");
     }
     item.url = extract_json_string_field(obj_start, obj_len, "url");
+    if(item.url[0] == '\0') {
+      free(item.url);
+      item.url = extract_json_string_field(obj_start, obj_len, "external_url");
+    }
     item.guid = extract_json_string_field(obj_start, obj_len, "id");
     if(item.guid[0] == '\0') {
       free(item.guid);
       item.guid = dup_cstr(item.url[0] ? item.url : item.title);
     }
     item.author = extract_json_string_field(obj_start, obj_len, "name");
+    if(item.author[0] == '\0') {
+      free(item.author);
+      item.author = extract_json_string_field(obj_start, obj_len, "author_name");
+    }
     item.summary = extract_json_string_field(obj_start, obj_len, "summary");
     item.content_html = extract_json_string_field(obj_start, obj_len, "content_html");
     if(item.content_html[0] == '\0') {
@@ -875,7 +976,16 @@ static int parse_json_feed(const char *raw, size_t len, const char *base_url, Pa
       item.summary = markup_clean_cstr(item.content_html);
     }
     item.published_at = extract_json_string_field(obj_start, obj_len, "date_published");
+    if(item.published_at[0] == '\0') {
+      free(item.published_at);
+      item.published_at = extract_json_string_field(obj_start, obj_len, "date_modified");
+    }
     item.image_url = extract_json_string_field(obj_start, obj_len, "image");
+    if(item.image_url[0] == '\0') {
+      free(item.image_url);
+      item.image_url = extract_json_string_field(obj_start, obj_len, "banner_image");
+    }
+    extract_json_string_array_tags(obj_start, obj_len, "tags", &item);
 
     ParsedFeedItem *grown = realloc(out->items, (out->item_count + 1u) * sizeof(ParsedFeedItem));
     if(!grown) {
@@ -910,14 +1020,14 @@ int feed_parse(const char *raw, size_t len, const char *base_url, ParsedFeed *ou
   size_t header_len = first_item ? (size_t)(first_item - raw) : len;
 
   const char *title_tags[] = {"title"};
-  const char *desc_tags[] = {"description", "subtitle", "itunes:summary"};
+  const char *desc_tags[] = {"description", "subtitle", "itunes:summary", "dc:description"};
   const char *lang_tags[] = {"language", "dc:language"};
   out->title = extract_xml_tag_clean(raw, header_len, title_tags, 1u);
   if(out->title[0] == '\0') {
     free(out->title);
     out->title = dup_cstr("Untitled Feed");
   }
-  out->description = extract_xml_tag_clean(raw, header_len, desc_tags, 3u);
+  out->description = extract_xml_tag_clean(raw, header_len, desc_tags, 4u);
   out->site_url = extract_feed_link(raw, header_len, base_url ? base_url : "");
   out->language = extract_xml_tag_clean(raw, header_len, lang_tags, 2u);
   if(out->language[0] == '\0') {
@@ -948,18 +1058,30 @@ int feed_parse(const char *raw, size_t len, const char *base_url, ParsedFeed *ou
       free(item.guid);
       item.guid = dup_cstr(item.url[0] ? item.url : item.title);
     }
-    const char *author_tags[] = {"dc:creator", "author", "name"};
-    item.author = extract_xml_tag_clean(is, ilen, author_tags, 3u);
-    const char *summary_tags[] = {"description", "summary"};
-    item.summary = extract_xml_tag_clean(is, ilen, summary_tags, 2u);
-    const char *content_tags[] = {"content:encoded", "content", "description", "summary"};
-    item.content_html = extract_xml_tag_raw(is, ilen, content_tags, 4u);
+    const char *auth_is = NULL;
+    const char *auth_ie = NULL;
+    if(find_xml_tag(is, ilen, "author", NULL, &auth_is, &auth_ie, NULL) && auth_ie > auth_is) {
+      const char *name_tags[] = {"name"};
+      item.author = extract_xml_tag_clean(auth_is, (size_t)(auth_ie - auth_is), name_tags, 1u);
+    }
+    if(!item.author || item.author[0] == '\0') {
+      free(item.author);
+      const char *author_tags[] = {"dc:creator", "author", "itunes:author", "name"};
+      item.author = extract_xml_tag_clean(is, ilen, author_tags, 4u);
+    }
+    const char *summary_tags[] = {"description", "summary", "dc:description", "media:description",
+                                  "itunes:summary"};
+    item.summary = extract_xml_tag_clean(is, ilen, summary_tags, 5u);
+    const char *content_tags[] = {"content:encoded", "content", "description", "summary",
+                                  "dc:description", "media:description"};
+    item.content_html = extract_xml_tag_raw(is, ilen, content_tags, 6u);
     if(item.summary[0] == '\0' && item.content_html[0] != '\0') {
       free(item.summary);
       item.summary = markup_clean_cstr(item.content_html);
     }
-    const char *date_tags[] = {"pubDate", "published", "updated", "dc:date"};
-    item.published_at = extract_xml_tag_clean(is, ilen, date_tags, 4u);
+    const char *date_tags[] = {"pubDate",  "published",             "updated",
+                               "dc:date",  "prism:publicationDate", "dcterms:issued"};
+    item.published_at = extract_xml_tag_clean(is, ilen, date_tags, 6u);
     item.image_url = extract_item_image_url(is, ilen);
     extract_item_categories(is, ilen, &item);
 
@@ -1014,13 +1136,17 @@ static char *extract_meta_tag(const char *html, size_t len, const char *key) {
     size_t tag_len = gt - offset + 1u;
     char *prop = extract_attr_value(meta, tag_len, "property");
     char *name = extract_attr_value(meta, tag_len, "name");
+    char *itemprop = extract_attr_value(meta, tag_len, "itemprop");
     int match = (prop && ci_equals(prop, strlen(prop), key)) ||
-                (name && ci_equals(name, strlen(name), key));
+                (name && ci_equals(name, strlen(name), key)) ||
+                (itemprop && ci_equals(itemprop, strlen(itemprop), key));
     free(prop);
     free(name);
+    free(itemprop);
     if(match) {
       char *content = extract_attr_value(meta, tag_len, "content");
-      if(content) return content;
+      if(content && content[0] != '\0') return content;
+      free(content);
     }
     cursor = html + gt + 1u;
     rem = len - (gt + 1u);
@@ -1028,7 +1154,140 @@ static char *extract_meta_tag(const char *html, size_t len, const char *key) {
   return NULL;
 }
 
-static double score_html_candidate(const char *inner, size_t len, const char *tag_name) {
+typedef struct {
+  char *headline;
+  char *description;
+  char *article_body;
+  char *date_published;
+  char *author;
+  char *publisher;
+  char *image;
+} JsonLdMeta;
+
+static void jsonld_meta_free(JsonLdMeta *m) {
+  if(!m) return;
+  free(m->headline);
+  free(m->description);
+  free(m->article_body);
+  free(m->date_published);
+  free(m->author);
+  free(m->publisher);
+  free(m->image);
+  memset(m, 0, sizeof(*m));
+}
+
+static char *extract_json_nested_name(const char *json, size_t len, const char *parent_key) {
+  char pattern[64];
+  snprintf(pattern, sizeof(pattern), "\"%s\"", parent_key);
+  const char *found = ci_find(json, len, pattern);
+  if(!found) return NULL;
+  const char *p = found + strlen(pattern);
+  const char *end = json + len;
+  while(p < end && isspace((unsigned char)*p)) p++;
+  if(p >= end || *p != ':') return NULL;
+  p++;
+  while(p < end && isspace((unsigned char)*p)) p++;
+  if(p >= end) return NULL;
+  if(*p == '"') {
+    return extract_json_string_field(found, (size_t)(end - found), parent_key);
+  }
+  if(*p == '{' || *p == '[') {
+    size_t sub_len = (size_t)(end - p);
+    if(sub_len > 1024u) sub_len = 1024u;
+    char *name = extract_json_string_field(p, sub_len, "name");
+    if(name && name[0] != '\0') return name;
+    free(name);
+    char *url = extract_json_string_field(p, sub_len, "url");
+    if(url && url[0] != '\0') return url;
+    free(url);
+  }
+  return NULL;
+}
+
+static void extract_jsonld_metadata(const char *html, size_t len, JsonLdMeta *meta) {
+  memset(meta, 0, sizeof(*meta));
+  const char *cursor = html;
+  size_t rem = len;
+  while(rem > 0) {
+    const char *open = NULL;
+    const char *is = NULL;
+    const char *ie = NULL;
+    const char *after = NULL;
+    if(!find_xml_tag(cursor, rem, "script", &open, &is, &ie, &after)) break;
+    size_t open_len = (size_t)((is > open ? is : after) - open);
+    char *type = extract_attr_value(open, open_len, "type");
+    if(type && ci_find(type, strlen(type), "ld+json") && ie > is) {
+      size_t jlen = (size_t)(ie - is);
+      if(!meta->headline || meta->headline[0] == '\0') {
+        free(meta->headline);
+        meta->headline = extract_json_string_field(is, jlen, "headline");
+        if(meta->headline[0] == '\0') {
+          free(meta->headline);
+          meta->headline = extract_json_string_field(is, jlen, "name");
+        }
+      }
+      if(!meta->description || meta->description[0] == '\0') {
+        free(meta->description);
+        meta->description = extract_json_string_field(is, jlen, "description");
+      }
+      if(!meta->article_body || meta->article_body[0] == '\0') {
+        free(meta->article_body);
+        meta->article_body = extract_json_string_field(is, jlen, "articleBody");
+      }
+      if(!meta->date_published || meta->date_published[0] == '\0') {
+        free(meta->date_published);
+        meta->date_published = extract_json_string_field(is, jlen, "datePublished");
+        if(meta->date_published[0] == '\0') {
+          free(meta->date_published);
+          meta->date_published = extract_json_string_field(is, jlen, "dateCreated");
+        }
+        if(meta->date_published[0] == '\0') {
+          free(meta->date_published);
+          meta->date_published = extract_json_string_field(is, jlen, "dateModified");
+        }
+      }
+      if(!meta->author || meta->author[0] == '\0') {
+        free(meta->author);
+        meta->author = extract_json_nested_name(is, jlen, "author");
+      }
+      if(!meta->publisher || meta->publisher[0] == '\0') {
+        free(meta->publisher);
+        meta->publisher = extract_json_nested_name(is, jlen, "publisher");
+      }
+      if(!meta->image || meta->image[0] == '\0') {
+        free(meta->image);
+        meta->image = extract_json_nested_name(is, jlen, "image");
+      }
+    }
+    free(type);
+    rem = (size_t)((html + len) - after);
+    cursor = after;
+  }
+}
+
+static char *extract_first_time_datetime(const char *html, size_t len) {
+  const char *open = NULL;
+  const char *is = NULL;
+  const char *ie = NULL;
+  const char *after = NULL;
+  if(!find_xml_tag(html, len, "time", &open, &is, &ie, &after)) return NULL;
+  size_t open_len = (size_t)((is > open ? is : after) - open);
+  char *dt = extract_attr_value(open, open_len, "datetime");
+  if(dt && dt[0] != '\0') return dt;
+  free(dt);
+  if(ie > is) {
+    return dup_span_clean(is, (size_t)(ie - is));
+  }
+  return NULL;
+}
+
+static int attr_has_token(const char *attr, const char *token) {
+  if(!attr || !token) return 0;
+  return ci_find(attr, strlen(attr), token) != NULL;
+}
+
+static double score_html_candidate(const char *open_tag, size_t open_len, const char *inner,
+                                   size_t len, const char *tag_name) {
   Buffer text;
   buffer_init(&text);
   markup_strip_html(inner, len, &text);
@@ -1043,6 +1302,51 @@ static double score_html_candidate(const char *inner, size_t len, const char *ta
   else if(ci_equals(tag_name, strlen(tag_name), "section")) score += 12.0;
   else score += 5.0;
 
+  if(open_tag && open_len > 0) {
+    char *cls = extract_attr_value(open_tag, open_len, "class");
+    char *id = extract_attr_value(open_tag, open_len, "id");
+    char *itemprop = extract_attr_value(open_tag, open_len, "itemprop");
+    char *role = extract_attr_value(open_tag, open_len, "role");
+
+    static const char *const k_pos[] = {
+        "article-body", "article_body", "articlebody", "entry-content", "post-content",
+        "story-body",   "story-content","main-content","paper-body",    "abstract",
+        "prose",        "markdown-body","page-content","post-body"};
+    for(size_t i = 0; i < sizeof(k_pos) / sizeof(k_pos[0]); ++i) {
+      if(attr_has_token(cls, k_pos[i]) || attr_has_token(id, k_pos[i])) {
+        score += 35.0;
+        break;
+      }
+    }
+    if(attr_has_token(itemprop, "articleBody") || attr_has_token(itemprop, "text")) {
+      score += 45.0;
+    }
+    if(attr_has_token(role, "main") || attr_has_token(role, "article")) {
+      score += 25.0;
+    }
+
+    static const char *const k_neg[] = {
+        "nav",        "navbar",   "footer",     "sidebar", "comment", "comments",
+        "cookie",     "popup",    "modal",      "banner",  "promo",   "sponsor",
+        "related",    "share",    "social",     "menu",    "widget",  "breadcrumb",
+        "newsletter", "paywall",  "outbrain",   "taboola", "ad-box"};
+    for(size_t i = 0; i < sizeof(k_neg) / sizeof(k_neg[0]); ++i) {
+      if(attr_has_token(cls, k_neg[i]) || attr_has_token(id, k_neg[i])) {
+        score -= 80.0;
+        break;
+      }
+    }
+    if(attr_has_token(role, "navigation") || attr_has_token(role, "complementary") ||
+       attr_has_token(role, "contentinfo")) {
+      score -= 80.0;
+    }
+
+    free(cls);
+    free(id);
+    free(itemprop);
+    free(role);
+  }
+
   size_t p_count = 0;
   const char *p = inner;
   size_t rem = len;
@@ -1055,6 +1359,34 @@ static double score_html_candidate(const char *inner, size_t len, const char *ta
     rem -= adv;
   }
   score += (double)p_count * 8.0;
+
+  /* Measure link density to penalize navigation menus and link farms */
+  size_t link_text_len = 0;
+  const char *lcur = inner;
+  size_t lrem = len;
+  while(lrem > 0) {
+    const char *lis = NULL;
+    const char *lie = NULL;
+    const char *lafter = NULL;
+    if(!find_xml_tag(lcur, lrem, "a", NULL, &lis, &lie, &lafter)) break;
+    if(lie > lis) {
+      Buffer ltxt;
+      buffer_init(&ltxt);
+      markup_strip_html(lis, (size_t)(lie - lis), &ltxt);
+      link_text_len += ltxt.len;
+      buffer_free(&ltxt);
+    }
+    lrem = (size_t)((inner + len) - lafter);
+    lcur = lafter;
+  }
+  if(text.len > 0) {
+    double link_density = (double)link_text_len / (double)text.len;
+    if(link_density > 0.50) {
+      score -= 65.0;
+    } else if(link_density > 0.30) {
+      score -= 25.0;
+    }
+  }
 
   size_t commas = 0;
   for(size_t i = 0; i < text.len; ++i) {
@@ -1141,29 +1473,78 @@ int readability_extract(const char *html, size_t len, const char *url, Extracted
   if(!html || !out) return -1;
   memset(out, 0, sizeof(*out));
 
+  JsonLdMeta jld;
+  extract_jsonld_metadata(html, len, &jld);
+
   char *og_title = extract_meta_tag(html, len, "og:title");
   if(!og_title) og_title = extract_meta_tag(html, len, "twitter:title");
-  if(!og_title) {
+  if(!og_title) og_title = extract_meta_tag(html, len, "citation_title");
+  if(!og_title) og_title = extract_meta_tag(html, len, "dc.title");
+  if((!og_title || og_title[0] == '\0') && jld.headline && jld.headline[0] != '\0') {
+    free(og_title);
+    og_title = dup_cstr(jld.headline);
+  }
+  if(!og_title || og_title[0] == '\0') {
+    free(og_title);
     const char *ttags[] = {"h1", "title"};
     og_title = extract_xml_tag_clean(html, len, ttags, 2u);
   }
-  out->title = og_title ? og_title : dup_cstr("Untitled");
+  out->title = (og_title && og_title[0] != '\0') ? og_title : dup_cstr("Untitled");
+  if(out->title != og_title) free(og_title);
 
   char *byline = extract_meta_tag(html, len, "author");
   if(!byline) byline = extract_meta_tag(html, len, "article:author");
+  if(!byline) byline = extract_meta_tag(html, len, "citation_author");
+  if(!byline) byline = extract_meta_tag(html, len, "dc.creator");
+  if(!byline) byline = extract_meta_tag(html, len, "byl");
+  if((!byline || byline[0] == '\0') && jld.author && jld.author[0] != '\0') {
+    free(byline);
+    byline = dup_cstr(jld.author);
+  }
   out->byline = byline ? byline : dup_cstr("");
 
   char *excerpt = extract_meta_tag(html, len, "og:description");
+  if(!excerpt) excerpt = extract_meta_tag(html, len, "twitter:description");
   if(!excerpt) excerpt = extract_meta_tag(html, len, "description");
+  if(!excerpt) excerpt = extract_meta_tag(html, len, "citation_abstract");
+  if(!excerpt) excerpt = extract_meta_tag(html, len, "dc.description");
+  if((!excerpt || excerpt[0] == '\0') && jld.description && jld.description[0] != '\0') {
+    free(excerpt);
+    excerpt = dup_cstr(jld.description);
+  }
   out->excerpt = excerpt ? excerpt : dup_cstr("");
 
   char *site_name = extract_meta_tag(html, len, "og:site_name");
+  if(!site_name) site_name = extract_meta_tag(html, len, "application-name");
+  if(!site_name) site_name = extract_meta_tag(html, len, "citation_journal_title");
+  if((!site_name || site_name[0] == '\0') && jld.publisher && jld.publisher[0] != '\0') {
+    free(site_name);
+    site_name = dup_cstr(jld.publisher);
+  }
   out->site_name = site_name ? site_name : dup_cstr("");
 
   char *pub = extract_meta_tag(html, len, "article:published_time");
+  if(!pub) pub = extract_meta_tag(html, len, "pubdate");
+  if(!pub) pub = extract_meta_tag(html, len, "publishdate");
+  if(!pub) pub = extract_meta_tag(html, len, "citation_publication_date");
+  if(!pub) pub = extract_meta_tag(html, len, "citation_date");
+  if(!pub) pub = extract_meta_tag(html, len, "dc.date");
+  if((!pub || pub[0] == '\0') && jld.date_published && jld.date_published[0] != '\0') {
+    free(pub);
+    pub = dup_cstr(jld.date_published);
+  }
+  if(!pub || pub[0] == '\0') {
+    free(pub);
+    pub = extract_first_time_datetime(html, len);
+  }
   out->published_time = pub ? pub : dup_cstr("");
 
   char *img = extract_meta_tag(html, len, "og:image");
+  if(!img) img = extract_meta_tag(html, len, "twitter:image");
+  if((!img || img[0] == '\0') && jld.image && jld.image[0] != '\0') {
+    free(img);
+    img = dup_cstr(jld.image);
+  }
   out->lead_image_url = img ? img : dup_cstr("");
 
   const char *candidates[] = {"article", "main", "section", "div"};
@@ -1175,12 +1556,14 @@ int readability_extract(const char *html, size_t len, const char *url, Extracted
     const char *cursor = html;
     size_t rem = len;
     while(rem > 0) {
+      const char *open = NULL;
       const char *is = NULL;
       const char *ie = NULL;
       const char *after = NULL;
-      if(!find_xml_tag(cursor, rem, candidates[c], NULL, &is, &ie, &after)) break;
+      if(!find_xml_tag(cursor, rem, candidates[c], &open, &is, &ie, &after)) break;
+      size_t open_len = (size_t)((is > open ? is : after) - open);
       size_t clen = (size_t)(ie - is);
-      double sc = score_html_candidate(is, clen, candidates[c]);
+      double sc = score_html_candidate(open, open_len, is, clen, candidates[c]);
       if(sc > best_score) {
         best_score = sc;
         best_start = is;
@@ -1194,12 +1577,29 @@ int readability_extract(const char *html, size_t len, const char *url, Extracted
   Buffer text_buf;
   buffer_init(&text_buf);
   markup_strip_html(best_start, best_len, &text_buf);
+
+  /* If HTML body extraction is thin or missing and JSON-LD provides a richer articleBody, prefer it */
+  if(jld.article_body && jld.article_body[0] != '\0') {
+    size_t jbody_len = strlen(jld.article_body);
+    if(text_buf.len < 160u && jbody_len > text_buf.len) {
+      buffer_free(&text_buf);
+      buffer_init(&text_buf);
+      markup_strip_html(jld.article_body, jbody_len, &text_buf);
+    }
+  }
   out->text_content = text_buf.data ? text_buf.data : dup_cstr("");
 
   Buffer md_buf;
   buffer_init(&md_buf);
   html_to_markdown(best_start, best_len, &md_buf);
-  out->markdown = md_buf.data ? md_buf.data : dup_cstr(out->text_content);
+  if(md_buf.len < strlen(out->text_content) / 2u) {
+    buffer_free(&md_buf);
+    out->markdown = dup_cstr(out->text_content);
+  } else {
+    out->markdown = md_buf.data ? md_buf.data : dup_cstr(out->text_content);
+  }
+
+  jsonld_meta_free(&jld);
 
   if(out->excerpt[0] == '\0' && out->text_content[0] != '\0') {
     free(out->excerpt);
