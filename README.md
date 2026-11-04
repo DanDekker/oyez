@@ -2,7 +2,7 @@
 
 # Oyez
 
-**A self-contained news aggregation and search engine written in C23.**
+**A self-contained news aggregation and search engine written in pure first-party C99.**
 
 Oyez collects RSS, Atom, and JSON feeds, extracts article text, and indexes it for search. It combines a curated feed catalog, an in-memory search engine, an HTTP API, and a browser console in one program. Its experimental analytics explore relationships between news topics, regions, and entities.
 
@@ -18,7 +18,7 @@ Oyez collects RSS, Atom, and JSON feeds, extracts article text, and indexes it f
 
 ## Quick start
 
-You need a POSIX environment, `make`, and a compiler that accepts `-std=c23`. The program links the system math and pthread libraries. Live feed and URL fetching also requires the `curl` executable on `PATH` and network access.
+You need a POSIX environment, `make`, and a compiler that accepts `-std=c99`. The program links only the system pthread library (`-lpthread`), implementing its own IEEE-754 floating-point, transcendental, hashing, and 128-bit arithmetic routines in pure C99. Plaintext `http://` feeds are fetched directly by the first-party C99 HTTP/1.1 socket client; `https://` feed fetching uses `curl` on `PATH` and network access.
 
 ```sh
 git clone https://github.com/DanDekker/oyez.git

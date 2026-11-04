@@ -1,12 +1,12 @@
 # Implementation notes
 
-Oyez combines a production-oriented feed and search pipeline with an experimental mathematical analytics layer. This page distinguishes exact finite constructions from numerical summaries so the output can be interpreted correctly.
+Oyez combines a production-oriented feed and search pipeline with an experimental mathematical analytics layer, implemented in strict first-party ISO C99 (`-std=c99 -Wall -Wextra -Werror -Wpedantic -O3`) with zero compiler builtins or C11/C23/GNU extensions. This page distinguishes exact finite constructions from numerical summaries so the output can be interpreted correctly.
 
 ## System map
 
 | Module | Source | Responsibility |
 | --- | --- | --- |
-| Core and hashing | [`core.h`](../src/core.h), [`core.c`](../src/core.c) | Buffers, JSON escaping, clocks, hashing, bit operations, and allocation helpers |
+| Core, hashing, and numerical math | [`core.h`](../src/core.h), [`core.c`](../src/core.c) | Buffers, JSON escaping, clocks, hashing, 128-bit limb multiplication, SWAR bit operations, and IEEE-754 binary64 transcendental math (`f64_sqrt`, `f64_ln`, `f64_exp`, `f64_atan`, `f64_cos`) |
 | Checksums and wire format | [`checksum.h`](../src/checksum.h), [`checksum.c`](../src/checksum.c), [`wire.h`](../src/wire.h) | CRC-32, SHA-256, and little-endian binary encoding |
 | Tokenizers | [`token.h`](../src/token.h), [`token.c`](../src/token.c), [`m1_tokenizer.h`](../src/m1_tokenizer.h), [`m1_tokenizer.c`](../src/m1_tokenizer.c) | Byte-level BPE and the fixed-vocabulary M1 pre-segmenter |
 | Parsing and extraction | [`markup.h`](../src/markup.h), [`markup.c`](../src/markup.c) | RSS, Atom, RDF, and JSON Feed parsing; readability scoring; HTML-to-Markdown conversion |
@@ -62,4 +62,4 @@ Other outputs—transport distances, curvature, persistent summaries, rank-filte
 
 The index uses a block string arena, open-addressed deduplication, bitset filters, positional BM25+ scoring, a generation-invalidated query cache, and a four-band SimHash index. State is persisted in the `OYEZIX01` binary snapshot; no external database is required.
 
-The feed catalog contains 750 source definitions spanning eleven regions and a broad set of news, research, technology, markets, security, sports, and weather topics. Live fetching shells out to `curl` with protocol, redirect, address, time, and response-size restrictions; availability still depends on the network and upstream servers.
+The feed catalog contains 750 source definitions spanning eleven regions and a broad set of news, research, technology, markets, security, sports, and weather topics. Live `http://` fetching uses a first-party C99 HTTP/1.1 socket client with DNS pinning, chunked/content-length decoding, RFC 3986 redirect resolution, and per-hop SSRF validation (while `https://` TLS transport uses `curl` with identical address, redirect, time, and response-size restrictions); availability still depends on the network and upstream servers.

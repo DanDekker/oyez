@@ -41,7 +41,7 @@ static void train_default_m1(M1Tokenizer *tok) {
 
 static int run_bench(void) {
   printf("================================================================\n");
-  printf("  Oyez Pure C23 Proprietary Engine Benchmark Suite\n");
+  printf("  Oyez Pure C99 Proprietary Engine Benchmark Suite\n");
   printf("================================================================\n");
 
   OyezEngine eng;
@@ -392,7 +392,7 @@ int main(int argc, char **argv) {
     ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &wx_phys);
 
     printf("\033[1;36m========================================================================\033[0m\n");
-    printf("\033[1;37m  OYEZ // C23 ONE-MACHINE AUTONOMOUS INTELLIGENCE APPLIANCE DASHBOARD\033[0m\n");
+    printf("\033[1;37m  OYEZ // C99 ONE-MACHINE AUTONOMOUS INTELLIGENCE APPLIANCE DASHBOARD\033[0m\n");
     printf("\033[1;36m========================================================================\033[0m\n");
     printf("  Feeds: \033[1;32m%zu\033[0m | Articles: \033[1;32m%zu\033[0m | Terms: \033[1;32m%zu\033[0m | M1 Vocab: \033[1;33m%u\033[0m\n",
            eng.feed_count, eng.article_count, eng.inv_count, m1_tokenizer_vocab_size(&tok));

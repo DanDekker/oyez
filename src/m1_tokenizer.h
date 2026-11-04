@@ -19,6 +19,8 @@ enum {
   M1_DEFAULT_VOCAB_SIZE = 32768
 };
 
+typedef char oyez_c99_m1_fixed_vocab_assert[(M1_FIXED_VOCAB_SIZE == 642) ? 1 : -1];
+
 typedef enum {
   M1_CTRL_BOS = M1_CONTROL_BASE + 0,
   M1_CTRL_EOS = M1_CONTROL_BASE + 1,
