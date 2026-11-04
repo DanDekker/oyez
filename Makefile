@@ -1,7 +1,7 @@
 CC ?= cc
 CPPFLAGS = -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -Isrc
-CFLAGS = -std=c23 -Wall -Wextra -Werror -Wpedantic -O3
-LDLIBS = -lm -lpthread
+CFLAGS = -std=c99 -Wall -Wextra -Werror -Wpedantic -O3
+LDLIBS = -lpthread
 
 BUILD_DIR = build
 LIB_SRCS = \

@@ -37,13 +37,13 @@ static inline void wire_append_u64(Buffer *out, uint64_t value)
     wire_append_le(out, value, 8);
 }
 
+OYEZ_C99_STATIC_ASSERT(
+    sizeof(double) == 8 && FLT_RADIX == 2 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024,
+    wire_ieee754_binary64);
+
 static inline void wire_append_f64(Buffer *out, double value)
 {
-    static_assert(sizeof(double) == 8 && FLT_RADIX == 2 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024,
-                  "f64 checkpoints require IEEE binary64");
-    uint64_t bits;
-    memcpy(&bits, &value, sizeof(bits));
-    wire_append_u64(out, bits);
+    wire_append_u64(out, f64_to_bits(value));
 }
 
 static inline bool wire_read_le(const unsigned char *data, size_t length,

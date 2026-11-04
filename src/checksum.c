@@ -31,7 +31,8 @@ uint32_t checksum_crc32(const void *bytes, size_t length)
 
 static uint32_t rotate32(uint32_t n, unsigned by)
 {
-    return (n >> by) | (n << (32 - by));
+    unsigned s = by & 31u;
+    return s == 0u ? n : ((n >> s) | (n << (32u - s)));
 }
 
 static void sha256_compress(uint32_t state[8], const unsigned char bytes[64])
