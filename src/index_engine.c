@@ -7,7 +7,6 @@
 
 #include <ctype.h>
 #include <float.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +98,12 @@ int bitset_test(const BitSet *bs, uint32_t bit) {
   return (bs->words[w] & (1ULL << (bit & 63u))) != 0ULL;
 }
 
+static void bitset_clear(BitSet *bs, uint32_t bit) {
+  size_t w = (size_t)(bit >> 6u);
+  if(!bs || !bs->words || w >= bs->word_cap) return;
+  bs->words[w] &= ~(1ULL << (bit & 63u));
+}
+
 uint32_t bitset_popcount(const BitSet *bs) {
   if(!bs || !bs->words) return 0u;
   uint32_t total = 0u;
@@ -178,7 +183,7 @@ static int dedup_table_grow(OyezEngine *engine) {
   size_t next_cap = engine->dedup_cap ? (engine->dedup_cap * 2u) : 1024u;
   void *raw = calloc(next_cap, sizeof(*engine->dedup_table));
   if(!raw) return -1;
-  typeof(engine->dedup_table) next = raw;
+  DedupEntry *next = (DedupEntry *)raw;
   size_t mask = next_cap - 1u;
   for(size_t i = 0; i < engine->dedup_cap; ++i) {
     if(engine->dedup_table[i].occupied) {
@@ -279,6 +284,15 @@ static int inv_post(OyezEngine *engine, const char *term, uint64_t hash, uint32_
   while(engine->inv_table[idx].occupied) {
     if(engine->inv_table[idx].hash == hash && strcmp(engine->inv_table[idx].term, term) == 0) {
       InvertedBucket *b = &engine->inv_table[idx];
+      if(b->count > 0 && slot <= b->slots[b->count - 1u]) {
+        for(uint32_t k = 0; k < b->count; ++k) {
+          if(b->slots[k] == slot) {
+            if(weight > b->weights[k]) b->weights[k] = weight;
+            b->pos_masks[k] |= pos_mask;
+            return 0;
+          }
+        }
+      }
       if(b->count == b->cap) {
         uint32_t ncap = b->cap ? (b->cap * 2u) : 8u;
         uint32_t *nslots = realloc(b->slots, ncap * sizeof(uint32_t));
@@ -827,6 +841,36 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   term_count = lexical_analyze(a->summary, 1.8f, terms, term_count, MAX_LEXICAL_TOKENS, &doc_tokens);
   term_count = lexical_analyze(a->content_text, 1.0f, terms, term_count, MAX_LEXICAL_TOKENS, &doc_tokens);
   term_count = lexical_analyze(a->feed_title, 1.4f, terms, term_count, MAX_LEXICAL_TOKENS, &doc_tokens);
+  if(a->author && a->author[0]) {
+    term_count = lexical_analyze(a->author, 1.6f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_org_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_orgs[i], 2.2f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_asset_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_assets[i], 2.4f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_ai_model_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_ai_models[i], 2.4f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_ai_infra_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_ai_infra[i], 2.2f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_cves[i], 2.8f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_hf_repo_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_hf_repos[i], 2.5f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_fiscal_event_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_fiscal_events[i], 2.0f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_weather_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_weather[i], 2.0f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
+  for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
+    term_count = lexical_analyze(a->mentioned_sports[i], 2.0f, terms, term_count, MAX_LEXICAL_TOKENS, NULL);
+  }
 
   a->doc_len = doc_tokens > 0 ? doc_tokens : 1u;
   engine->total_doc_len += a->doc_len;
@@ -839,6 +883,14 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
     uint16_t band_val = (uint16_t)((a->simhash64 >> (b * 16)) & 0xFFFFu);
     size_t b_idx = (size_t)(band_val & 0x0FFFu);
     SimHashBucket *sb = &engine->lsh_bands[b][b_idx];
+    int already_in_band = 0;
+    for(uint32_t k = 0; k < sb->count; ++k) {
+      if(sb->slots[k] == slot) {
+        already_in_band = 1;
+        break;
+      }
+    }
+    if(already_in_band) continue;
     if(sb->count == sb->cap) {
       uint32_t ncap = sb->cap ? (sb->cap * 2u) : 4u;
       uint32_t *nslots = realloc(sb->slots, ncap * sizeof(uint32_t));
@@ -855,6 +907,199 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
   for(size_t i = 0; i < term_count; ++i) {
     inv_post(engine, terms[i].term, terms[i].hash, slot, terms[i].weight, terms[i].pos_mask);
   }
+}
+
+static void populate_article_entities(ArticleRecord *a,
+                                      const char *const *tags,
+                                      size_t tag_count) {
+  ExtractedEntities ent;
+  entities_extract(a->title, a->summary, a->content_text, a->feed_category, tags, tag_count, &ent);
+  a->news_type = ent.news_type;
+  a->clearance = ent.clearance;
+  a->opsec_score = ent.opsec_score;
+  a->fiscal_stance = ent.fiscal_stance;
+  a->macro_score = ent.macro_score;
+  a->ai_tier = ent.ai_tier;
+  a->ai_compute_score = ent.ai_compute_score;
+  a->ai_license = ent.ai_license;
+  a->openness_score = ent.openness_score;
+  a->sports_score = ent.sports_score;
+  a->weather_severity = ent.weather_severity;
+  a->weather_score = ent.weather_score;
+  a->direct_ontology_mask = ent.direct_ontology_mask;
+  a->closure_ontology_mask = ent.closure_ontology_mask;
+
+  a->mentioned_cve_count = 0;
+  for(size_t i = 0; i < ent.cve_count && a->mentioned_cve_count < MAX_EXTRACTED_CVES; ++i) {
+    strcpy(a->mentioned_cves[a->mentioned_cve_count++], ent.cves[i]);
+  }
+  a->mentioned_asset_count = 0;
+  for(size_t i = 0; i < ent.asset_count && a->mentioned_asset_count < MAX_EXTRACTED_ASSETS; ++i) {
+    strcpy(a->mentioned_assets[a->mentioned_asset_count++], ent.assets[i]);
+  }
+  a->mentioned_fiscal_event_count = 0;
+  for(size_t i = 0; i < ent.fiscal_event_count && a->mentioned_fiscal_event_count < MAX_EXTRACTED_EVENTS; ++i) {
+    strcpy(a->mentioned_fiscal_events[a->mentioned_fiscal_event_count++], ent.fiscal_events[i]);
+  }
+  a->mentioned_ai_model_count = 0;
+  for(size_t i = 0; i < ent.ai_model_count && a->mentioned_ai_model_count < MAX_EXTRACTED_AI_MODELS; ++i) {
+    strcpy(a->mentioned_ai_models[a->mentioned_ai_model_count++], ent.ai_models[i]);
+  }
+  a->mentioned_ai_infra_count = 0;
+  for(size_t i = 0; i < ent.ai_infra_count && a->mentioned_ai_infra_count < MAX_EXTRACTED_AI_INFRA; ++i) {
+    strcpy(a->mentioned_ai_infra[a->mentioned_ai_infra_count++], ent.ai_infra[i]);
+  }
+  a->mentioned_hf_repo_count = 0;
+  for(size_t i = 0; i < ent.hf_repo_count && a->mentioned_hf_repo_count < MAX_EXTRACTED_HF_REPOS; ++i) {
+    strcpy(a->mentioned_hf_repos[a->mentioned_hf_repo_count++], ent.hf_repos[i]);
+  }
+  a->mentioned_sport_count = 0;
+  for(size_t i = 0; i < ent.sport_count && a->mentioned_sport_count < MAX_EXTRACTED_SPORTS; ++i) {
+    strcpy(a->mentioned_sports[a->mentioned_sport_count++], ent.sports[i]);
+  }
+  a->mentioned_weather_count = 0;
+  for(size_t i = 0; i < ent.weather_count && a->mentioned_weather_count < MAX_EXTRACTED_WEATHER; ++i) {
+    strcpy(a->mentioned_weather[a->mentioned_weather_count++], ent.weather[i]);
+  }
+
+  a->mentioned_country_count = 0;
+  if(strlen(a->feed_country) == 2u && strcmp(a->feed_country, "UN") != 0 &&
+     strcmp(a->feed_country, "EU") != 0) {
+    strcpy(a->mentioned_countries[a->mentioned_country_count++], a->feed_country);
+  }
+  for(size_t i = 0; i < ent.country_count && a->mentioned_country_count < MAX_EXTRACTED_COUNTRIES; ++i) {
+    int exists = 0;
+    for(size_t j = 0; j < a->mentioned_country_count; ++j) {
+      if(strcmp(a->mentioned_countries[j], ent.countries[i]) == 0) {
+        exists = 1;
+        break;
+      }
+    }
+    if(!exists) {
+      strcpy(a->mentioned_countries[a->mentioned_country_count++], ent.countries[i]);
+    }
+  }
+  a->mentioned_org_count = 0;
+  for(size_t i = 0; i < ent.org_count && a->mentioned_org_count < MAX_EXTRACTED_ORGS; ++i) {
+    strcpy(a->mentioned_orgs[a->mentioned_org_count++], ent.organizations[i]);
+  }
+
+  uint32_t words = 0;
+  int in_w = 0;
+  for(const char *p = a->content_text ? a->content_text : ""; *p; ++p) {
+    if(isspace((unsigned char)*p)) in_w = 0;
+    else if(!in_w) {
+      in_w = 1;
+      words++;
+    }
+  }
+  a->word_count = words;
+  a->reading_time_minutes = words > 0 ? ((words + 219u) / 220u) : 1u;
+}
+
+static void invalidate_engine_query_cache(OyezEngine *engine) {
+  pthread_mutex_lock(&engine->cache_lock);
+  engine->index_generation++;
+  for(size_t c = 0; c < 64u; ++c) {
+    if(engine->query_cache[c].valid) {
+      free(engine->query_cache[c].slots);
+      free(engine->query_cache[c].scores);
+      engine->query_cache[c].slots = NULL;
+      engine->query_cache[c].scores = NULL;
+      engine->query_cache[c].valid = 0;
+    }
+  }
+  pthread_mutex_unlock(&engine->cache_lock);
+}
+
+int engine_enrich_article(OyezEngine *engine,
+                          uint32_t article_id,
+                          const char *author,
+                          const char *summary,
+                          const char *content_html,
+                          const char *content_text,
+                          const char *image_url) {
+  if(!engine || article_id == 0) return -1;
+  ArticleRecord *a = NULL;
+  if((size_t)(article_id - 1u) < engine->article_count &&
+     engine->articles[article_id - 1u].id == article_id) {
+    a = &engine->articles[article_id - 1u];
+  } else {
+    for(size_t i = 0; i < engine->article_count; ++i) {
+      if(engine->articles[i].id == article_id) {
+        a = &engine->articles[i];
+        break;
+      }
+    }
+  }
+  if(!a) return -1;
+
+  char *cleaned_html = NULL;
+  const char *best_text = content_text;
+  if((!best_text || best_text[0] == '\0') && content_html && content_html[0] != '\0') {
+    cleaned_html = markup_clean_cstr(content_html);
+    best_text = cleaned_html;
+  }
+
+  size_t old_tlen = a->content_text ? strlen(a->content_text) : 0u;
+  size_t new_tlen = best_text ? strlen(best_text) : 0u;
+  int upgraded = 0;
+
+  if(new_tlen > old_tlen) {
+    char *copy = dup_str(best_text);
+    if(copy) {
+      free(a->content_text);
+      a->content_text = copy;
+      upgraded = 1;
+    }
+  }
+  free(cleaned_html);
+
+  if(content_html && content_html[0] != '\0') {
+    size_t old_hlen = a->content_html ? strlen(a->content_html) : 0u;
+    if(strlen(content_html) > old_hlen) {
+      a->content_html = arena_strdup(engine, content_html);
+      upgraded = 1;
+    }
+  }
+  if(summary && summary[0] != '\0') {
+    size_t old_slen = a->summary ? strlen(a->summary) : 0u;
+    if(old_slen < 80u && strlen(summary) > old_slen) {
+      a->summary = arena_strdup(engine, summary);
+      upgraded = 1;
+    }
+  }
+  if(author && author[0] != '\0' && (!a->author || a->author[0] == '\0')) {
+    a->author = arena_strdup(engine, author);
+    upgraded = 1;
+  }
+  if(image_url && image_url[0] != '\0' && (!a->image_url || a->image_url[0] == '\0')) {
+    a->image_url = arena_strdup(engine, image_url);
+    upgraded = 1;
+  }
+
+  if(!upgraded) return 0;
+
+  uint32_t slot = a->slot;
+  if((unsigned)a->news_type < NEWS_TYPE_COUNT) bitset_clear(&engine->by_news_type[a->news_type], slot);
+  if((unsigned)a->clearance < CLEARANCE_LEVEL_COUNT) bitset_clear(&engine->by_clearance[a->clearance], slot);
+  if((unsigned)a->fiscal_stance < FISCAL_STANCE_COUNT) bitset_clear(&engine->by_fiscal_stance[a->fiscal_stance], slot);
+  if((unsigned)a->ai_tier < AI_TIER_COUNT) bitset_clear(&engine->by_ai_tier[a->ai_tier], slot);
+  if((unsigned)a->ai_license < AI_LICENSE_COUNT) bitset_clear(&engine->by_ai_license[a->ai_license], slot);
+  if((unsigned)a->weather_severity < WEATHER_SEVERITY_COUNT) bitset_clear(&engine->by_weather_severity[a->weather_severity], slot);
+  for(uint32_t node = 0; node < ONTOLOGY_NODE_COUNT; ++node) {
+    if(a->direct_ontology_mask & (1u << node)) bitset_clear(&engine->by_direct_ontology[node], slot);
+    if(a->closure_ontology_mask & (1u << node)) bitset_clear(&engine->by_closure_ontology[node], slot);
+  }
+  if(engine->total_doc_len >= a->doc_len) {
+    engine->total_doc_len -= a->doc_len;
+  }
+
+  populate_article_entities(a, NULL, 0u);
+  index_article_record(engine, a);
+  evaluate_article_automation_rules(engine, a);
+  invalidate_engine_query_cache(engine);
+  return 1;
 }
 
 int engine_ingest_article(OyezEngine *engine,
@@ -892,6 +1137,7 @@ int engine_ingest_article(OyezEngine *engine,
   uint64_t guid_h = wyhash64((uint64_t)feed_id, fnv1a64(eff_guid, strlen(eff_guid)));
   uint32_t existing_id = dedup_lookup(engine, guid_h);
   if(existing_id != 0u) {
+    engine_enrich_article(engine, existing_id, author, summary, content_html, NULL, image_url);
     if(out_article_id) *out_article_id = existing_id;
     return 0;
   }
@@ -900,6 +1146,7 @@ int engine_ingest_article(OyezEngine *engine,
     url_h = wyhash64(0x9E3779B97F4A7C15ULL, fnv1a64(url, strlen(url)));
     existing_id = dedup_lookup(engine, url_h);
     if(existing_id != 0u) {
+      engine_enrich_article(engine, existing_id, author, summary, content_html, NULL, image_url);
       if(out_article_id) *out_article_id = existing_id;
       return 0;
     }
@@ -939,100 +1186,96 @@ int engine_ingest_article(OyezEngine *engine,
   a->feed_language = arena_strdup(engine, feed->language);
   a->feed_source_tier = arena_strdup(engine, feed->source_tier);
 
-  ExtractedEntities ent;
-  entities_extract(a->title, a->summary, a->content_text, a->feed_category, tags, tag_count, &ent);
-  a->news_type = ent.news_type;
-  a->clearance = ent.clearance;
-  a->opsec_score = ent.opsec_score;
-  a->fiscal_stance = ent.fiscal_stance;
-  a->macro_score = ent.macro_score;
-  a->ai_tier = ent.ai_tier;
-  a->ai_compute_score = ent.ai_compute_score;
-  a->ai_license = ent.ai_license;
-  a->openness_score = ent.openness_score;
-  a->sports_score = ent.sports_score;
-  a->weather_severity = ent.weather_severity;
-  a->weather_score = ent.weather_score;
-  a->direct_ontology_mask = ent.direct_ontology_mask;
-  a->closure_ontology_mask = ent.closure_ontology_mask;
-
-  for(size_t i = 0; i < ent.cve_count && a->mentioned_cve_count < MAX_EXTRACTED_CVES; ++i) {
-    strcpy(a->mentioned_cves[a->mentioned_cve_count++], ent.cves[i]);
-  }
-  for(size_t i = 0; i < ent.asset_count && a->mentioned_asset_count < MAX_EXTRACTED_ASSETS; ++i) {
-    strcpy(a->mentioned_assets[a->mentioned_asset_count++], ent.assets[i]);
-  }
-  for(size_t i = 0; i < ent.fiscal_event_count && a->mentioned_fiscal_event_count < MAX_EXTRACTED_EVENTS; ++i) {
-    strcpy(a->mentioned_fiscal_events[a->mentioned_fiscal_event_count++], ent.fiscal_events[i]);
-  }
-  for(size_t i = 0; i < ent.ai_model_count && a->mentioned_ai_model_count < MAX_EXTRACTED_AI_MODELS; ++i) {
-    strcpy(a->mentioned_ai_models[a->mentioned_ai_model_count++], ent.ai_models[i]);
-  }
-  for(size_t i = 0; i < ent.ai_infra_count && a->mentioned_ai_infra_count < MAX_EXTRACTED_AI_INFRA; ++i) {
-    strcpy(a->mentioned_ai_infra[a->mentioned_ai_infra_count++], ent.ai_infra[i]);
-  }
-  for(size_t i = 0; i < ent.hf_repo_count && a->mentioned_hf_repo_count < MAX_EXTRACTED_HF_REPOS; ++i) {
-    strcpy(a->mentioned_hf_repos[a->mentioned_hf_repo_count++], ent.hf_repos[i]);
-  }
-  for(size_t i = 0; i < ent.sport_count && a->mentioned_sport_count < MAX_EXTRACTED_SPORTS; ++i) {
-    strcpy(a->mentioned_sports[a->mentioned_sport_count++], ent.sports[i]);
-  }
-  for(size_t i = 0; i < ent.weather_count && a->mentioned_weather_count < MAX_EXTRACTED_WEATHER; ++i) {
-    strcpy(a->mentioned_weather[a->mentioned_weather_count++], ent.weather[i]);
-  }
-
-  /* Always include feed country if valid 2-letter ISO code */
-  if(strlen(a->feed_country) == 2u && strcmp(a->feed_country, "UN") != 0 &&
-     strcmp(a->feed_country, "EU") != 0) {
-    strcpy(a->mentioned_countries[a->mentioned_country_count++], a->feed_country);
-  }
-  for(size_t i = 0; i < ent.country_count && a->mentioned_country_count < MAX_EXTRACTED_COUNTRIES; ++i) {
-    int exists = 0;
-    for(size_t j = 0; j < a->mentioned_country_count; ++j) {
-      if(strcmp(a->mentioned_countries[j], ent.countries[i]) == 0) {
-        exists = 1;
-        break;
-      }
-    }
-    if(!exists) {
-      strcpy(a->mentioned_countries[a->mentioned_country_count++], ent.countries[i]);
-    }
-  }
-  for(size_t i = 0; i < ent.org_count && a->mentioned_org_count < MAX_EXTRACTED_ORGS; ++i) {
-    strcpy(a->mentioned_orgs[a->mentioned_org_count++], ent.organizations[i]);
-  }
-
-  uint32_t words = 0;
-  int in_w = 0;
-  for(const char *p = a->content_text ? a->content_text : ""; *p; ++p) {
-    if(isspace((unsigned char)*p)) in_w = 0;
-    else if(!in_w) {
-      in_w = 1;
-      words++;
-    }
-  }
-  a->word_count = words;
-  a->reading_time_minutes = words > 0 ? ((words + 219u) / 220u) : 1u;
-
+  populate_article_entities(a, tags, tag_count);
   index_article_record(engine, a);
   feed->article_count++;
   evaluate_article_automation_rules(engine, a);
-  pthread_mutex_lock(&engine->cache_lock);
-  engine->index_generation++;
-  for(size_t c = 0; c < 64u; ++c) {
-    if(engine->query_cache[c].valid) {
-      free(engine->query_cache[c].slots);
-      free(engine->query_cache[c].scores);
-      engine->query_cache[c].slots = NULL;
-      engine->query_cache[c].scores = NULL;
-      engine->query_cache[c].valid = 0;
-    }
-  }
-  pthread_mutex_unlock(&engine->cache_lock);
+  invalidate_engine_query_cache(engine);
 
   if(out_article_id) *out_article_id = a->id;
   if(out_inserted) *out_inserted = 1;
   return 0;
+}
+
+void engine_extract_query_snippet(const ArticleRecord *a,
+                                  const char *query,
+                                  char *out_buf,
+                                  size_t out_cap) {
+  if(!out_buf || out_cap == 0) return;
+  out_buf[0] = '\0';
+  if(!a) return;
+  const char *body = (a->content_text && a->content_text[0]) ? a->content_text
+                     : ((a->summary && a->summary[0]) ? a->summary : a->title);
+  if(!body || !body[0]) return;
+  size_t blen = strlen(body);
+  size_t max_chars = out_cap > 8u ? (out_cap - 8u) : (out_cap - 1u);
+  if(max_chars > 240u) max_chars = 240u;
+
+  LexicalTerm qterms[16];
+  size_t qcount = 0;
+  if(query && query[0]) {
+    qcount = lexical_analyze(query, 1.0f, qterms, 0, 16u, NULL);
+  }
+
+  size_t best_pos = 0;
+  int best_hits = -1;
+  if(qcount > 0 && blen > max_chars) {
+    size_t step = 40u;
+    for(size_t pos = 0; pos < blen; pos += step) {
+      size_t wlen = (pos + max_chars <= blen) ? max_chars : (blen - pos);
+      int hits = 0;
+      for(size_t t = 0; t < qcount; ++t) {
+        const char *term = qterms[t].term;
+        size_t tlen = strlen(term);
+        if(tlen < 2u || wlen < tlen) continue;
+        for(size_t k = 0; k + tlen <= wlen; ++k) {
+          size_t m = 0;
+          while(m < tlen && tolower((unsigned char)body[pos + k + m]) == (unsigned char)term[m]) {
+            m++;
+          }
+          if(m == tlen) {
+            hits += (k == 0 || !isalnum((unsigned char)body[pos + k - 1u])) ? 3 : 1;
+            break;
+          }
+        }
+      }
+      if(hits > best_hits) {
+        best_hits = hits;
+        best_pos = pos;
+      }
+    }
+  }
+
+  if(best_pos > 0) {
+    while(best_pos > 0 && !isspace((unsigned char)body[best_pos - 1u])) {
+      best_pos--;
+    }
+  }
+  size_t copy_len = (best_pos + max_chars < blen) ? max_chars : (blen - best_pos);
+  while(copy_len > 0 && ((unsigned char)body[best_pos + copy_len] & 0xC0u) == 0x80u) {
+    copy_len--;
+  }
+  if(best_pos + copy_len < blen) {
+    size_t trim = copy_len;
+    while(trim > copy_len / 2u && !isspace((unsigned char)body[best_pos + trim])) {
+      trim--;
+    }
+    if(trim > copy_len / 2u) copy_len = trim;
+  }
+
+  size_t w = 0;
+  if(best_pos > 0 && w + 3u < out_cap) {
+    memcpy(out_buf + w, "...", 3u);
+    w += 3u;
+  }
+  if(w + copy_len >= out_cap) copy_len = out_cap - w - 1u;
+  memcpy(out_buf + w, body + best_pos, copy_len);
+  w += copy_len;
+  if(best_pos + copy_len < blen && w + 4u < out_cap) {
+    memcpy(out_buf + w, "...", 3u);
+    w += 3u;
+  }
+  out_buf[w] = '\0';
 }
 
 const ArticleRecord *engine_get_article_by_id(const OyezEngine *engine, uint32_t id) {
@@ -1358,7 +1601,7 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
       const InvertedBucket *bucket = inv_lookup(engine, qterms[t].term, qterms[t].hash);
       if(!bucket || bucket->count == 0) continue;
       double df = (double)bucket->count;
-      double idf = log(1.0 + (N - df + 0.5) / (df + 0.5));
+      double idf = f64_ln(1.0 + (N - df + 0.5) / (df + 0.5));
       for(uint32_t p = 0; p < bucket->count; ++p) {
         uint32_t slot = bucket->slots[p];
         if(!bitset_test(&candidates, slot)) continue;
@@ -1412,8 +1655,28 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
       if(q->source_tier && q->source_tier[0] && strcmp(art->feed_source_tier, q->source_tier) != 0) continue;
 
       double spec_boost = 1.0 + 0.05 * (ontology_information_specificity(art->direct_ontology_mask) - 1.0);
-      double sc = bm25_scores ? (bm25_scores[slot] * spec_boost)
-                              : (double)(art->published_ms % 100000000ULL) * 1e-6 + spec_boost;
+      double tier_boost = 0.0;
+      if(art->feed_source_tier) {
+        if(strcmp(art->feed_source_tier, "official") == 0 ||
+           strcmp(art->feed_source_tier, "investigative") == 0 ||
+           strcmp(art->feed_source_tier, "specialist") == 0) {
+          tier_boost = 0.08;
+        } else if(strcmp(art->feed_source_tier, "wire") == 0 ||
+                  strcmp(art->feed_source_tier, "public-broadcaster") == 0) {
+          tier_boost = 0.06;
+        } else if(strcmp(art->feed_source_tier, "national") == 0 ||
+                  strcmp(art->feed_source_tier, "independent") == 0) {
+          tier_boost = 0.04;
+        }
+      }
+      double depth_boost = art->word_count >= 180u ? 0.06 : (art->word_count >= 60u ? 0.03 : 0.0);
+      size_t ent_total = art->mentioned_org_count + art->mentioned_asset_count +
+                         art->mentioned_cve_count + art->mentioned_ai_model_count +
+                         art->mentioned_ai_infra_count + art->mentioned_hf_repo_count;
+      double ent_boost = (ent_total > 6u ? 6.0 : (double)ent_total) * 0.012;
+      double quality_mult = spec_boost + tier_boost + depth_boost + ent_boost;
+      double sc = bm25_scores ? (bm25_scores[slot] * quality_mult)
+                              : (double)(art->published_ms % 100000000ULL) * 1e-6 + quality_mult;
       pool[pool_count].article = art;
       pool[pool_count].score = sc;
       pool_count++;
@@ -1563,8 +1826,8 @@ double engine_dpp_rerank(ScoredArticle *pool, size_t count, double lambda) {
     if(best_d2 <= 1e-12) break;
     selected[best_j] = 1u;
     reranked[t] = pool[best_j];
-    log_det += log(best_d2);
-    double sigma = sqrt(best_d2);
+    log_det += f64_ln(best_d2);
+    double sigma = f64_sqrt(best_d2);
     double inv_sigma = 1.0 / sigma;
 
     for(size_t i = 0; i < W; ++i) {
@@ -2074,7 +2337,7 @@ void engine_natural_transformation(const OyezEngine *engine,
       uint32_t v = ctz64((uint64_t)parents);
       parents &= (parents - 1u);
       if(v == 0) continue;
-      double diff = fabs(out_morphism->component_ratios[u] - out_morphism->component_ratios[v]);
+      double diff = f64_abs(out_morphism->component_ratios[u] - out_morphism->component_ratios[v]);
       defect += diff / (1.0 + diff);
       edge_cnt++;
     }
@@ -2240,8 +2503,8 @@ void engine_temporal_sheaf(const OyezEngine *engine,
       regime_energy += step_v * step_v * ontology_node_magnitude_weight((OntologyNodeId)c);
     }
   }
-  out_temporal->connection_laplacian_norm = sqrt(conn_sq);
-  out_temporal->regime_shift_energy = sqrt(regime_energy);
+  out_temporal->connection_laplacian_norm = f64_sqrt(conn_sq);
+  out_temporal->regime_shift_energy = f64_sqrt(regime_energy);
 
   double best_vel = -1e18;
   double best_acc = -1e18;
@@ -2305,6 +2568,7 @@ void engine_topos_state(const OyezEngine *engine,
   out_topos->leibniz_rule_holds = (out_topos->lawvere_boundary_meet_ab == leibniz_rhs) ? 1 : 0;
   out_topos->universal_quantifier_ab = ontology_universal_quantifier(out_topos->ideal_a | out_topos->ideal_b);
   ontology_subobject_classifier_score(mask_a, out_topos->classifier_score_a);
+  memcpy(out_topos->omega_truth_a, out_topos->classifier_score_a, sizeof(out_topos->omega_truth_a));
 
   double f_src[ONTOLOGY_NODE_COUNT];
   double f_dst[ONTOLOGY_NODE_COUNT];
@@ -2329,7 +2593,7 @@ void engine_topos_state(const OyezEngine *engine,
     f_dst[c] = dc;
     f_dual[c] = k_scalar - dc;
 
-    double diff = fabs(sc - dc);
+    double diff = f64_abs(sc - dc);
     double scale = (sc + dc) > 1.0 ? (sc + dc) : 1.0;
     if(diff <= 0.35 * scale) {
       out_topos->equalizer_mask |= (1u << c);
@@ -2347,14 +2611,17 @@ void engine_topos_state(const OyezEngine *engine,
   out_topos->weighted_colimit = ontology_weighted_colimit(f_src, f_dst);
   out_topos->weighted_limit = ontology_weighted_limit(f_src, f_dst);
   double lim_dual = ontology_weighted_limit(f_src, f_dual);
-  out_topos->tensor_hom_adjunction_defect = fabs((k_scalar - out_topos->weighted_colimit) - lim_dual);
+  out_topos->tensor_hom_adjunction_defect = f64_abs((k_scalar - out_topos->weighted_colimit) - lim_dual);
 
   /* Cocone semipromonoidal convolution and its exact right residual.
    * ToposState retains its historical field names for source compatibility. */
   ontology_cocone_convolution(f_src, f_dst, out_topos->cocone_convolution_fg);
+  memcpy(out_topos->day_convolution_fg, out_topos->cocone_convolution_fg, sizeof(out_topos->day_convolution_fg));
   ontology_cocone_internal_hom(f_dst, out_topos->coequalizer_quotient, out_topos->cocone_internal_hom_gh);
+  memcpy(out_topos->day_internal_hom_gh, out_topos->cocone_internal_hom_gh, sizeof(out_topos->day_internal_hom_gh));
   out_topos->cocone_adjunction_defect =
       ontology_cocone_adjunction_defect(f_src, f_dst, out_topos->coequalizer_quotient);
+  out_topos->day_adjunction_defect = out_topos->cocone_adjunction_defect;
 
   /* Experimental modal-closure factorization diagnostic.  Historical field
    * names are retained; no model-category structure is asserted here. */
@@ -2362,6 +2629,9 @@ void engine_topos_state(const OyezEngine *engine,
                                     &out_topos->modal_intermediate,
                                     &out_topos->modal_factorization_target,
                                     &out_topos->modal_closure_matches);
+  out_topos->quillen_acyclic_cofibration_m = out_topos->modal_intermediate;
+  out_topos->quillen_fibration_target = out_topos->modal_factorization_target;
+  out_topos->quillen_weak_equivalence_holds = out_topos->modal_closure_matches;
 
   /* Spivak Polynomial Endofunctor P_C(X) & Dependent Co-Design Lens */
   ontology_polynomial_functor_eval(f_src, out_topos->polynomial_functor_px, out_topos->polynomial_codesign_lens);
@@ -2375,6 +2645,7 @@ void engine_topos_state(const OyezEngine *engine,
   /* Experimental rank-filtered page summary.  This is not a constructed
    * Grothendieck-Leray spectral sequence. */
   ontology_rank_page_diagnostic(f_src, &out_topos->rank_page_diagnostics);
+  out_topos->spectral_seq = out_topos->rank_page_diagnostics;
 
   /* Simplicial Gauss-Bonnet-Chern, Forman-Ricci, Ollivier-Ricci Curvature & Discrete Ricci Flow */
   ontology_ricci_curvature(f_src, &out_topos->ricci_curv);
@@ -3171,7 +3442,7 @@ size_t engine_bandit_select_feeds(const OyezEngine *engine,
   for(size_t i = 0; i < engine->feed_count; ++i) {
     total_pulls += engine->feeds[i].fetch_count;
   }
-  double ln_t = log(2.0 + (double)total_pulls);
+  double ln_t = f64_ln(2.0 + (double)total_pulls);
   uint64_t now_ms = wall_time_ms();
 
   for(size_t i = 0; i < engine->feed_count; ++i) {
@@ -3179,7 +3450,7 @@ size_t engine_bandit_select_feeds(const OyezEngine *engine,
     double n_i = 1.0 + (double)f->fetch_count;
     double emp_yield = (double)f->article_count / n_i;
     /* Auer-Cesa-Bianchi-Fischer UCB1 upper confidence bound */
-    double explore = 1.41421356 * sqrt((2.0 * ln_t) / n_i);
+    double explore = 1.41421356 * f64_sqrt((2.0 * ln_t) / n_i);
     double err_pen = 1.5 * ((double)f->error_count / (n_i + (double)f->error_count));
     double stale = 0.0;
     if(f->last_fetched_ms == 0) {
@@ -3368,7 +3639,7 @@ void engine_appliance_state(const OyezEngine *engine,
     weight_sum += ontology_node_magnitude_weight((OntologyNodeId)u);
   }
   uint32_t passed = 0;
-  if(leinster_mag > 10.0 && fabs(leinster_mag - weight_sum) < 1e-11) passed++;              /* 1. Leinster Magnitude */
+  if(leinster_mag > 10.0 && f64_abs(leinster_mag - weight_sum) < 1e-11) passed++;              /* 1. Leinster Magnitude */
   if(cohom.euler_characteristic == 1 &&
      cohom.betti_numbers[0] == 1u && cohom.betti_numbers[1] == 0u) passed++;                /* 2. Nerve Euler-Poincare */
   if(cohom.cochain_exactness_norm < 1e-11) passed++;                                        /* 3. Hodge Cochain d^1 o d^0 = 0 */
@@ -3395,7 +3666,7 @@ void engine_appliance_state(const OyezEngine *engine,
      out_app->weather_physics.kaplan_yorke_dim < 2.2) passed++;                             /* 12. Lorenz-63 Strange Attractor */
 
   const double checked_residuals[] = {
-    fabs(leinster_mag - weight_sum),
+    f64_abs(leinster_mag - weight_sum),
     cohom.cochain_exactness_norm,
     monad.zig_zag_triangle_defect,
     monad.beck_coequalizer_defect,
@@ -3413,8 +3684,8 @@ void engine_appliance_state(const OyezEngine *engine,
   };
   double max_residual = 0.0;
   for(size_t i = 0; i < sizeof(checked_residuals) / sizeof(checked_residuals[0]); ++i) {
-    double residual = fabs(checked_residuals[i]);
-    if(!isfinite(residual)) {
+    double residual = f64_abs(checked_residuals[i]);
+    if(!f64_is_finite(residual)) {
       max_residual = DBL_MAX;
       break;
     }
@@ -3422,8 +3693,11 @@ void engine_appliance_state(const OyezEngine *engine,
   }
 
   out_app->checks_passed = passed;
+  out_app->theorems_verified_count = passed;
   out_app->checks_total = 12u;
+  out_app->theorems_total_count = 12u;
   out_app->all_checks_passed = (passed == 12u) ? 1 : 0;
+  out_app->all_theorems_verified = out_app->all_checks_passed;
   out_app->leinster_magnitude = leinster_mag;
   out_app->euler_characteristic = cohom.euler_characteristic;
   out_app->fiedler_eigenvalue = cohom.fiedler_eigenvalue;
@@ -3434,8 +3708,10 @@ void engine_appliance_state(const OyezEngine *engine,
   out_app->sinkhorn_divergence = topos.sinkhorn_ot.sinkhorn_divergence;
   out_app->fisher_rao_geodesic = topos.sinkhorn_ot.fisher_rao_geodesic;
   out_app->cocone_adjunction_defect = topos.cocone_adjunction_defect;
+  out_app->day_adjunction_defect = topos.cocone_adjunction_defect;
   out_app->rota_baxter_defect = topos.rota_baxter.rota_baxter_identity_defect;
   out_app->max_numerical_residual = max_residual;
+  out_app->max_numerical_defect = max_residual;
 
   /* 3. Cross-Domain Intelligence Situation Room */
   out_app->cyber_strategic_articles =

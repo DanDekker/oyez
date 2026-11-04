@@ -202,18 +202,12 @@ typedef struct {
   uint64_t index_generation;
 
   /* Twelve exact or numerically bounded invariant checks. */
-  union {
-    uint32_t checks_passed;
-    uint32_t theorems_verified_count; /* Deprecated compatibility name. */
-  };
-  union {
-    uint32_t checks_total;
-    uint32_t theorems_total_count; /* Deprecated compatibility name. */
-  };
-  union {
-    int all_checks_passed;
-    int all_theorems_verified; /* Deprecated compatibility name. */
-  };
+  uint32_t checks_passed;
+  uint32_t theorems_verified_count; /* Deprecated compatibility name. */
+  uint32_t checks_total;
+  uint32_t theorems_total_count; /* Deprecated compatibility name. */
+  int all_checks_passed;
+  int all_theorems_verified; /* Deprecated compatibility name. */
   double leinster_magnitude;
   int32_t euler_characteristic;
   double fiedler_eigenvalue;
@@ -223,15 +217,11 @@ typedef struct {
   double tropical_eigenvalue;
   double sinkhorn_divergence;
   double fisher_rao_geodesic;
-  union {
-    double cocone_adjunction_defect;
-    double day_adjunction_defect; /* Deprecated compatibility name. */
-  };
+  double cocone_adjunction_defect;
+  double day_adjunction_defect; /* Deprecated compatibility name. */
   double rota_baxter_defect;
-  union {
-    double max_numerical_residual;
-    double max_numerical_defect; /* Deprecated compatibility name. */
-  };
+  double max_numerical_residual;
+  double max_numerical_defect; /* Deprecated compatibility name. */
 
   /* Unified Cross-Domain Situation Room & Atmospheric Physics */
   WeatherPhysicsState weather_physics;
@@ -252,6 +242,21 @@ typedef struct {
   BanditFeedPriority top_bandit_feeds[4];
   size_t top_bandit_count;
 } EngineApplianceState;
+
+typedef struct {
+  uint64_t key_hash;
+  uint32_t article_id;
+  int occupied;
+} DedupEntry;
+
+typedef struct {
+  uint64_t key_hash;
+  uint32_t *slots;
+  float *scores;
+  size_t count;
+  size_t total;
+  int valid;
+} QueryCacheEntry;
 
 typedef struct {
   FeedRecord *feeds;
@@ -296,11 +301,7 @@ typedef struct {
   SimHashBucket *lsh_bands[4];
 
   /* Open-addressed O(1) Article Deduplication Hash Table */
-  struct {
-    uint64_t key_hash;
-    uint32_t article_id;
-    int occupied;
-  } *dedup_table;
+  DedupEntry *dedup_table;
   size_t dedup_cap;
   size_t dedup_count;
 
@@ -321,14 +322,7 @@ typedef struct {
   uint64_t auto_cycles_completed;
 
   /* 64-entry FNV-1a Open-Addressed Query Response Cache */
-  struct {
-    uint64_t key_hash;
-    uint32_t *slots;
-    float *scores;
-    size_t count;
-    size_t total;
-    int valid;
-  } query_cache[64];
+  QueryCacheEntry query_cache[64];
   uint64_t index_generation;
   pthread_rwlock_t rwlock;
   pthread_mutex_t cache_lock;
@@ -481,10 +475,8 @@ typedef struct {
   uint32_t lawvere_boundary_meet_ab;
   int leibniz_rule_holds;
   uint32_t universal_quantifier_ab;
-  union {
-    double classifier_score_a[ONTOLOGY_NODE_COUNT];
-    double omega_truth_a[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
-  };
+  double classifier_score_a[ONTOLOGY_NODE_COUNT];
+  double omega_truth_a[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
   uint32_t equalizer_mask;
   double coequalizer_quotient[ONTOLOGY_NODE_COUNT];
   double isbell_covariant_star[ONTOLOGY_NODE_COUNT];
@@ -495,38 +487,24 @@ typedef struct {
   double weighted_colimit;
   double weighted_limit;
   double tensor_hom_adjunction_defect;
-  union {
-    double cocone_convolution_fg[ONTOLOGY_NODE_COUNT];
-    double day_convolution_fg[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
-  };
-  union {
-    double cocone_internal_hom_gh[ONTOLOGY_NODE_COUNT];
-    double day_internal_hom_gh[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
-  };
-  union {
-    double cocone_adjunction_defect;
-    double day_adjunction_defect; /* Deprecated compatibility name. */
-  };
-  union {
-    uint32_t modal_intermediate;
-    uint32_t quillen_acyclic_cofibration_m; /* Deprecated compatibility name. */
-  };
-  union {
-    uint32_t modal_factorization_target;
-    uint32_t quillen_fibration_target; /* Deprecated compatibility name. */
-  };
-  union {
-    int modal_closure_matches;
-    int quillen_weak_equivalence_holds; /* Deprecated compatibility name. */
-  };
+  double cocone_convolution_fg[ONTOLOGY_NODE_COUNT];
+  double day_convolution_fg[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
+  double cocone_internal_hom_gh[ONTOLOGY_NODE_COUNT];
+  double day_internal_hom_gh[ONTOLOGY_NODE_COUNT]; /* Deprecated compatibility name. */
+  double cocone_adjunction_defect;
+  double day_adjunction_defect; /* Deprecated compatibility name. */
+  uint32_t modal_intermediate;
+  uint32_t quillen_acyclic_cofibration_m; /* Deprecated compatibility name. */
+  uint32_t modal_factorization_target;
+  uint32_t quillen_fibration_target; /* Deprecated compatibility name. */
+  int modal_closure_matches;
+  int quillen_weak_equivalence_holds; /* Deprecated compatibility name. */
   double polynomial_functor_px[ONTOLOGY_NODE_COUNT];
   double polynomial_codesign_lens[ONTOLOGY_NODE_COUNT];
   double heat_diffused_src[ONTOLOGY_NODE_COUNT];
   SinkhornTransportState sinkhorn_ot;
-  union {
-    RankPageDiagnostic rank_page_diagnostics;
-    SpectralSequenceState spectral_seq; /* Deprecated compatibility name. */
-  };
+  RankPageDiagnostic rank_page_diagnostics;
+  SpectralSequenceState spectral_seq; /* Deprecated compatibility name. */
   RicciCurvatureState ricci_curv;
   ZetaTropicalState zeta_tropical;
   RotaBaxterState rota_baxter;
@@ -580,6 +558,17 @@ int engine_ingest_article(OyezEngine *engine,
                           int *out_inserted);
 
 const ArticleRecord *engine_get_article_by_id(const OyezEngine *engine, uint32_t id);
+int engine_enrich_article(OyezEngine *engine,
+                          uint32_t article_id,
+                          const char *author,
+                          const char *summary,
+                          const char *content_html,
+                          const char *content_text,
+                          const char *image_url);
+void engine_extract_query_snippet(const ArticleRecord *a,
+                                  const char *query,
+                                  char *out_buf,
+                                  size_t out_cap);
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out);
 void search_response_free(SearchResponse *res);
 double engine_dpp_rerank(ScoredArticle *pool, size_t count, double lambda);

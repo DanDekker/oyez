@@ -389,7 +389,11 @@ static void serialize_rank_page_diagnostic(Buffer *buf, const SpectralSequenceSt
                 rank->derived_pages_computed ? "true" : "false");
 }
 
-static void serialize_article(Buffer *buf, const ArticleRecord *a, double score, int include_content) {
+static void serialize_article_with_query(Buffer *buf,
+                                         const ArticleRecord *a,
+                                         double score,
+                                         int include_content,
+                                         const char *query) {
   buffer_text(buf, "{");
   buffer_format(buf, "\"id\":%u,\"feed_id\":%u,", a->id, a->feed_id);
   buffer_text(buf, "\"guid\":"); json_cstr(buf, a->guid); buffer_text(buf, ",");
@@ -397,6 +401,13 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
   buffer_text(buf, "\"url\":"); json_cstr(buf, a->url); buffer_text(buf, ",");
   buffer_text(buf, "\"author\":"); json_cstr(buf, a->author); buffer_text(buf, ",");
   buffer_text(buf, "\"summary\":"); json_cstr(buf, a->summary); buffer_text(buf, ",");
+  if(query && query[0] != '\0') {
+    char snippet[280];
+    engine_extract_query_snippet(a, query, snippet, sizeof(snippet));
+    buffer_text(buf, "\"match_snippet\":");
+    json_cstr(buf, snippet);
+    buffer_text(buf, ",");
+  }
   if(include_content) {
     buffer_text(buf, "\"content_text\":"); json_cstr(buf, a->content_text); buffer_text(buf, ",");
     buffer_text(buf, "\"content_html\":"); json_cstr(buf, a->content_html); buffer_text(buf, ",");
@@ -480,6 +491,10 @@ static void serialize_article(Buffer *buf, const ArticleRecord *a, double score,
                 score);
 }
 
+static void serialize_article(Buffer *buf, const ArticleRecord *a, double score, int include_content) {
+  serialize_article_with_query(buf, a, score, include_content, NULL);
+}
+
 static void serialize_feed(Buffer *buf, const FeedRecord *f) {
   buffer_text(buf, "{");
   buffer_format(buf, "\"id\":%u,", f->id);
@@ -524,7 +539,7 @@ int http_handle_request(ServerContext *ctx,
   if(strcmp(method, "GET") == 0 && (strcmp(path, "/console") == 0 || strcmp(path, "/index.html") == 0)) {
     static const char *const k_console_html_head =
       "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-      "<title>Oyez // C23 Finite Poset &amp; Ideal Analytics</title>"
+      "<title>Oyez // C99 Finite Poset &amp; Ideal Analytics</title>"
       "<style>"
       "body{margin:0;background:#080b11;color:#e2e8f0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}"
       "header{padding:14px 20px;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;background:#0b111e}"
@@ -539,8 +554,8 @@ int http_handle_request(ServerContext *ctx,
       ".art a{color:#38bdf8;text-decoration:none;font-weight:600}"
       ".badge{display:inline-block;padding:1px 6px;border-radius:3px;background:#1e293b;color:#7dd3fc;font-size:11px;margin-right:4px}"
       "</style></head><body>"
-      "<header><h1>OYEZ // C23 FINITE POSET &amp; IDEAL ANALYTICS</h1>"
-      "<div id=\"hdr-meta\">Loading C23 ontology engine...</div></header>"
+      "<header><h1>OYEZ // C99 FINITE POSET &amp; IDEAL ANALYTICS</h1>"
+      "<div id=\"hdr-meta\">Loading C99 ontology engine...</div></header>"
       "<div class=\"grid\"><div>"
       "<div class=\"card\"><h2>One-Machine Appliance &amp; 12-Invariant Self-Check</h2><div id=\"app-stats\"></div>"
       "<div style=\"margin-top:8px\"><button onclick=\"runAutoSweep()\" style=\"width:100%\">Run Autonomous Sweep (UCB1 + Watchpoints)</button></div></div>"
@@ -617,7 +632,7 @@ int http_handle_request(ServerContext *ctx,
     size_t cat_count = 0;
     catalog_entries(&cat_count);
     buffer_format(out_json,
-                  "{\"name\":\"oyez\",\"version\":\"2.0.0-c23\",\"language\":\"C23\",\"status\":\"ok\","
+                  "{\"name\":\"oyez\",\"version\":\"2.0.0-c99\",\"language\":\"C99\",\"status\":\"ok\","
                   "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu}",
                   cat_count,
                   eng->feed_count,
@@ -2027,7 +2042,7 @@ int http_handle_request(ServerContext *ctx,
     catalog_entries(&cat_count);
 
     buffer_format(out_json,
-                  "{\"appliance\":\"oyez-one-machine-c23\",\"status\":\"%s\","
+                  "{\"appliance\":\"oyez-one-machine-c99\",\"status\":\"%s\","
                   "\"status_deprecated\":true,"
                   "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu,"
                   "\"index_generation\":%llu,\"m1_tokenizer_vocab_size\":%u,\"m1_tokenizer_sha256\":",
@@ -2209,7 +2224,7 @@ int http_handle_request(ServerContext *ctx,
                   res.total, res.count, res.query_time_ms);
     for(size_t i = 0; i < res.count; ++i) {
       if(i > 0) buffer_text(out_json, ",");
-      serialize_article(out_json, res.hits[i].article, res.hits[i].score, 0);
+      serialize_article_with_query(out_json, res.hits[i].article, res.hits[i].score, 0, aq.query);
     }
     buffer_text(out_json, "]}");
     search_response_free(&res);
@@ -2244,16 +2259,73 @@ int http_handle_request(ServerContext *ctx,
     return 0;
   }
 
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/extract") == 0) {
-    char *html = malloc(32768u);
+  if(strcmp(method, "POST") == 0 && strncmp(path, "/api/v1/articles/", 17u) == 0 &&
+     strstr(path + 17u, "/enrich") != NULL) {
+    uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
+    const ArticleRecord *a = engine_get_article_by_id(eng, id);
+    if(!a) {
+      *out_status = 404;
+      buffer_text(out_json, "{\"error\":\"article_not_found\"}");
+      return 0;
+    }
+    char *html = malloc(65536u);
     if(!html) {
       *out_status = 500;
       buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
       return 0;
     }
     char url[512];
-    json_extract_field(body, body_len, "html", html, 32768u);
+    json_extract_field(body, body_len, "html", html, 65536u);
     json_extract_field(body, body_len, "url", url, sizeof(url));
+    if(url[0] == '\0' && a->url) {
+      snprintf(url, sizeof(url), "%s", a->url);
+    }
+
+    Buffer fetched;
+    buffer_init(&fetched);
+    const char *src_html = html;
+    size_t src_len = strlen(html);
+    if(src_len == 0 && url[0] != '\0') {
+      if(http_fetch_url(url, &fetched) == 0) {
+        src_html = fetched.data;
+        src_len = fetched.len;
+      }
+    }
+    if(src_len == 0) {
+      free(html);
+      buffer_free(&fetched);
+      *out_status = 400;
+      buffer_text(out_json, "{\"error\":\"enrichment_source_unavailable\"}");
+      return 0;
+    }
+
+    ExtractedContent ex;
+    readability_extract(src_html, src_len, url, &ex);
+    int upgraded = engine_enrich_article(eng, id, ex.byline, ex.excerpt, ex.markdown,
+                                         ex.text_content, ex.lead_image_url);
+    readability_free(&ex);
+    free(html);
+    buffer_free(&fetched);
+
+    const ArticleRecord *updated = engine_get_article_by_id(eng, id);
+    buffer_format(out_json, "{\"status\":\"enriched\",\"upgraded\":%s,\"article\":",
+                  upgraded > 0 ? "true" : "false");
+    serialize_article(out_json, updated, 1.0, 1);
+    buffer_text(out_json, "}");
+    return 0;
+  }
+
+  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/extract") == 0) {
+    char *html = malloc(65536u);
+    if(!html) {
+      *out_status = 500;
+      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
+      return 0;
+    }
+    char url[512], aid_str[16];
+    json_extract_field(body, body_len, "html", html, 65536u);
+    json_extract_field(body, body_len, "url", url, sizeof(url));
+    json_extract_field(body, body_len, "article_id", aid_str, sizeof(aid_str));
 
     Buffer fetched;
     buffer_init(&fetched);
@@ -2275,6 +2347,13 @@ int http_handle_request(ServerContext *ctx,
 
     ExtractedContent ex;
     readability_extract(src_html, src_len, url, &ex);
+    if(aid_str[0] != '\0') {
+      uint32_t aid = (uint32_t)strtoul(aid_str, NULL, 10);
+      if(aid > 0u) {
+        engine_enrich_article(eng, aid, ex.byline, ex.excerpt, ex.markdown,
+                              ex.text_content, ex.lead_image_url);
+      }
+    }
     ExtractedEntities ent;
     entities_extract(ex.title, ex.excerpt, ex.text_content, NULL, NULL, 0, &ent);
 
@@ -2699,7 +2778,7 @@ int http_server_listen(ServerContext *ctx) {
     pthread_detach(auto_tid);
   }
 
-  printf("oyez c23 server listening on http://127.0.0.1:%u (feeds=%zu, articles=%zu, rules=%zu)\n",
+  printf("oyez c99 server listening on http://127.0.0.1:%u (feeds=%zu, articles=%zu, rules=%zu)\n",
          ctx->port ? ctx->port : 8787u,
          ctx->engine->feed_count,
          ctx->engine->article_count,
