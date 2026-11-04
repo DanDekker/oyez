@@ -16,6 +16,19 @@ typedef struct {
 int http_fetch_url(const char *url, Buffer *out);
 /* Resolves the host and rejects local, private, and non-global destinations. */
 int http_url_is_public(const char *url);
+int http_resolve_redirect_url(const char *base_url,
+                              const char *location,
+                              char *out,
+                              size_t out_cap);
+int http_client_exchange_fd(int fd,
+                            const char *host,
+                            uint16_t port,
+                            int default_port,
+                            const char *request_path,
+                            int *out_status,
+                            char *out_location,
+                            size_t location_cap,
+                            Buffer *out_body);
 int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted);
 size_t engine_poll_all(OyezEngine *engine, size_t max_feeds);
 size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count);
