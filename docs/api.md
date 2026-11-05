@@ -45,13 +45,21 @@ curl 'http://localhost:8787/api/v1/feed.xml?category=ai'
 
 | Method and path | Description |
 | --- | --- |
-| `POST /api/v1/catalog/seed` | Add catalog feeds to the index |
-| `POST /api/v1/feeds/poll` | Poll feeds and save the snapshot |
-| `POST /api/v1/extract` | Extract text and entities from HTML or a URL |
+| `POST /api/v1/catalog/seed` | Add catalog feeds to the index; accepts optional `region` and `country` (query string or JSON body) |
+| `POST /api/v1/feeds/poll` | Poll feeds and save the snapshot; accepts optional `limit` (query string or JSON body, default `16`) |
+| `POST /api/v1/articles/:id/enrich` | Enrich an indexed article in place from `{"html":"..."}`, `{"url":"..."}`, or its stored source URL |
+| `POST /api/v1/extract` | Extract text, markdown, and entities from HTML or a URL; accepts optional `article_id` for in-place enrichment |
 | `POST /api/v1/tokenize` | Encode text with the M1 tokenizer |
 | `POST /api/v1/automation/rules` | Create or update a watchpoint |
-| `DELETE /api/v1/automation/rules?id=...` | Delete a watchpoint |
-| `POST /api/v1/automation/run` | Evaluate watchpoints and optionally poll feeds |
+| `DELETE /api/v1/automation/rules` | Delete a watchpoint by `id` (query string or JSON body) |
+| `POST /api/v1/automation/run` | Evaluate watchpoints and optionally poll feeds via `poll_batch` and `auto_poll_interval_sec` (query string or JSON body) |
+
+Every HTTP route can also be executed directly in-process from the command line without starting the TCP server:
+
+```sh
+./build/oyez api '/api/v1/ontology?sub=ai&sup=knowledge-economy&a=ai&b=space'
+./build/oyez api /api/v1/catalog/seed '{"region":"east-asia","country":"TW"}'
+```
 
 These endpoints have no built-in authentication. Restrict access to trusted clients. For parameter and response details, consult the handlers in [http_server.c](../src/http_server.c).
 

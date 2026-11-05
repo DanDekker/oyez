@@ -6,6 +6,7 @@ Oyez combines a production-oriented feed and search pipeline with an experimenta
 
 | Module | Source | Responsibility |
 | --- | --- | --- |
+| Umbrella header and static archive | [`oyez.h`](../src/oyez.h), `build/liboyez.a` | Single-header C/C++ public API surface (`extern "C"` compatible) and static library target (`make lib`) |
 | Core, hashing, and numerical math | [`core.h`](../src/core.h), [`core.c`](../src/core.c) | Buffers, JSON escaping, clocks, hashing, 128-bit limb multiplication, SWAR bit operations, and IEEE-754 binary64 transcendental math (`f64_sqrt`, `f64_ln`, `f64_exp`, `f64_atan`, `f64_cos`) |
 | Checksums and wire format | [`checksum.h`](../src/checksum.h), [`checksum.c`](../src/checksum.c), [`wire.h`](../src/wire.h) | CRC-32, SHA-256, and little-endian binary encoding |
 | Tokenizers | [`token.h`](../src/token.h), [`token.c`](../src/token.c), [`m1_tokenizer.h`](../src/m1_tokenizer.h), [`m1_tokenizer.c`](../src/m1_tokenizer.c) | Byte-level BPE and the fixed-vocabulary M1 pre-segmenter |

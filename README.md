@@ -23,7 +23,7 @@ You need a POSIX environment, `make`, and a compiler that accepts `-std=c99`. Th
 ```sh
 git clone https://github.com/DanDekker/oyez.git
 cd oyez
-make                 # builds build/oyez and build/test_oyez
+make                 # builds build/liboyez.a, build/oyez, and build/test_oyez
 make test            # runs the test suite
 ./build/oyez serve 8787
 ```
@@ -49,6 +49,7 @@ On first launch, Oyez initializes the feed catalog and tokenizer under `data/` i
 | `GET /api/v1/articles` | Search and filter indexed articles |
 | `GET /api/v1/articles/:id` | Retrieve an article |
 | `GET /api/v1/articles/:id/similar` | Find similar articles |
+| `POST /api/v1/articles/:id/enrich` | Enrich an article in place from HTML or its source URL |
 | `GET /api/v1/feed.xml` | Export an Atom feed |
 | `GET /api/v1/stats` | Inspect index and category statistics |
 | `POST /api/v1/extract` | Extract content from HTML or a URL |
@@ -60,15 +61,41 @@ The API also exposes ontology, temporal, geographic, and domain-specific analyti
 ## Command line
 
 ```sh
-./build/oyez seed          # add catalog feeds to the snapshot
-./build/oyez poll 15       # poll up to 15 feeds
-./build/oyez stats         # show index and engine statistics
-./build/oyez tui           # print the terminal dashboard
-./build/oyez automate      # evaluate watchpoint rules
-make bench                 # run the synthetic benchmark suite
+./build/oyez seed [region] [country]      # add catalog feeds to the snapshot
+./build/oyez poll [limit]                 # poll up to limit feeds (default: 12)
+./build/oyez search <query> [category]    # search indexed articles via BM25+ & presheaf fibers
+./build/oyez extract <html_or_url>        # extract readable text, markdown, and entities
+./build/oyez tokenize <text>              # encode text with the M1 BPE tokenizer
+./build/oyez api <path> [json_body]       # run any HTTP API route in-process
+./build/oyez stats                        # show index and engine statistics
+./build/oyez tui                          # print the terminal dashboard
+./build/oyez automate [batch]             # evaluate watchpoints and optionally poll feeds
+make bench                                # run the synthetic benchmark suite
 ```
 
 The benchmark uses generated articles and repeated searches, including cached queries; it is useful for comparing changes on the same machine, not as a measure of real-world throughput.
+
+## Embedding as a C/C++ library
+
+Build the static library (`build/liboyez.a`) with `make lib` and include the single umbrella header [`src/oyez.h`](src/oyez.h):
+
+```c
+#include "oyez.h"
+
+OyezEngine eng;
+engine_init(&eng);
+engine_seed_catalog(&eng, "east-asia", "TW");
+
+ArticleQuery q;
+article_query_init(&q);
+q.query = "semiconductor";
+q.category = "knowledge-economy";
+
+SearchResponse res;
+engine_search(&eng, &q, &res);
+search_response_free(&res);
+engine_free(&eng);
+```
 
 ## Architecture
 
@@ -83,6 +110,7 @@ The benchmark uses generated articles and repeated searches, including cached qu
 
 | Component | Source |
 | --- | --- |
+| Umbrella C/C++ header and static archive | [oyez.h](src/oyez.h), `build/liboyez.a` |
 | Feed catalog and fetching | [catalog.c](src/catalog.c), [url_fetch.c](src/url_fetch.c) |
 | Feed parsing and text extraction | [markup.c](src/markup.c) |
 | In-memory index, ranking, snapshots, and automation | [index_engine.c](src/index_engine.c) |
