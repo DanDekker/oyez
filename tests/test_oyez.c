@@ -2366,6 +2366,94 @@ static void test_deep_information_retrieval_and_enrichment(void) {
   engine_free(&eng);
 }
 
+static void test_unified_developer_surface(void) {
+  /* 1. Umbrella header version macros */
+  assert(OYEZ_VERSION_MAJOR == 2);
+  assert(OYEZ_VERSION_MINOR == 4);
+  assert(OYEZ_VERSION_PATCH == 0);
+  assert(strcmp(OYEZ_VERSION_STRING, "2.4.0") == 0);
+
+  /* 2. article_query_init sensible defaults */
+  ArticleQuery q;
+  article_query_init(&q);
+  assert(q.use_category_morphism == 1);
+  assert(q.diversify_mmr == 1);
+  assert(q.mmr_lambda > 0.64 && q.mmr_lambda < 0.66);
+  assert(q.limit == 40u);
+  assert(q.offset == 0u);
+  assert(q.query == NULL && q.category == NULL);
+
+  /* 3. Unified query/JSON parameter handling in POST /api/v1/catalog/seed */
+  OyezEngine eng;
+  engine_init(&eng);
+  ServerContext ctx = {&eng, NULL, NULL, 0};
+  int status = 0;
+  Buffer out;
+
+  assert(http_handle_request(&ctx, "POST", "/api/v1/catalog/seed?region=east-asia&country=TW",
+                             "", 0, &status, &out) == 0);
+  assert(status == 200);
+  assert(eng.feed_count > 0u && eng.feed_count < 100u);
+  for(size_t i = 0; i < eng.feed_count; ++i) {
+    assert(eng.feeds[i].region == REGION_EAST_ASIA);
+    assert(strcmp(eng.feeds[i].country, "TW") == 0);
+  }
+  buffer_free(&out);
+
+  /* 4. Route table edge cases: unknown POST article sub-route & missing tokenizer */
+  assert(http_handle_request(&ctx, "POST", "/api/v1/articles/1/unknown", "{}", 2u, &status, &out) == 0);
+  assert(status == 404);
+  buffer_free(&out);
+
+  assert(http_handle_request(&ctx, "POST", "/api/v1/tokenize", "{\"text\":\"test\"}", 15u, &status, &out) == 0);
+  assert(status == 404);
+  buffer_free(&out);
+
+  /* 5. Live HTTP socket write-locked POST /api/v1/articles/:id/enrich */
+  uint32_t aid = 0;
+  int ins = 0;
+  assert(engine_ingest_article(&eng,
+                               eng.feeds[0].id,
+                               "socket-enrich-1",
+                               "Taiwan Semiconductor Dispatch",
+                               "https://tw.example/1",
+                               "Bureau",
+                               "Brief dispatch.",
+                               "<p>Brief dispatch.</p>",
+                               "2026-11-04T00:00:00Z",
+                               1762214400000ULL,
+                               "",
+                               NULL,
+                               0,
+                               &aid,
+                               &ins) == 0 && ins == 1);
+
+  const char *enrich_json =
+      "{\"html\":\"<article><p>Expanded semiconductor lithography report covering CVE-2026-3141 and TSMC wafer capacity in Taipei.</p></article>\"}";
+  char req[512];
+  int n = snprintf(req, sizeof(req),
+                   "POST /api/v1/articles/%u/enrich HTTP/1.1\r\n"
+                   "Host: localhost\r\n"
+                   "Content-Length: %zu\r\n"
+                   "Connection: close\r\n\r\n%s",
+                   aid, strlen(enrich_json), enrich_json);
+  assert(n > 0 && (size_t)n < sizeof(req));
+  Buffer sock_resp;
+  http_socket_exchange(&ctx, req, 0, &sock_resp);
+  assert(strstr(sock_resp.data, "HTTP/1.1 200 OK") != NULL);
+  assert(strstr(sock_resp.data, "\"status\":\"enriched\"") != NULL);
+  assert(strstr(sock_resp.data, "CVE-2026-3141") != NULL);
+  buffer_free(&sock_resp);
+
+  q.query = "3141";
+  SearchResponse sres;
+  assert(engine_search(&eng, &q, &sres) == 0);
+  assert(sres.total == 1u && sres.hits[0].article->id == aid);
+  search_response_free(&sres);
+
+  engine_free(&eng);
+}
+
 int main(void) {
   test_checksum_and_wire();
   test_bpe_and_m1_tokenizer();
@@ -2377,6 +2465,7 @@ int main(void) {
   test_url_fetch_redirect_policy();
   test_one_machine_consolidation_and_appliance();
   test_deep_information_retrieval_and_enrichment();
+  test_unified_developer_surface();
   printf("ALL C99 OYEZ TESTS PASSED\n");
   return 0;
 }
