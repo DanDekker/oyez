@@ -6,28 +6,23 @@
 #include <sys/stat.h>
 
 static void print_usage(FILE *out) {
-  fputs("Usage: oyez [command] [argument]\n"
+  fputs("Usage: oyez [command] [arguments]\n"
         "\n"
-        "  serve [port]     Start the HTTP server (default: 8787)\n"
-        "  seed             Add catalog feeds to the snapshot\n"
-        "  poll [limit]     Poll feeds (default: 12)\n"
-        "  automate [batch] Evaluate watchpoints and optionally poll feeds\n"
-        "  weather          Show weather diagnostics\n"
-        "  stats            Show engine statistics\n"
-        "  tui              Show the terminal dashboard\n"
-        "  bench            Run the synthetic benchmarks\n"
-        "  help             Show this help\n",
+        "  serve [port]               Start the HTTP server (default: 8787)\n"
+        "  seed [region] [country]    Add catalog feeds to the snapshot\n"
+        "  poll [limit]               Poll feeds (default: 12)\n"
+        "  search <query> [category]  Search indexed articles via BM25+ & presheaf fibers\n"
+        "  extract <html_or_url>      Extract readable content and domain entities\n"
+        "  tokenize <text>            Encode text with the M1 BPE tokenizer\n"
+        "  api <path> [json_body]     Execute any HTTP API endpoint in-process\n"
+        "  automate [batch]           Evaluate watchpoints and optionally poll feeds\n"
+        "  weather                    Show weather diagnostics\n"
+        "  stats                      Show engine statistics\n"
+        "  tui                        Show the terminal dashboard\n"
+        "  bench                      Run the synthetic benchmarks\n"
+        "  version                    Show version information\n"
+        "  help                       Show this help\n",
         out);
-}
-
-static int known_command(const char *cmd) {
-  const char *commands[] = {
-      "serve", "seed", "poll", "automate", "watch", "weather",
-      "stats", "status", "appliance", "machine", "tui", "top", "bench"};
-  for(size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-    if(strcmp(cmd, commands[i]) == 0) return 1;
-  }
-  return 0;
 }
 
 static int parse_port(const char *value, uint16_t *port) {
@@ -274,266 +269,415 @@ static int run_bench(void) {
   return 0;
 }
 
+typedef struct {
+  OyezEngine eng;
+  M1Tokenizer tok;
+  const char *snap_path;
+  const char *tok_path;
+} CliRuntime;
+
+static void cli_runtime_init(CliRuntime *rt) {
+  ensure_data_dir();
+  rt->snap_path = "data/oyez.ix";
+  rt->tok_path = "data/oyez.m1";
+
+  engine_init(&rt->eng);
+  if(engine_load_snapshot(&rt->eng, rt->snap_path) != 0) {
+    engine_seed_catalog(&rt->eng, NULL, NULL);
+    engine_save_snapshot(&rt->eng, rt->snap_path);
+  }
+
+  m1_tokenizer_init(&rt->tok);
+  if(m1_tokenizer_load(&rt->tok, rt->tok_path) != 0) {
+    train_default_m1(&rt->tok);
+    m1_tokenizer_save(&rt->tok, rt->tok_path);
+  }
+}
+
+static void cli_runtime_free(CliRuntime *rt) {
+  m1_tokenizer_free(&rt->tok);
+  engine_free(&rt->eng);
+}
+
+static int cmd_serve(CliRuntime *rt, int argc, char **argv) {
+  uint16_t port = 8787u;
+  const char *port_arg = argc > 2 ? argv[2] : getenv("PORT");
+  if(port_arg && (argc > 2 || port_arg[0]) && !parse_port(port_arg, &port)) {
+    fprintf(stderr, "Invalid port: %s (expected 1-65535)\n", port_arg);
+    return 2;
+  }
+  ServerContext ctx = {&rt->eng, &rt->tok, rt->snap_path, port};
+  return http_server_listen(&ctx);
+}
+
+static int cmd_seed(CliRuntime *rt, int argc, char **argv) {
+  const char *region = (argc > 2 && argv[2][0]) ? argv[2] : NULL;
+  const char *country = (argc > 3 && argv[3][0]) ? argv[3] : NULL;
+  size_t added = engine_seed_catalog(&rt->eng, region, country);
+  engine_save_snapshot(&rt->eng, rt->snap_path);
+  printf("seeded %zu new feeds (total=%zu)\n", added, rt->eng.feed_count);
+  return 0;
+}
+
+static int cmd_poll(CliRuntime *rt, int argc, char **argv) {
+  size_t limit = argc > 2 ? (size_t)strtoul(argv[2], NULL, 10) : 12u;
+  size_t ins = engine_poll_all(&rt->eng, limit);
+  engine_save_snapshot(&rt->eng, rt->snap_path);
+  printf("polled %zu feeds -> ingested %zu articles (total=%zu)\n",
+         limit, ins, rt->eng.article_count);
+  return 0;
+}
+
+static int cmd_search(CliRuntime *rt, int argc, char **argv) {
+  ArticleQuery aq;
+  article_query_init(&aq);
+  aq.query = (argc > 2 && argv[2][0]) ? argv[2] : NULL;
+  aq.category = (argc > 3 && argv[3][0]) ? argv[3] : NULL;
+  aq.limit = 15u;
+
+  SearchResponse res;
+  engine_search(&rt->eng, &aq, &res);
+  printf("total: %zu | returned: %zu | query_time_ms: %.4f\n",
+         res.total, res.count, res.query_time_ms);
+  for(size_t i = 0; i < res.count; ++i) {
+    const ArticleRecord *a = res.hits[i].article;
+    printf("  [%u] (score=%.3f, %s/%s) %s\n      %s\n",
+           a->id,
+           res.hits[i].score,
+           a->feed_country[0] ? a->feed_country : "GL",
+           news_type_slug(a->news_type),
+           a->title ? a->title : "",
+           a->url ? a->url : "");
+  }
+  search_response_free(&res);
+  return 0;
+}
+
+static int cmd_extract(CliRuntime *rt, int argc, char **argv) {
+  if(argc <= 2 || !argv[2][0]) {
+    fprintf(stderr, "Usage: oyez extract <html_or_url>\n");
+    return 2;
+  }
+  const char *arg = argv[2];
+  Buffer body_buf;
+  buffer_init(&body_buf);
+  if(strncmp(arg, "http://", 7u) == 0 || strncmp(arg, "https://", 8u) == 0) {
+    buffer_text(&body_buf, "{\"url\":");
+    json_cstr(&body_buf, arg);
+    buffer_text(&body_buf, "}");
+  } else {
+    buffer_text(&body_buf, "{\"html\":");
+    json_cstr(&body_buf, arg);
+    buffer_text(&body_buf, "}");
+  }
+  ServerContext ctx = {&rt->eng, &rt->tok, rt->snap_path, 0};
+  int status = 200;
+  Buffer out;
+  http_handle_request(&ctx, "POST", "/api/v1/extract",
+                      body_buf.data ? body_buf.data : "{}", body_buf.len,
+                      &status, &out);
+  printf("%s\n", out.data ? out.data : "{}");
+  buffer_free(&out);
+  buffer_free(&body_buf);
+  return status >= 400 ? 1 : 0;
+}
+
+static int cmd_tokenize(CliRuntime *rt, int argc, char **argv) {
+  if(argc <= 2) {
+    fprintf(stderr, "Usage: oyez tokenize <text>\n");
+    return 2;
+  }
+  const char *text = argv[2];
+  uint32_t *tokens = NULL;
+  size_t count = 0;
+  m1_tokenizer_encode(&rt->tok, (const uint8_t *)text, strlen(text), &tokens, &count);
+  printf("{\"vocab_size\":%u,\"sha256\":\"%s\",\"token_count\":%zu,\"tokens\":[",
+         m1_tokenizer_vocab_size(&rt->tok), rt->tok.sha256, count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) putchar(',');
+    printf("%u", tokens[i]);
+  }
+  printf("]}\n");
+  free(tokens);
+  return 0;
+}
+
+static int cmd_api(CliRuntime *rt, int argc, char **argv) {
+  if(argc <= 2 || !argv[2][0]) {
+    fprintf(stderr, "Usage: oyez api <path> [json_body]\n");
+    return 2;
+  }
+  const char *target = argv[2];
+  const char *body = argc > 3 ? argv[3] : "";
+  const char *method = argc > 3 ? "POST" : "GET";
+  ServerContext ctx = {&rt->eng, &rt->tok, rt->snap_path, 0};
+  int status = 200;
+  Buffer out;
+  http_handle_request(&ctx, method, target, body, strlen(body), &status, &out);
+  printf("%s\n", out.data ? out.data : "");
+  buffer_free(&out);
+  return status >= 400 ? 1 : 0;
+}
+
+static int cmd_automate(CliRuntime *rt, int argc, char **argv) {
+  size_t batch = argc > 2 ? (size_t)strtoul(argv[2], NULL, 10) : 0u;
+  BanditFeedPriority prio[8];
+  size_t sel = engine_bandit_select_feeds(&rt->eng, prio, 8u);
+  printf("UCB1 Bandit Top-%zu Priority Feeds:\n", sel);
+  for(size_t i = 0; i < sel; ++i) {
+    printf("  [%zu] feed_id=%u ucb1=%.3f yield=%.2f cat=%s (%s)\n",
+           i + 1u, prio[i].feed_id, prio[i].ucb1_score, prio[i].empirical_yield,
+           prio[i].category, prio[i].title);
+  }
+  size_t ins = 0;
+  if(batch > 0u) {
+    ins = engine_poll_bandit_auto(&rt->eng, batch, 4u);
+  } else {
+    engine_evaluate_all_automation_rules(&rt->eng);
+    rt->eng.auto_cycles_completed++;
+  }
+  engine_save_snapshot(&rt->eng, rt->snap_path);
+  printf("Automation cycle #%llu complete: newly_ingested=%zu active_rules=%zu total_alerts=%zu\n",
+         (unsigned long long)rt->eng.auto_cycles_completed, ins,
+         rt->eng.automation_rule_count, rt->eng.automation_alert_count);
+  size_t show = rt->eng.automation_alert_count < 5u ? rt->eng.automation_alert_count : 5u;
+  for(size_t k = 0; k < show; ++k) {
+    size_t idx = (rt->eng.automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
+    const AutomationAlert *al = &rt->eng.automation_alerts[idx];
+    printf("  ALERT #%llu [rule=%s score=%.2f]: %s (%s)\n",
+           (unsigned long long)al->alert_id, al->rule_name, al->trigger_score,
+           al->article_title, al->weather_severity_slug);
+  }
+  return 0;
+}
+
+static int cmd_weather(CliRuntime *rt, int argc, char **argv) {
+  (void)argc; (void)argv;
+  WeatherPhysicsState phys;
+  ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &phys);
+  printf("Weather/Climate Fiber Articles: %u | Lorenz-63 Attractor: (%.3f, %.3f, %.3f)\n",
+         bitset_popcount(&rt->eng.by_closure_ontology[ONTO_CLIMATE]),
+         phys.lorenz_state[0], phys.lorenz_state[1], phys.lorenz_state[2]);
+  printf("Max Lyapunov lambda_1: %.4f | Kaplan-Yorke Dim D_KY: %.4f | Horizon: %.3f\n",
+         phys.lyapunov_max, phys.kaplan_yorke_dim, phys.predictability_horizon);
+  printf("Saturation Vapor e_s: %.2f hPa | Wet-Bulb T_w: %.2f C | Rossby K_s: %.2f (blocking=%s)\n",
+         phys.saturation_vapor_hpa, phys.wet_bulb_celsius, phys.rossby_stationary_k,
+         phys.omega_blocking_regime ? "YES" : "NO");
+  return 0;
+}
+
+static int cmd_stats(CliRuntime *rt, int argc, char **argv) {
+  (void)argc; (void)argv;
+  EngineApplianceState app;
+  engine_appliance_state(&rt->eng, &app);
+  printf("feeds: %zu\narticles: %zu\ninverted_terms: %zu\nm1_vocab: %u\nm1_sha256: %s\n"
+         "consistency_checks: %u/%u (%s)\nmax_numerical_residual: %.3e\n"
+         "theorems_verified: %u/%u (%s)\nmax_numerical_defect: %.3e\n"
+         "resident_memory_bytes: %zu (%.2f MB)\narena_used_bytes: %zu / %zu (%zu blocks)\n"
+         "inverted_index_bytes: %zu\nbitset_fiber_bytes: %zu\nlsh_and_dedup_bytes: %zu\n"
+         "automation_rules: %zu\nautomation_alerts: %zu\n",
+         rt->eng.feed_count,
+         rt->eng.article_count,
+         rt->eng.inv_count,
+         m1_tokenizer_vocab_size(&rt->tok),
+         rt->tok.sha256,
+         app.checks_passed,
+         app.checks_total,
+         app.all_checks_passed ? "PASS" : "DEGRADED",
+         app.max_numerical_residual,
+         app.checks_passed,
+         app.checks_total,
+         app.all_checks_passed ? "PASS" : "DEGRADED",
+         app.max_numerical_residual,
+         app.total_resident_bytes,
+         (double)app.total_resident_bytes / (1024.0 * 1024.0),
+         app.arena_bytes_used,
+         app.arena_bytes_capacity,
+         app.arena_block_count,
+         app.inverted_index_bytes,
+         app.bitset_fiber_bytes,
+         app.lsh_and_dedup_bytes,
+         app.active_watchpoint_rules,
+         app.total_watchpoint_alerts);
+  return 0;
+}
+
+static int cmd_tui(CliRuntime *rt, int argc, char **argv) {
+  (void)argc; (void)argv;
+  EngineApplianceState app;
+  engine_appliance_state(&rt->eng, &app);
+  double raw_s[ONTOLOGY_NODE_COUNT], clo_s[ONTOLOGY_NODE_COUNT];
+  for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    raw_s[i] = (double)bitset_popcount(&rt->eng.by_direct_ontology[i]);
+    clo_s[i] = (double)bitset_popcount(&rt->eng.by_closure_ontology[i]);
+  }
+  SheafCohomology sheaf;
+  ontology_sheaf_cohomology(raw_s, clo_s, &sheaf);
+  PersistenceBarcode barcode;
+  ontology_persistent_homology(raw_s, &barcode);
+  AdjunctionMonadState monad;
+  ontology_adjunction_monad(raw_s, &monad);
+  TemporalSheafState temp;
+  engine_temporal_sheaf(&rt->eng, &temp);
+  ToposState topos;
+  engine_topos_state(&rt->eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
+  WeatherPhysicsState wx_phys;
+  ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &wx_phys);
+
+  printf("\033[1;36m========================================================================\033[0m\n");
+  printf("\033[1;37m  OYEZ // C99 ONE-MACHINE AUTONOMOUS INTELLIGENCE APPLIANCE DASHBOARD\033[0m\n");
+  printf("\033[1;36m========================================================================\033[0m\n");
+  printf("  Feeds: \033[1;32m%zu\033[0m | Articles: \033[1;32m%zu\033[0m | Terms: \033[1;32m%zu\033[0m | M1 Vocab: \033[1;33m%u\033[0m\n",
+         rt->eng.feed_count, rt->eng.article_count, rt->eng.inv_count, m1_tokenizer_vocab_size(&rt->tok));
+  printf("  Resident RAM: \033[1;32m%.2f MB\033[0m (Arena: %.1f/%.1f KB | InvIdx: %.1f KB | Fibers: %.1f KB)\n",
+         (double)app.total_resident_bytes / (1024.0 * 1024.0),
+         (double)app.arena_bytes_used / 1024.0,
+         (double)app.arena_bytes_capacity / 1024.0,
+         (double)app.inverted_index_bytes / 1024.0,
+         (double)app.bitset_fiber_bytes / 1024.0);
+  printf("  Consistency Audit: %s%u/%u CHECKS %s\033[0m (Max Residual: %.2e | Gen: %llu)\n",
+         app.all_checks_passed ? "\033[1;32m" : "\033[1;31m",
+         app.checks_passed, app.checks_total,
+         app.all_checks_passed ? "PASS" : "DEGRADED",
+         app.max_numerical_residual, (unsigned long long)app.index_generation);
+  printf("------------------------------------------------------------------------\n");
+  printf("  \033[1;35m[Finite Poset, Ideal Algebra & Numerical Diagnostics]\033[0m\n");
+  printf("  Leinster Magnitude |C|_L : %8.4f   Euler Char chi(N(C)) : %d\n",
+         sheaf.leinster_magnitude, sheaf.euler_characteristic);
+  printf("  Fiedler Connectivity l_2 : %8.4f   Cochain ||d1*d0||_2  : %.2e\n",
+         sheaf.fiedler_eigenvalue, sheaf.cochain_exactness_norm);
+  printf("  Hodge Gradient ||d0*phi||: %8.2f   Hodge Solenoidal Curl: %8.2f\n",
+         sheaf.hodge_gradient_norm, sheaf.hodge_solenoidal_norm);
+  printf("  Hodge Coexact ||d1^T*psi|: %8.2f   Hodge Harmonic Resid : %8.2f\n",
+         sheaf.hodge_coexact_norm, sheaf.hodge_harmonic_norm);
+  printf("  1-Laplacian Trace Tr(L1) : %8.2f   Isbell Hull Defect   : %.2e\n",
+         sheaf.laplacian_1_trace, topos.isbell_envelope_defect);
+  printf("  Weighted Adjunction Resid: %.2e   Ideal Boundary Check : %s\n",
+         topos.tensor_hom_adjunction_defect, topos.leibniz_rule_holds ? "PASS" : "FAIL");
+  printf("  Cocone Adjunction Resid  : %.2e   Modal Closure j(M)=j(A): %s\n",
+         topos.cocone_adjunction_defect, topos.modal_closure_matches ? "MATCH" : "MISMATCH");
+  printf("  Sinkhorn W_eps / S_eps   : %.3f/%.3f  Fisher-Rao Geodesic  : %8.4f\n",
+         topos.sinkhorn_ot.entropic_wasserstein,
+         topos.sinkhorn_ot.sinkhorn_divergence,
+         topos.sinkhorn_ot.fisher_rao_geodesic);
+  printf("  Cheeger Const h(C)       : %8.4f   Cheeger-Buser Bound  : %s\n",
+         topos.sinkhorn_ot.cheeger_constant,
+         topos.sinkhorn_ot.cheeger_buser_holds ? "HOLDS" : "FAIL");
+  printf("  Rank-Page Euler Summary  : %d/%d/%d/%d    Page d_r^2 Residual : %.2e\n",
+         topos.rank_page_diagnostics.euler_e0,
+         topos.rank_page_diagnostics.euler_e1,
+         topos.rank_page_diagnostics.euler_e2,
+         topos.rank_page_diagnostics.euler_e_inf,
+         topos.rank_page_diagnostics.differential_nilpotency_defect);
+  printf("  Gauss-Bonnet sum K_GB    : %8.6f   Forman/Ollivier Curv : %.2f / %.3f\n",
+         topos.ricci_curv.gauss_bonnet_total,
+         topos.ricci_curv.forman_mean_curvature,
+         topos.ricci_curv.ollivier_mean_curvature);
+  printf("  Ihara Zeta zeta_C(0.15)  : %8.4f   Tropical Idem Defect : %.2e\n",
+         topos.zeta_tropical.ihara_zeta_val,
+         topos.zeta_tropical.tropical_idempotence_defect);
+  printf("  Rota-Baxter Id Defect    : %.2e   Atkinson Birkhoff Err: %.2e\n",
+         topos.rota_baxter.rota_baxter_identity_defect,
+         topos.rota_baxter.spitzer_birkhoff_defect);
+  printf("  Kleisli Monad Entropy    : %8.4f   Zig-Zag Defect       : %.2e\n",
+         monad.kleisli_entropy, monad.zig_zag_triangle_defect);
+  printf("  Temporal Sheaf Laplacian : %8.4f   Emerging Fiber       : %s\n",
+         temp.connection_laplacian_norm, ontology_node(temp.fastest_emerging_node)->slug);
+  printf("------------------------------------------------------------------------\n");
+  printf("  \033[1;33m[Atmospheric Physics (Lorenz-63 Chaos) & Autonomous Watchpoints]\033[0m\n");
+  printf("  Lorenz-63 Max Lyapunov   : %8.4f   Kaplan-Yorke Dim D_KY: %8.4f\n",
+         wx_phys.lyapunov_max, wx_phys.kaplan_yorke_dim);
+  printf("  Clausius-Clapeyron e_s   : %6.2f hPa  Stull Wet-Bulb T_w   : %6.2f C\n",
+         wx_phys.saturation_vapor_hpa, wx_phys.wet_bulb_celsius);
+  printf("  Rossby Stationary K_s    : %8.4f   Automation Rules/Hits: %zu / %zu\n",
+         wx_phys.rossby_stationary_k, rt->eng.automation_rule_count, rt->eng.automation_alert_count);
+  printf("------------------------------------------------------------------------\n");
+  printf("  \033[1;34m[Persistent Homology Filtration Barcode (N_eps(C))]\033[0m\n");
+  for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
+    printf("  eps=%.2f | V=%2u E=%3u T=%3u | beta_0=%2u beta_1=%2u | ",
+           barcode.steps[s].threshold_eps,
+           barcode.steps[s].f_vector[0],
+           barcode.steps[s].f_vector[1],
+           barcode.steps[s].f_vector[2],
+           barcode.steps[s].betti_0,
+           barcode.steps[s].betti_1);
+    uint32_t bars = barcode.steps[s].betti_0 + barcode.steps[s].betti_1;
+    if(bars > 24u) bars = 24u;
+    for(uint32_t b = 0; b < bars; ++b) putchar('#');
+    putchar('\n');
+  }
+  printf("\033[1;36m========================================================================\033[0m\n");
+  return 0;
+}
+
+typedef int (*CliCommandHandler)(CliRuntime *rt, int argc, char **argv);
+
+typedef struct {
+  const char *name;
+  CliCommandHandler handler;
+} CliCommand;
+
+static const CliCommand k_cli_commands[] = {
+  {"serve", cmd_serve},
+  {"seed", cmd_seed},
+  {"poll", cmd_poll},
+  {"search", cmd_search},
+  {"extract", cmd_extract},
+  {"tokenize", cmd_tokenize},
+  {"api", cmd_api},
+  {"query", cmd_api},
+  {"automate", cmd_automate},
+  {"watch", cmd_automate},
+  {"weather", cmd_weather},
+  {"stats", cmd_stats},
+  {"status", cmd_stats},
+  {"appliance", cmd_stats},
+  {"machine", cmd_stats},
+  {"tui", cmd_tui},
+  {"top", cmd_tui}
+};
+
+static const CliCommand *find_cli_command(const char *name) {
+  for(size_t i = 0; i < sizeof(k_cli_commands) / sizeof(k_cli_commands[0]); ++i) {
+    if(strcmp(k_cli_commands[i].name, name) == 0) return &k_cli_commands[i];
+  }
+  return NULL;
+}
+
 int main(int argc, char **argv) {
   const char *cmd = argc > 1 ? argv[1] : "serve";
   if(strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
     print_usage(stdout);
     return 0;
   }
-  if(!known_command(cmd)) {
+  if(strcmp(cmd, "version") == 0 || strcmp(cmd, "--version") == 0 || strcmp(cmd, "-v") == 0) {
+    printf("oyez %s\n", OYEZ_VERSION_STRING);
+    return 0;
+  }
+  if(strcmp(cmd, "bench") == 0) {
+    return run_bench();
+  }
+
+  const CliCommand *entry = find_cli_command(cmd);
+  if(!entry) {
     fprintf(stderr, "Unknown command: %s\n\n", cmd);
     print_usage(stderr);
     return 2;
   }
-  uint16_t port = 8787u;
+
+  /* Validate port before initializing the engine snapshot when running 'serve'. */
   if(strcmp(cmd, "serve") == 0) {
+    uint16_t port = 8787u;
     const char *port_arg = argc > 2 ? argv[2] : getenv("PORT");
     if(port_arg && (argc > 2 || port_arg[0]) && !parse_port(port_arg, &port)) {
       fprintf(stderr, "Invalid port: %s (expected 1-65535)\n", port_arg);
       return 2;
     }
   }
-  if(strcmp(cmd, "bench") == 0) {
-    return run_bench();
-  }
 
-  ensure_data_dir();
-  const char *snap_path = "data/oyez.ix";
-  const char *tok_path = "data/oyez.m1";
-
-  OyezEngine eng;
-  engine_init(&eng);
-  if(engine_load_snapshot(&eng, snap_path) != 0) {
-    engine_seed_catalog(&eng, NULL, NULL);
-    engine_save_snapshot(&eng, snap_path);
-  }
-
-  M1Tokenizer tok;
-  m1_tokenizer_init(&tok);
-  if(m1_tokenizer_load(&tok, tok_path) != 0) {
-    train_default_m1(&tok);
-    m1_tokenizer_save(&tok, tok_path);
-  }
-
-  if(strcmp(cmd, "seed") == 0) {
-    size_t added = engine_seed_catalog(&eng, NULL, NULL);
-    engine_save_snapshot(&eng, snap_path);
-    printf("seeded %zu new feeds (total=%zu)\n", added, eng.feed_count);
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  if(strcmp(cmd, "poll") == 0) {
-    size_t limit = argc > 2 ? (size_t)strtoul(argv[2], NULL, 10) : 12u;
-    size_t ins = engine_poll_all(&eng, limit);
-    engine_save_snapshot(&eng, snap_path);
-    printf("polled %zu feeds -> ingested %zu articles (total=%zu)\n", limit, ins, eng.article_count);
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  if(strcmp(cmd, "automate") == 0 || strcmp(cmd, "watch") == 0) {
-    size_t batch = argc > 2 ? (size_t)strtoul(argv[2], NULL, 10) : 0u;
-    BanditFeedPriority prio[8];
-    size_t sel = engine_bandit_select_feeds(&eng, prio, 8u);
-    printf("UCB1 Bandit Top-%zu Priority Feeds:\n", sel);
-    for(size_t i = 0; i < sel; ++i) {
-      printf("  [%zu] feed_id=%u ucb1=%.3f yield=%.2f cat=%s (%s)\n",
-             i + 1u, prio[i].feed_id, prio[i].ucb1_score, prio[i].empirical_yield,
-             prio[i].category, prio[i].title);
-    }
-    size_t ins = 0;
-    if(batch > 0u) {
-      ins = engine_poll_bandit_auto(&eng, batch, 4u);
-    } else {
-      engine_evaluate_all_automation_rules(&eng);
-      eng.auto_cycles_completed++;
-    }
-    engine_save_snapshot(&eng, snap_path);
-    printf("Automation cycle #%llu complete: newly_ingested=%zu active_rules=%zu total_alerts=%zu\n",
-           (unsigned long long)eng.auto_cycles_completed, ins,
-           eng.automation_rule_count, eng.automation_alert_count);
-    size_t show = eng.automation_alert_count < 5u ? eng.automation_alert_count : 5u;
-    for(size_t k = 0; k < show; ++k) {
-      size_t idx = (eng.automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
-      const AutomationAlert *al = &eng.automation_alerts[idx];
-      printf("  ALERT #%llu [rule=%s score=%.2f]: %s (%s)\n",
-             (unsigned long long)al->alert_id, al->rule_name, al->trigger_score,
-             al->article_title, al->weather_severity_slug);
-    }
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  if(strcmp(cmd, "weather") == 0) {
-    WeatherPhysicsState phys;
-    ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &phys);
-    printf("Weather/Climate Fiber Articles: %u | Lorenz-63 Attractor: (%.3f, %.3f, %.3f)\n",
-           bitset_popcount(&eng.by_closure_ontology[ONTO_CLIMATE]),
-           phys.lorenz_state[0], phys.lorenz_state[1], phys.lorenz_state[2]);
-    printf("Max Lyapunov lambda_1: %.4f | Kaplan-Yorke Dim D_KY: %.4f | Horizon: %.3f\n",
-           phys.lyapunov_max, phys.kaplan_yorke_dim, phys.predictability_horizon);
-    printf("Saturation Vapor e_s: %.2f hPa | Wet-Bulb T_w: %.2f C | Rossby K_s: %.2f (blocking=%s)\n",
-           phys.saturation_vapor_hpa, phys.wet_bulb_celsius, phys.rossby_stationary_k,
-           phys.omega_blocking_regime ? "YES" : "NO");
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  if(strcmp(cmd, "stats") == 0 || strcmp(cmd, "status") == 0 ||
-     strcmp(cmd, "appliance") == 0 || strcmp(cmd, "machine") == 0) {
-    EngineApplianceState app;
-    engine_appliance_state(&eng, &app);
-    printf("feeds: %zu\narticles: %zu\ninverted_terms: %zu\nm1_vocab: %u\nm1_sha256: %s\n"
-           "consistency_checks: %u/%u (%s)\nmax_numerical_residual: %.3e\n"
-           "theorems_verified: %u/%u (%s)\nmax_numerical_defect: %.3e\n"
-           "resident_memory_bytes: %zu (%.2f MB)\narena_used_bytes: %zu / %zu (%zu blocks)\n"
-           "inverted_index_bytes: %zu\nbitset_fiber_bytes: %zu\nlsh_and_dedup_bytes: %zu\n"
-           "automation_rules: %zu\nautomation_alerts: %zu\n",
-           eng.feed_count,
-           eng.article_count,
-           eng.inv_count,
-           m1_tokenizer_vocab_size(&tok),
-           tok.sha256,
-           app.checks_passed,
-           app.checks_total,
-           app.all_checks_passed ? "PASS" : "DEGRADED",
-           app.max_numerical_residual,
-           app.checks_passed,
-           app.checks_total,
-           app.all_checks_passed ? "PASS" : "DEGRADED",
-           app.max_numerical_residual,
-           app.total_resident_bytes,
-           (double)app.total_resident_bytes / (1024.0 * 1024.0),
-           app.arena_bytes_used,
-           app.arena_bytes_capacity,
-           app.arena_block_count,
-           app.inverted_index_bytes,
-           app.bitset_fiber_bytes,
-           app.lsh_and_dedup_bytes,
-           app.active_watchpoint_rules,
-           app.total_watchpoint_alerts);
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  if(strcmp(cmd, "tui") == 0 || strcmp(cmd, "top") == 0) {
-    EngineApplianceState app;
-    engine_appliance_state(&eng, &app);
-    double raw_s[ONTOLOGY_NODE_COUNT], clo_s[ONTOLOGY_NODE_COUNT];
-    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
-      raw_s[i] = (double)bitset_popcount(&eng.by_direct_ontology[i]);
-      clo_s[i] = (double)bitset_popcount(&eng.by_closure_ontology[i]);
-    }
-    SheafCohomology sheaf;
-    ontology_sheaf_cohomology(raw_s, clo_s, &sheaf);
-    PersistenceBarcode barcode;
-    ontology_persistent_homology(raw_s, &barcode);
-    AdjunctionMonadState monad;
-    ontology_adjunction_monad(raw_s, &monad);
-    TemporalSheafState temp;
-    engine_temporal_sheaf(&eng, &temp);
-    ToposState topos;
-    engine_topos_state(&eng, REGION_EAST_ASIA, REGION_EUROPE, ONTO_AI, ONTO_TECHNOLOGY, &topos);
-    WeatherPhysicsState wx_phys;
-    ontology_atmospheric_dynamics(26.0, 70.0, 18.0, 38.0, 3.5, &wx_phys);
-
-    printf("\033[1;36m========================================================================\033[0m\n");
-    printf("\033[1;37m  OYEZ // C99 ONE-MACHINE AUTONOMOUS INTELLIGENCE APPLIANCE DASHBOARD\033[0m\n");
-    printf("\033[1;36m========================================================================\033[0m\n");
-    printf("  Feeds: \033[1;32m%zu\033[0m | Articles: \033[1;32m%zu\033[0m | Terms: \033[1;32m%zu\033[0m | M1 Vocab: \033[1;33m%u\033[0m\n",
-           eng.feed_count, eng.article_count, eng.inv_count, m1_tokenizer_vocab_size(&tok));
-    printf("  Resident RAM: \033[1;32m%.2f MB\033[0m (Arena: %.1f/%.1f KB | InvIdx: %.1f KB | Fibers: %.1f KB)\n",
-           (double)app.total_resident_bytes / (1024.0 * 1024.0),
-           (double)app.arena_bytes_used / 1024.0,
-           (double)app.arena_bytes_capacity / 1024.0,
-           (double)app.inverted_index_bytes / 1024.0,
-           (double)app.bitset_fiber_bytes / 1024.0);
-    printf("  Consistency Audit: %s%u/%u CHECKS %s\033[0m (Max Residual: %.2e | Gen: %llu)\n",
-           app.all_checks_passed ? "\033[1;32m" : "\033[1;31m",
-           app.checks_passed, app.checks_total,
-           app.all_checks_passed ? "PASS" : "DEGRADED",
-           app.max_numerical_residual, (unsigned long long)app.index_generation);
-    printf("------------------------------------------------------------------------\n");
-    printf("  \033[1;35m[Finite Poset, Ideal Algebra & Numerical Diagnostics]\033[0m\n");
-    printf("  Leinster Magnitude |C|_L : %8.4f   Euler Char chi(N(C)) : %d\n",
-           sheaf.leinster_magnitude, sheaf.euler_characteristic);
-    printf("  Fiedler Connectivity l_2 : %8.4f   Cochain ||d1*d0||_2  : %.2e\n",
-           sheaf.fiedler_eigenvalue, sheaf.cochain_exactness_norm);
-    printf("  Hodge Gradient ||d0*phi||: %8.2f   Hodge Solenoidal Curl: %8.2f\n",
-           sheaf.hodge_gradient_norm, sheaf.hodge_solenoidal_norm);
-    printf("  Hodge Coexact ||d1^T*psi|: %8.2f   Hodge Harmonic Resid : %8.2f\n",
-           sheaf.hodge_coexact_norm, sheaf.hodge_harmonic_norm);
-    printf("  1-Laplacian Trace Tr(L1) : %8.2f   Isbell Hull Defect   : %.2e\n",
-           sheaf.laplacian_1_trace, topos.isbell_envelope_defect);
-    printf("  Weighted Adjunction Resid: %.2e   Ideal Boundary Check : %s\n",
-           topos.tensor_hom_adjunction_defect, topos.leibniz_rule_holds ? "PASS" : "FAIL");
-    printf("  Cocone Adjunction Resid  : %.2e   Modal Closure j(M)=j(A): %s\n",
-           topos.cocone_adjunction_defect, topos.modal_closure_matches ? "MATCH" : "MISMATCH");
-    printf("  Sinkhorn W_eps / S_eps   : %.3f/%.3f  Fisher-Rao Geodesic  : %8.4f\n",
-           topos.sinkhorn_ot.entropic_wasserstein,
-           topos.sinkhorn_ot.sinkhorn_divergence,
-           topos.sinkhorn_ot.fisher_rao_geodesic);
-    printf("  Cheeger Const h(C)       : %8.4f   Cheeger-Buser Bound  : %s\n",
-           topos.sinkhorn_ot.cheeger_constant,
-           topos.sinkhorn_ot.cheeger_buser_holds ? "HOLDS" : "FAIL");
-    printf("  Rank-Page Euler Summary  : %d/%d/%d/%d    Page d_r^2 Residual : %.2e\n",
-           topos.rank_page_diagnostics.euler_e0,
-           topos.rank_page_diagnostics.euler_e1,
-           topos.rank_page_diagnostics.euler_e2,
-           topos.rank_page_diagnostics.euler_e_inf,
-           topos.rank_page_diagnostics.differential_nilpotency_defect);
-    printf("  Gauss-Bonnet sum K_GB    : %8.6f   Forman/Ollivier Curv : %.2f / %.3f\n",
-           topos.ricci_curv.gauss_bonnet_total,
-           topos.ricci_curv.forman_mean_curvature,
-           topos.ricci_curv.ollivier_mean_curvature);
-    printf("  Ihara Zeta zeta_C(0.15)  : %8.4f   Tropical Idem Defect : %.2e\n",
-           topos.zeta_tropical.ihara_zeta_val,
-           topos.zeta_tropical.tropical_idempotence_defect);
-    printf("  Rota-Baxter Id Defect    : %.2e   Atkinson Birkhoff Err: %.2e\n",
-           topos.rota_baxter.rota_baxter_identity_defect,
-           topos.rota_baxter.spitzer_birkhoff_defect);
-    printf("  Kleisli Monad Entropy    : %8.4f   Zig-Zag Defect       : %.2e\n",
-           monad.kleisli_entropy, monad.zig_zag_triangle_defect);
-    printf("  Temporal Sheaf Laplacian : %8.4f   Emerging Fiber       : %s\n",
-           temp.connection_laplacian_norm, ontology_node(temp.fastest_emerging_node)->slug);
-    printf("------------------------------------------------------------------------\n");
-    printf("  \033[1;33m[Atmospheric Physics (Lorenz-63 Chaos) & Autonomous Watchpoints]\033[0m\n");
-    printf("  Lorenz-63 Max Lyapunov   : %8.4f   Kaplan-Yorke Dim D_KY: %8.4f\n",
-           wx_phys.lyapunov_max, wx_phys.kaplan_yorke_dim);
-    printf("  Clausius-Clapeyron e_s   : %6.2f hPa  Stull Wet-Bulb T_w   : %6.2f C\n",
-           wx_phys.saturation_vapor_hpa, wx_phys.wet_bulb_celsius);
-    printf("  Rossby Stationary K_s    : %8.4f   Automation Rules/Hits: %zu / %zu\n",
-           wx_phys.rossby_stationary_k, eng.automation_rule_count, eng.automation_alert_count);
-    printf("------------------------------------------------------------------------\n");
-    printf("  \033[1;34m[Persistent Homology Filtration Barcode (N_eps(C))]\033[0m\n");
-    for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
-      printf("  eps=%.2f | V=%2u E=%3u T=%3u | beta_0=%2u beta_1=%2u | ",
-             barcode.steps[s].threshold_eps,
-             barcode.steps[s].f_vector[0],
-             barcode.steps[s].f_vector[1],
-             barcode.steps[s].f_vector[2],
-             barcode.steps[s].betti_0,
-             barcode.steps[s].betti_1);
-      uint32_t bars = barcode.steps[s].betti_0 + barcode.steps[s].betti_1;
-      if(bars > 24u) bars = 24u;
-      for(uint32_t b = 0; b < bars; ++b) putchar('#');
-      putchar('\n');
-    }
-    printf("\033[1;36m========================================================================\033[0m\n");
-    m1_tokenizer_free(&tok);
-    engine_free(&eng);
-    return 0;
-  }
-
-  ServerContext ctx = {&eng, &tok, snap_path, port};
-  int rc = http_server_listen(&ctx);
-  m1_tokenizer_free(&tok);
-  engine_free(&eng);
+  CliRuntime rt;
+  cli_runtime_init(&rt);
+  int rc = entry->handler(&rt, argc, argv);
+  cli_runtime_free(&rt);
   return rc;
 }
