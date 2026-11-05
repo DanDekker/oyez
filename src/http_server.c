@@ -606,32 +606,52 @@ static void serialize_feed(Buffer *buf, const FeedRecord *f) {
                 f->article_count, f->fetch_count, f->error_count);
 }
 
-int http_handle_request(ServerContext *ctx,
-                        const char *method,
-                        const char *target,
-                        const char *body,
-                        size_t body_len,
-                        int *out_status,
-                        Buffer *out_json) {
-  if(!ctx || !method || !target || !out_status || !out_json) return -1;
-  buffer_init(out_json);
-  *out_status = 200;
+static void serialize_biheyting_pair_masks(Buffer *buf,
+                                           uint32_t hey_imp,
+                                           uint32_t hey_neg,
+                                           uint32_t lt_sheaf,
+                                           uint32_t co_sub,
+                                           uint32_t co_supp,
+                                           uint32_t law_bd,
+                                           uint32_t univ_q) {
+  buffer_text(buf, ",\"heyting_implication\":");
+  serialize_ontology_mask_array(buf, hey_imp);
+  buffer_text(buf, ",\"heyting_negation_a\":");
+  serialize_ontology_mask_array(buf, hey_neg);
+  buffer_text(buf, ",\"lawvere_tierney_sheaf_a\":");
+  serialize_ontology_mask_array(buf, lt_sheaf);
+  buffer_text(buf, ",\"coheyting_subtraction\":");
+  serialize_ontology_mask_array(buf, co_sub);
+  buffer_text(buf, ",\"coheyting_supplement_a\":");
+  serialize_ontology_mask_array(buf, co_supp);
+  buffer_text(buf, ",\"lawvere_boundary_a\":");
+  serialize_ontology_mask_array(buf, law_bd);
+  buffer_text(buf, ",\"universal_quantifier_ab\":");
+  serialize_ontology_mask_array(buf, univ_q);
+}
 
-  char path[512];
-  const char *qmark = strchr(target, '?');
-  size_t path_len = qmark ? (size_t)(qmark - target) : strlen(target);
-  if(path_len >= sizeof(path)) path_len = sizeof(path) - 1u;
-  memcpy(path, target, path_len);
-  path[path_len] = '\0';
-  while(path_len > 1u && path[path_len - 1u] == '/') {
-    path[--path_len] = '\0';
+static void serialize_u32_bit_indices(Buffer *buf, uint32_t mask) {
+  buffer_text(buf, "[");
+  int first = 1;
+  for(uint32_t b = 0; b < 32u; ++b) {
+    if(mask & (1u << b)) {
+      if(!first) buffer_text(buf, ",");
+      buffer_format(buf, "%u", b);
+      first = 0;
+    }
   }
-  const char *qs = qmark ? (qmark + 1u) : "";
+  buffer_text(buf, "]");
+}
 
-  OyezEngine *eng = ctx->engine;
-
-  if(strcmp(method, "GET") == 0 && (strcmp(path, "/console") == 0 || strcmp(path, "/index.html") == 0)) {
-    static const char *const k_console_html_head =
+static int handle_console(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)ctx; (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  static const char *const k_console_html_head =
       "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
       "<title>Oyez // C99 Finite Poset &amp; Ideal Analytics</title>"
       "<style>"
@@ -716,83 +736,107 @@ int http_handle_request(ServerContext *ctx,
       "<span class='badge'>${esc(a.ai_tier)}</span><span class='badge'>${esc(a.clearance)}</span>"
       "<span class='badge'>${esc(a.weather_severity)}</span></div></div>`).join('');}"
       "init();</script></body></html>";
-    buffer_text(out_json, k_console_html_head);
-    buffer_text(out_json, k_console_html_script_1);
-    buffer_text(out_json, k_console_html_script_2);
-    return 0;
-  }
+  buffer_text(out_json, k_console_html_head);
+  buffer_text(out_json, k_console_html_script_1);
+  buffer_text(out_json, k_console_html_script_2);
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/health") == 0)) {
-    size_t cat_count = 0;
-    catalog_entries(&cat_count);
-    buffer_format(out_json,
-                  "{\"name\":\"oyez\",\"version\":\"2.0.0-c99\",\"language\":\"C99\",\"status\":\"ok\","
-                  "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu}",
-                  cat_count,
-                  eng->feed_count,
-                  eng->article_count,
-                  eng->inv_count);
-    return 0;
-  }
+static int handle_health(ServerContext *ctx,
+                         const char *path,
+                         const char *qs,
+                         const char *body,
+                         size_t body_len,
+                         int *out_status,
+                         Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  size_t cat_count = 0;
+  catalog_entries(&cat_count);
+  buffer_format(out_json,
+                "{\"name\":\"oyez\",\"version\":\"2.0.0-c99\",\"language\":\"C99\",\"status\":\"ok\","
+                "\"catalog_sources\":%zu,\"indexed_feeds\":%zu,\"indexed_articles\":%zu,\"inverted_terms\":%zu}",
+                cat_count,
+                eng->feed_count,
+                eng->article_count,
+                eng->inv_count);
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/stats") == 0) {
-    size_t cat_count = 0;
-    catalog_entries(&cat_count);
-    buffer_format(out_json,
-                  "{\"feeds\":%zu,\"articles\":%zu,\"inverted_terms\":%zu,\"catalog_size\":%zu,"
-                  "\"tokenizer_vocab_size\":%u,\"automation_rules\":%zu,\"automation_alerts\":%zu,\"regions\":{",
-                  eng->feed_count,
-                  eng->article_count,
-                  eng->inv_count,
-                  cat_count,
-                  ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u,
-                  eng->automation_rule_count,
-                  eng->automation_alert_count);
-    for(uint32_t r = 0; r < WORLD_REGION_COUNT; ++r) {
-      if(r > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, world_region_slug((WorldRegion)r));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_region[r]));
-    }
-    buffer_text(out_json, "},\"news_types\":{");
-    for(uint32_t nt = 0; nt < NEWS_TYPE_COUNT; ++nt) {
-      if(nt > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, news_type_slug((NewsType)nt));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_news_type[nt]));
-    }
-    buffer_text(out_json, "},\"clearance_levels\":{");
-    for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
-      if(cl > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
-    }
-    buffer_text(out_json, "},\"fiscal_stances\":{");
-    for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
-      if(fs > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
-    }
-    buffer_text(out_json, "},\"weather_severities\":{");
-    for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
-      if(ws > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
-    }
-    buffer_text(out_json, "},\"categories_presheaf\":{");
-    for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
-      if(c > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_closure_ontology[c]));
-    }
-    buffer_text(out_json, "}}");
-    return 0;
+static int handle_stats(ServerContext *ctx,
+                        const char *path,
+                        const char *qs,
+                        const char *body,
+                        size_t body_len,
+                        int *out_status,
+                        Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  size_t cat_count = 0;
+  catalog_entries(&cat_count);
+  buffer_format(out_json,
+                "{\"feeds\":%zu,\"articles\":%zu,\"inverted_terms\":%zu,\"catalog_size\":%zu,"
+                "\"tokenizer_vocab_size\":%u,\"automation_rules\":%zu,\"automation_alerts\":%zu,\"regions\":{",
+                eng->feed_count,
+                eng->article_count,
+                eng->inv_count,
+                cat_count,
+                ctx->tokenizer ? m1_tokenizer_vocab_size(ctx->tokenizer) : 0u,
+                eng->automation_rule_count,
+                eng->automation_alert_count);
+  for(uint32_t r = 0; r < WORLD_REGION_COUNT; ++r) {
+    if(r > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, world_region_slug((WorldRegion)r));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_region[r]));
   }
+  buffer_text(out_json, "},\"news_types\":{");
+  for(uint32_t nt = 0; nt < NEWS_TYPE_COUNT; ++nt) {
+    if(nt > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, news_type_slug((NewsType)nt));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_news_type[nt]));
+  }
+  buffer_text(out_json, "},\"clearance_levels\":{");
+  for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
+    if(cl > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
+  }
+  buffer_text(out_json, "},\"fiscal_stances\":{");
+  for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
+    if(fs > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
+  }
+  buffer_text(out_json, "},\"weather_severities\":{");
+  for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
+    if(ws > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
+  }
+  buffer_text(out_json, "},\"categories_presheaf\":{");
+  for(uint32_t c = 0; c < ONTOLOGY_NODE_COUNT; ++c) {
+    if(c > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_closure_ontology[c]));
+  }
+  buffer_text(out_json, "}}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/ontology") == 0) {
-    char sub[64], sup[64], a_slug[64], b_slug[64];
-    query_param(qs, "sub", sub, sizeof(sub));
-    query_param(qs, "sup", sup, sizeof(sup));
-    query_param(qs, "a", a_slug, sizeof(a_slug));
-    query_param(qs, "b", b_slug, sizeof(b_slug));
+static int handle_ontology(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char sub[64], sup[64], a_slug[64], b_slug[64];
+  query_param(qs, "sub", sub, sizeof(sub));
+  query_param(qs, "sup", sup, sizeof(sup));
+  query_param(qs, "a", a_slug, sizeof(a_slug));
+  query_param(qs, "b", b_slug, sizeof(b_slug));
 
     double raw_scores[ONTOLOGY_NODE_COUNT] = {0};
     double closure_scores[ONTOLOGY_NODE_COUNT] = {0};
@@ -948,20 +992,8 @@ int http_handle_request(ServerContext *ctx,
                       "\"lawvere_distance_ba\":%.4f,\"grothendieck_dense_a\":%s",
                       w_dist, l_ab, l_ba,
                       dense_a ? "true" : "false");
-        buffer_text(out_json, ",\"heyting_implication\":");
-        serialize_ontology_mask_array(out_json, hey_imp);
-        buffer_text(out_json, ",\"heyting_negation_a\":");
-        serialize_ontology_mask_array(out_json, hey_neg);
-        buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
-        serialize_ontology_mask_array(out_json, lt_sheaf);
-        buffer_text(out_json, ",\"coheyting_subtraction\":");
-        serialize_ontology_mask_array(out_json, co_sub);
-        buffer_text(out_json, ",\"coheyting_supplement_a\":");
-        serialize_ontology_mask_array(out_json, co_supp);
-        buffer_text(out_json, ",\"lawvere_boundary_a\":");
-        serialize_ontology_mask_array(out_json, law_bd);
-        buffer_text(out_json, ",\"universal_quantifier_ab\":");
-        serialize_ontology_mask_array(out_json, univ_q);
+        serialize_biheyting_pair_masks(out_json, hey_imp, hey_neg, lt_sheaf,
+                                       co_sub, co_supp, law_bd, univ_q);
         buffer_text(out_json, "}");
 
         /* Deprecated v1 alias.  Ambiguous joins are null rather than an
@@ -979,20 +1011,8 @@ int http_handle_request(ServerContext *ctx,
                       w_dist, l_ab, l_ba,
                       dense_a ? "true" : "false");
         serialize_ontology_mask_array(out_json, maximal_lower_bounds);
-        buffer_text(out_json, ",\"heyting_implication\":");
-        serialize_ontology_mask_array(out_json, hey_imp);
-        buffer_text(out_json, ",\"heyting_negation_a\":");
-        serialize_ontology_mask_array(out_json, hey_neg);
-        buffer_text(out_json, ",\"lawvere_tierney_sheaf_a\":");
-        serialize_ontology_mask_array(out_json, lt_sheaf);
-        buffer_text(out_json, ",\"coheyting_subtraction\":");
-        serialize_ontology_mask_array(out_json, co_sub);
-        buffer_text(out_json, ",\"coheyting_supplement_a\":");
-        serialize_ontology_mask_array(out_json, co_supp);
-        buffer_text(out_json, ",\"lawvere_boundary_a\":");
-        serialize_ontology_mask_array(out_json, law_bd);
-        buffer_text(out_json, ",\"universal_quantifier_ab\":");
-        serialize_ontology_mask_array(out_json, univ_q);
+        serialize_biheyting_pair_masks(out_json, hey_imp, hey_neg, lt_sheaf,
+                                       co_sub, co_supp, law_bd, univ_q);
         buffer_text(out_json, "}");
       }
     }
@@ -1024,268 +1044,310 @@ int http_handle_request(ServerContext *ctx,
     }
     buffer_text(out_json, "]}");
     return 0;
-  }
+}
 
-  if(strcmp(method, "GET") == 0 && (strcmp(path, "/api/v1/facets") == 0 || strcmp(path, "/api/v1/trending") == 0)) {
-    StoryCluster clusters[24];
-    size_t ccount = engine_story_clusters(eng, 18u, clusters, 24u);
-    buffer_format(out_json, "{\"total_clusters\":%zu,\"clusters\":[", ccount);
-    for(size_t i = 0; i < ccount; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json,
-                    "{\"cluster_id\":%u,\"member_count\":%zu,\"cluster_score\":%.2f,\"topics\":",
-                    clusters[i].cluster_id,
-                    clusters[i].member_count,
-                    clusters[i].cluster_score);
-      serialize_ontology_mask_array(out_json, clusters[i].ontology_mask);
-      buffer_text(out_json, ",\"lead_article\":");
-      serialize_article(out_json, clusters[i].lead_article, clusters[i].cluster_score, 0);
-      buffer_text(out_json, "}");
+static int handle_facets(ServerContext *ctx,
+                         const char *path,
+                         const char *qs,
+                         const char *body,
+                         size_t body_len,
+                         int *out_status,
+                         Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  StoryCluster clusters[24];
+  size_t ccount = engine_story_clusters(eng, 18u, clusters, 24u);
+  buffer_format(out_json, "{\"total_clusters\":%zu,\"clusters\":[", ccount);
+  for(size_t i = 0; i < ccount; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_format(out_json,
+                  "{\"cluster_id\":%u,\"member_count\":%zu,\"cluster_score\":%.2f,\"topics\":",
+                  clusters[i].cluster_id,
+                  clusters[i].member_count,
+                  clusters[i].cluster_score);
+    serialize_ontology_mask_array(out_json, clusters[i].ontology_mask);
+    buffer_text(out_json, ",\"lead_article\":");
+    serialize_article(out_json, clusters[i].lead_article, clusters[i].cluster_score, 0);
+    buffer_text(out_json, "}");
+  }
+  buffer_text(out_json, "]}");
+  return 0;
+}
+
+static int handle_concepts(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char min_s[32];
+  query_param(qs, "min_support", min_s, sizeof(min_s));
+  size_t min_supp = min_s[0] ? (size_t)strtoul(min_s, NULL, 10) : 1u;
+  FormalConcept concepts[24];
+  size_t count = engine_formal_concepts(eng, min_supp, concepts, 24u);
+  buffer_format(out_json, "{\"total\":%zu,\"concepts\":[", count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_format(out_json,
+                  "{\"concept_id\":%u,\"support\":%zu,\"stability_score\":%.2f,"
+                  "\"intensional_entropy\":%.4f,\"intent_categories\":",
+                  concepts[i].concept_id,
+                  concepts[i].extent_count,
+                  concepts[i].stability_score,
+                  concepts[i].intensional_entropy);
+    serialize_ontology_mask_array(out_json, concepts[i].intent_ontology_mask);
+    buffer_text(out_json, ",\"lawvere_tierney_closure\":");
+    serialize_ontology_mask_array(out_json, concepts[i].lawvere_tierney_mask);
+    buffer_text(out_json, ",\"subconcept_ids\":");
+    serialize_u32_bit_indices(out_json, concepts[i].subconcept_mask);
+    buffer_text(out_json, ",\"superconcept_ids\":");
+    serialize_u32_bit_indices(out_json, concepts[i].superconcept_mask);
+    buffer_text(out_json, ",\"extent_article_ids\":[");
+    for(size_t k = 0; k < concepts[i].extent_count; ++k) {
+      if(k > 0) buffer_text(out_json, ",");
+      buffer_format(out_json, "%u", concepts[i].extent_slots[k]);
     }
     buffer_text(out_json, "]}");
-    return 0;
   }
+  buffer_text(out_json, "]}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/concepts") == 0) {
-    char min_s[32];
-    query_param(qs, "min_support", min_s, sizeof(min_s));
-    size_t min_supp = min_s[0] ? (size_t)strtoul(min_s, NULL, 10) : 1u;
-    FormalConcept concepts[24];
-    size_t count = engine_formal_concepts(eng, min_supp, concepts, 24u);
-    buffer_format(out_json, "{\"total\":%zu,\"concepts\":[", count);
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json,
-                    "{\"concept_id\":%u,\"support\":%zu,\"stability_score\":%.2f,"
-                    "\"intensional_entropy\":%.4f,\"intent_categories\":",
-                    concepts[i].concept_id,
-                    concepts[i].extent_count,
-                    concepts[i].stability_score,
-                    concepts[i].intensional_entropy);
-      serialize_ontology_mask_array(out_json, concepts[i].intent_ontology_mask);
-      buffer_text(out_json, ",\"lawvere_tierney_closure\":");
-      serialize_ontology_mask_array(out_json, concepts[i].lawvere_tierney_mask);
-      buffer_text(out_json, ",\"subconcept_ids\":[");
-      int first_sub = 1;
-      for(uint32_t b = 0; b < 32u; ++b) {
-        if(concepts[i].subconcept_mask & (1u << b)) {
-          if(!first_sub) buffer_text(out_json, ",");
-          buffer_format(out_json, "%u", b);
-          first_sub = 0;
-        }
-      }
-      buffer_text(out_json, "],\"superconcept_ids\":[");
-      int first_sup = 1;
-      for(uint32_t b = 0; b < 32u; ++b) {
-        if(concepts[i].superconcept_mask & (1u << b)) {
-          if(!first_sup) buffer_text(out_json, ",");
-          buffer_format(out_json, "%u", b);
-          first_sup = 0;
-        }
-      }
-      buffer_text(out_json, "],\"extent_article_ids\":[");
-      for(size_t k = 0; k < concepts[i].extent_count; ++k) {
-        if(k > 0) buffer_text(out_json, ",");
-        buffer_format(out_json, "%u", concepts[i].extent_slots[k]);
-      }
-      buffer_text(out_json, "]}");
+static int handle_pullback(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char left[64], right[64], over[64];
+  if(!query_param(qs, "left_region", left, sizeof(left)) || !left[0]) strcpy(left, "east-asia");
+  if(!query_param(qs, "right_region", right, sizeof(right)) || !right[0]) strcpy(right, "europe");
+  if(!query_param(qs, "over", over, sizeof(over)) || !over[0]) strcpy(over, "topic");
+
+  PullbackPair pairs[32];
+  size_t count = engine_categorical_pullback(eng, left, right, over, pairs, 32u);
+  buffer_text(out_json, "{\"left_region\":");
+  json_cstr(out_json, left);
+  buffer_text(out_json, ",\"right_region\":");
+  json_cstr(out_json, right);
+  buffer_text(out_json, ",\"over\":");
+  json_cstr(out_json, over);
+  buffer_format(out_json, ",\"total\":%zu,\"pairs\":[", count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"shared_witness\":");
+    json_cstr(out_json, pairs[i].shared_witness);
+    buffer_format(out_json, ",\"hamming_distance\":%u,\"coherence_score\":%.4f,\"left_article\":",
+                  pairs[i].hamming_distance, pairs[i].coherence_score);
+    serialize_article(out_json, pairs[i].left, 1.0, 0);
+    buffer_text(out_json, ",\"right_article\":");
+    serialize_article(out_json, pairs[i].right, 1.0, 0);
+    buffer_text(out_json, "}");
+  }
+  buffer_text(out_json, "]}");
+  return 0;
+}
+
+static int handle_pushout(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char left[64], right[64], over[64];
+  if(!query_param(qs, "left_region", left, sizeof(left)) || !left[0]) strcpy(left, "east-asia");
+  if(!query_param(qs, "right_region", right, sizeof(right)) || !right[0]) strcpy(right, "europe");
+  if(!query_param(qs, "over", over, sizeof(over)) || !over[0]) strcpy(over, "topic");
+
+  PushoutAmalgam amalgams[32];
+  size_t count = engine_categorical_pushout(eng, left, right, over, amalgams, 32u);
+
+  WorldRegion lr = REGION_GLOBAL, rr = REGION_GLOBAL;
+  world_region_from_slug(left, &lr);
+  world_region_from_slug(right, &rr);
+  PresheafMorphism morph;
+  engine_natural_transformation(eng, lr, rr, &morph);
+
+  buffer_text(out_json, "{\"left_region\":");
+  json_cstr(out_json, left);
+  buffer_text(out_json, ",\"right_region\":");
+  json_cstr(out_json, right);
+  buffer_text(out_json, ",\"over\":");
+  json_cstr(out_json, over);
+  buffer_format(out_json,
+                ",\"total\":%zu,"
+                "\"natural_transformation\":{\"naturality_defect\":%.4f,\"coend_pairing\":%.2f,"
+                "\"lawvere_transport_cost\":%.4f,\"reverse_transport_cost\":%.4f,\"heyting_truth_sieve\":",
+                count,
+                morph.naturality_defect,
+                morph.coend_pairing,
+                morph.lawvere_transport_cost,
+                morph.reverse_transport_cost);
+  serialize_ontology_mask_array(out_json, morph.heyting_truth_mask);
+  buffer_text(out_json, ",\"dense_sieve_closure\":");
+  serialize_ontology_mask_array(out_json, morph.dense_sieve_mask);
+  buffer_text(out_json, "},\"amalgams\":[");
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"shared_witness\":");
+    json_cstr(out_json, amalgams[i].shared_witness);
+    buffer_format(out_json,
+                  ",\"member_count\":%zu,\"left_count\":%u,\"right_count\":%u,"
+                  "\"colimit_cocone_score\":%.4f,\"coproduct_topics\":",
+                  amalgams[i].member_count,
+                  amalgams[i].left_count,
+                  amalgams[i].right_count,
+                  amalgams[i].colimit_cocone_score);
+    serialize_ontology_mask_array(out_json, amalgams[i].coproduct_ontology_mask);
+    buffer_text(out_json, ",\"sheafified_topics\":");
+    serialize_ontology_mask_array(out_json, amalgams[i].sheafified_ontology_mask);
+    buffer_text(out_json, ",\"shared_closure\":");
+    serialize_ontology_mask_array(out_json, amalgams[i].shared_closure_mask);
+    buffer_text(out_json, ",\"member_article_ids\":[");
+    for(size_t m = 0; m < amalgams[i].member_count; ++m) {
+      if(m > 0) buffer_text(out_json, ",");
+      buffer_format(out_json, "%u", amalgams[i].member_ids[m]);
     }
     buffer_text(out_json, "]}");
-    return 0;
   }
+  buffer_text(out_json, "]}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/pullback") == 0) {
-    char left[64], right[64], over[64];
-    if(!query_param(qs, "left_region", left, sizeof(left)) || !left[0]) strcpy(left, "east-asia");
-    if(!query_param(qs, "right_region", right, sizeof(right)) || !right[0]) strcpy(right, "europe");
-    if(!query_param(qs, "over", over, sizeof(over)) || !over[0]) strcpy(over, "topic");
-
-    PullbackPair pairs[32];
-    size_t count = engine_categorical_pullback(eng, left, right, over, pairs, 32u);
-    buffer_text(out_json, "{\"left_region\":");
-    json_cstr(out_json, left);
-    buffer_text(out_json, ",\"right_region\":");
-    json_cstr(out_json, right);
-    buffer_text(out_json, ",\"over\":");
-    json_cstr(out_json, over);
-    buffer_format(out_json, ",\"total\":%zu,\"pairs\":[", count);
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"shared_witness\":");
-      json_cstr(out_json, pairs[i].shared_witness);
-      buffer_format(out_json, ",\"hamming_distance\":%u,\"coherence_score\":%.4f,\"left_article\":",
-                    pairs[i].hamming_distance, pairs[i].coherence_score);
-      serialize_article(out_json, pairs[i].left, 1.0, 0);
-      buffer_text(out_json, ",\"right_article\":");
-      serialize_article(out_json, pairs[i].right, 1.0, 0);
-      buffer_text(out_json, "}");
-    }
-    buffer_text(out_json, "]}");
-    return 0;
+static int handle_fibration(ServerContext *ctx,
+                            const char *path,
+                            const char *qs,
+                            const char *body,
+                            size_t body_len,
+                            int *out_status,
+                            Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char cat[64];
+  if(!query_param(qs, "category", cat, sizeof(cat)) || !cat[0]) strcpy(cat, "all-news");
+  CartesianLift lifts[32];
+  size_t count = engine_grothendieck_fibration(eng, cat, lifts, 32u);
+  buffer_text(out_json, "{\"base_category\":");
+  json_cstr(out_json, cat);
+  buffer_format(out_json,
+                ",\"leinster_magnitude\":%.4f,\"total\":%zu,\"cartesian_lifts\":[",
+                ontology_leinster_magnitude(),
+                count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"sub_category\":");
+    json_cstr(out_json, ontology_node(lifts[i].sub_node)->slug);
+    buffer_text(out_json, ",\"sup_category\":");
+    json_cstr(out_json, ontology_node(lifts[i].sup_node)->slug);
+    buffer_text(out_json, ",\"transport_witness\":");
+    json_cstr(out_json, lifts[i].transport_witness);
+    buffer_format(out_json,
+                  ",\"hamming_distance\":%u,\"lawvere_geodesic\":%.4f,\"cartesian_fidelity\":%.4f,"
+                  "\"sub_article\":",
+                  lifts[i].hamming_distance,
+                  lifts[i].lawvere_geodesic,
+                  lifts[i].cartesian_fidelity);
+    serialize_article(out_json, lifts[i].sub_article, lifts[i].cartesian_fidelity, 0);
+    buffer_text(out_json, ",\"sup_article\":");
+    serialize_article(out_json, lifts[i].sup_article, lifts[i].cartesian_fidelity, 0);
+    buffer_text(out_json, "}");
   }
+  buffer_text(out_json, "]}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/pushout") == 0) {
-    char left[64], right[64], over[64];
-    if(!query_param(qs, "left_region", left, sizeof(left)) || !left[0]) strcpy(left, "east-asia");
-    if(!query_param(qs, "right_region", right, sizeof(right)) || !right[0]) strcpy(right, "europe");
-    if(!query_param(qs, "over", over, sizeof(over)) || !over[0]) strcpy(over, "topic");
-
-    PushoutAmalgam amalgams[32];
-    size_t count = engine_categorical_pushout(eng, left, right, over, amalgams, 32u);
-
-    WorldRegion lr = REGION_GLOBAL, rr = REGION_GLOBAL;
-    world_region_from_slug(left, &lr);
-    world_region_from_slug(right, &rr);
-    PresheafMorphism morph;
-    engine_natural_transformation(eng, lr, rr, &morph);
-
-    buffer_text(out_json, "{\"left_region\":");
-    json_cstr(out_json, left);
-    buffer_text(out_json, ",\"right_region\":");
-    json_cstr(out_json, right);
-    buffer_text(out_json, ",\"over\":");
-    json_cstr(out_json, over);
-    buffer_format(out_json,
-                  ",\"total\":%zu,"
-                  "\"natural_transformation\":{\"naturality_defect\":%.4f,\"coend_pairing\":%.2f,"
-                  "\"lawvere_transport_cost\":%.4f,\"reverse_transport_cost\":%.4f,\"heyting_truth_sieve\":",
-                  count,
-                  morph.naturality_defect,
-                  morph.coend_pairing,
-                  morph.lawvere_transport_cost,
-                  morph.reverse_transport_cost);
-    serialize_ontology_mask_array(out_json, morph.heyting_truth_mask);
-    buffer_text(out_json, ",\"dense_sieve_closure\":");
-    serialize_ontology_mask_array(out_json, morph.dense_sieve_mask);
-    buffer_text(out_json, "},\"amalgams\":[");
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"shared_witness\":");
-      json_cstr(out_json, amalgams[i].shared_witness);
-      buffer_format(out_json,
-                    ",\"member_count\":%zu,\"left_count\":%u,\"right_count\":%u,"
-                    "\"colimit_cocone_score\":%.4f,\"coproduct_topics\":",
-                    amalgams[i].member_count,
-                    amalgams[i].left_count,
-                    amalgams[i].right_count,
-                    amalgams[i].colimit_cocone_score);
-      serialize_ontology_mask_array(out_json, amalgams[i].coproduct_ontology_mask);
-      buffer_text(out_json, ",\"sheafified_topics\":");
-      serialize_ontology_mask_array(out_json, amalgams[i].sheafified_ontology_mask);
-      buffer_text(out_json, ",\"shared_closure\":");
-      serialize_ontology_mask_array(out_json, amalgams[i].shared_closure_mask);
-      buffer_text(out_json, ",\"member_article_ids\":[");
-      for(size_t m = 0; m < amalgams[i].member_count; ++m) {
-        if(m > 0) buffer_text(out_json, ",");
-        buffer_format(out_json, "%u", amalgams[i].member_ids[m]);
-      }
-      buffer_text(out_json, "]}");
-    }
-    buffer_text(out_json, "]}");
-    return 0;
+static int handle_temporal(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  double raw_scores[ONTOLOGY_NODE_COUNT];
+  for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
+    raw_scores[i] = (double)bitset_popcount(&eng->by_direct_ontology[i]);
   }
+  PersistenceBarcode barcode;
+  ontology_persistent_homology(raw_scores, &barcode);
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/fibration") == 0) {
-    char cat[64];
-    if(!query_param(qs, "category", cat, sizeof(cat)) || !cat[0]) strcpy(cat, "all-news");
-    CartesianLift lifts[32];
-    size_t count = engine_grothendieck_fibration(eng, cat, lifts, 32u);
-    buffer_text(out_json, "{\"base_category\":");
-    json_cstr(out_json, cat);
+  AdjunctionMonadState monad;
+  ontology_adjunction_monad(raw_scores, &monad);
+
+  TemporalSheafState temp;
+  engine_temporal_sheaf(eng, &temp);
+
+  buffer_format(out_json,
+                "{\"persistent_homology\":{\"total_persistence_l1\":%.4f,\"max_void_lifetime\":%.4f,"
+                "\"persistent_core\":",
+                barcode.total_persistence_l1,
+                barcode.max_void_lifetime);
+  serialize_ontology_mask_array(out_json, barcode.persistent_core_mask);
+  buffer_text(out_json, ",\"filtration_steps\":[");
+  for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
+    if(s > 0) buffer_text(out_json, ",");
     buffer_format(out_json,
-                  ",\"leinster_magnitude\":%.4f,\"total\":%zu,\"cartesian_lifts\":[",
-                  ontology_leinster_magnitude(),
-                  count);
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"sub_category\":");
-      json_cstr(out_json, ontology_node(lifts[i].sub_node)->slug);
-      buffer_text(out_json, ",\"sup_category\":");
-      json_cstr(out_json, ontology_node(lifts[i].sup_node)->slug);
-      buffer_text(out_json, ",\"transport_witness\":");
-      json_cstr(out_json, lifts[i].transport_witness);
-      buffer_format(out_json,
-                    ",\"hamming_distance\":%u,\"lawvere_geodesic\":%.4f,\"cartesian_fidelity\":%.4f,"
-                    "\"sub_article\":",
-                    lifts[i].hamming_distance,
-                    lifts[i].lawvere_geodesic,
-                    lifts[i].cartesian_fidelity);
-      serialize_article(out_json, lifts[i].sub_article, lifts[i].cartesian_fidelity, 0);
-      buffer_text(out_json, ",\"sup_article\":");
-      serialize_article(out_json, lifts[i].sup_article, lifts[i].cartesian_fidelity, 0);
-      buffer_text(out_json, "}");
-    }
-    buffer_text(out_json, "]}");
-    return 0;
+                  "{\"threshold_eps\":%.2f,\"f_vector\":[%u,%u,%u],"
+                  "\"betti_0\":%u,\"betti_1\":%u,\"euler_char\":%d}",
+                  barcode.steps[s].threshold_eps,
+                  barcode.steps[s].f_vector[0],
+                  barcode.steps[s].f_vector[1],
+                  barcode.steps[s].f_vector[2],
+                  barcode.steps[s].betti_0,
+                  barcode.steps[s].betti_1,
+                  barcode.steps[s].euler_char);
   }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/temporal") == 0) {
-    double raw_scores[ONTOLOGY_NODE_COUNT];
-    for(uint32_t i = 0; i < ONTOLOGY_NODE_COUNT; ++i) {
-      raw_scores[i] = (double)bitset_popcount(&eng->by_direct_ontology[i]);
-    }
-    PersistenceBarcode barcode;
-    ontology_persistent_homology(raw_scores, &barcode);
-
-    AdjunctionMonadState monad;
-    ontology_adjunction_monad(raw_scores, &monad);
-
-    TemporalSheafState temp;
-    engine_temporal_sheaf(eng, &temp);
-
-    buffer_format(out_json,
-                  "{\"persistent_homology\":{\"total_persistence_l1\":%.4f,\"max_void_lifetime\":%.4f,"
-                  "\"persistent_core\":",
-                  barcode.total_persistence_l1,
-                  barcode.max_void_lifetime);
-    serialize_ontology_mask_array(out_json, barcode.persistent_core_mask);
-    buffer_text(out_json, ",\"filtration_steps\":[");
-    for(int s = 0; s < PERSISTENCE_FILTRATION_STEPS; ++s) {
-      if(s > 0) buffer_text(out_json, ",");
-      buffer_format(out_json,
-                    "{\"threshold_eps\":%.2f,\"f_vector\":[%u,%u,%u],"
-                    "\"betti_0\":%u,\"betti_1\":%u,\"euler_char\":%d}",
-                    barcode.steps[s].threshold_eps,
-                    barcode.steps[s].f_vector[0],
-                    barcode.steps[s].f_vector[1],
-                    barcode.steps[s].f_vector[2],
-                    barcode.steps[s].betti_0,
-                    barcode.steps[s].betti_1,
-                    barcode.steps[s].euler_char);
-    }
-    buffer_format(out_json,
-                  "]},\"adjunction_monad\":{\"zig_zag_triangle_defect\":%.6e,"
-                  "\"beck_coequalizer_defect\":%.6e,\"isbell_adjunction_defect\":%.6e,"
-                  "\"kleisli_entropy\":%.4f,\"eilenberg_moore_fixed_points\":",
-                  monad.zig_zag_triangle_defect,
-                  monad.beck_coequalizer_defect,
-                  monad.isbell_adjunction_defect,
-                  monad.kleisli_entropy);
-    serialize_ontology_mask_array(out_json, monad.eilenberg_moore_mask);
-    buffer_format(out_json,
-                  "},\"temporal_sheaf\":{\"stalk_count\":%d,\"connection_laplacian_norm\":%.4f,"
-                  "\"regime_shift_energy\":%.4f,\"fastest_emerging_category\":\"%s\","
-                  "\"highest_acceleration_category\":\"%s\",\"top_velocities\":{",
-                  TEMPORAL_STALK_COUNT,
-                  temp.connection_laplacian_norm,
-                  temp.regime_shift_energy,
-                  ontology_node(temp.fastest_emerging_node)->slug,
-                  ontology_node(temp.highest_acceleration_node)->slug);
-    for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
-      if(c > 1u) buffer_text(out_json, ",");
-      json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
-      buffer_format(out_json, ":%.2f", temp.velocity[c]);
-    }
-    buffer_text(out_json, "}}}");
-    return 0;
+  buffer_format(out_json,
+                "]},\"adjunction_monad\":{\"zig_zag_triangle_defect\":%.6e,"
+                "\"beck_coequalizer_defect\":%.6e,\"isbell_adjunction_defect\":%.6e,"
+                "\"kleisli_entropy\":%.4f,\"eilenberg_moore_fixed_points\":",
+                monad.zig_zag_triangle_defect,
+                monad.beck_coequalizer_defect,
+                monad.isbell_adjunction_defect,
+                monad.kleisli_entropy);
+  serialize_ontology_mask_array(out_json, monad.eilenberg_moore_mask);
+  buffer_format(out_json,
+                "},\"temporal_sheaf\":{\"stalk_count\":%d,\"connection_laplacian_norm\":%.4f,"
+                "\"regime_shift_energy\":%.4f,\"fastest_emerging_category\":\"%s\","
+                "\"highest_acceleration_category\":\"%s\",\"top_velocities\":{",
+                TEMPORAL_STALK_COUNT,
+                temp.connection_laplacian_norm,
+                temp.regime_shift_energy,
+                ontology_node(temp.fastest_emerging_node)->slug,
+                ontology_node(temp.highest_acceleration_node)->slug);
+  for(uint32_t c = 1u; c < ONTOLOGY_NODE_COUNT; ++c) {
+    if(c > 1u) buffer_text(out_json, ",");
+    json_cstr(out_json, ontology_node((OntologyNodeId)c)->slug);
+    buffer_format(out_json, ":%.2f", temp.velocity[c]);
   }
+  buffer_text(out_json, "}}}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/topos") == 0) {
-    char src_r[64], dst_r[64], a_slug[64], b_slug[64];
-    if(!query_param(qs, "source_region", src_r, sizeof(src_r)) || !src_r[0]) strcpy(src_r, "east-asia");
-    if(!query_param(qs, "target_region", dst_r, sizeof(dst_r)) || !dst_r[0]) strcpy(dst_r, "europe");
-    if(!query_param(qs, "a", a_slug, sizeof(a_slug)) || !a_slug[0]) strcpy(a_slug, "ai");
-    if(!query_param(qs, "b", b_slug, sizeof(b_slug)) || !b_slug[0]) strcpy(b_slug, "technology");
+static int handle_topos(ServerContext *ctx,
+                        const char *path,
+                        const char *qs,
+                        const char *body,
+                        size_t body_len,
+                        int *out_status,
+                        Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char src_r[64], dst_r[64], a_slug[64], b_slug[64];
+  if(!query_param(qs, "source_region", src_r, sizeof(src_r)) || !src_r[0]) strcpy(src_r, "east-asia");
+  if(!query_param(qs, "target_region", dst_r, sizeof(dst_r)) || !dst_r[0]) strcpy(dst_r, "europe");
+  if(!query_param(qs, "a", a_slug, sizeof(a_slug)) || !a_slug[0]) strcpy(a_slug, "ai");
+  if(!query_param(qs, "b", b_slug, sizeof(b_slug)) || !b_slug[0]) strcpy(b_slug, "technology");
 
     WorldRegion sr = REGION_EAST_ASIA, tr = REGION_EUROPE;
     OntologyNodeId na = ONTO_AI, nb = ONTO_TECHNOLOGY;
@@ -1451,527 +1513,669 @@ int http_handle_request(ServerContext *ctx,
                   topos.rota_baxter.rota_baxter_identity_defect,
                   topos.rota_baxter.spitzer_birkhoff_defect);
     return 0;
-  }
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/operad") == 0) {
-    char r1[64], r2[64], r3[64];
-    if(!query_param(qs, "r1", r1, sizeof(r1)) || !r1[0]) strcpy(r1, "east-asia");
-    if(!query_param(qs, "r2", r2, sizeof(r2)) || !r2[0]) strcpy(r2, "north-america");
-    if(!query_param(qs, "r3", r3, sizeof(r3)) || !r3[0]) strcpy(r3, "europe");
+static int handle_operad(ServerContext *ctx,
+                         const char *path,
+                         const char *qs,
+                         const char *body,
+                         size_t body_len,
+                         int *out_status,
+                         Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char r1[64], r2[64], r3[64];
+  if(!query_param(qs, "r1", r1, sizeof(r1)) || !r1[0]) strcpy(r1, "east-asia");
+  if(!query_param(qs, "r2", r2, sizeof(r2)) || !r2[0]) strcpy(r2, "north-america");
+  if(!query_param(qs, "r3", r3, sizeof(r3)) || !r3[0]) strcpy(r3, "europe");
 
-    OperadChain chains[16];
-    size_t count = engine_operad_compose(eng, r1, r2, r3, chains, 16u);
-    buffer_text(out_json, "{\"stage_regions\":[");
-    json_cstr(out_json, r1);
-    buffer_text(out_json, ",");
-    json_cstr(out_json, r2);
-    buffer_text(out_json, ",");
-    json_cstr(out_json, r3);
-    buffer_format(out_json, "],\"total\":%zu,\"operad_chains\":[", count);
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"witness_ab\":");
-      json_cstr(out_json, chains[i].witness_ab);
-      buffer_text(out_json, ",\"witness_bc\":");
-      json_cstr(out_json, chains[i].witness_bc);
-      buffer_format(out_json,
-                    ",\"total_lawvere_geodesic\":%.4f,\"operad_composition_score\":%.4f,\"composite_topics\":",
-                    chains[i].total_lawvere_geodesic,
-                    chains[i].operad_composition_score);
-      serialize_ontology_mask_array(out_json, chains[i].composite_ontology_mask);
-      buffer_text(out_json, ",\"stage_a\":");
-      serialize_article(out_json, chains[i].stage_a, chains[i].operad_composition_score, 0);
-      buffer_text(out_json, ",\"stage_b\":");
-      serialize_article(out_json, chains[i].stage_b, chains[i].operad_composition_score, 0);
-      buffer_text(out_json, ",\"stage_c\":");
-      serialize_article(out_json, chains[i].stage_c, chains[i].operad_composition_score, 0);
-      buffer_text(out_json, "}");
-    }
-    buffer_text(out_json, "]}");
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/feed.xml") == 0) {
-    char q_str[128], cat[64], reg[64];
-    query_param(qs, "q", q_str, sizeof(q_str));
-    query_param(qs, "category", cat, sizeof(cat));
-    query_param(qs, "region", reg, sizeof(reg));
-
-    ArticleQuery aq;
-    memset(&aq, 0, sizeof(aq));
-    aq.query = q_str[0] ? q_str : NULL;
-    aq.category = cat[0] ? cat : NULL;
-    aq.region = reg[0] ? reg : NULL;
-    aq.use_category_morphism = 1;
-    aq.limit = 25u;
-
-    SearchResponse res;
-    engine_search(eng, &aq, &res);
-
-    buffer_text(out_json,
-                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-                "<feed xmlns=\"http://www.w3.org/2005/Atom\">\n"
-                "  <title>Oyez Category-Theoretic Intelligence Stream</title>\n"
-                "  <id>urn:oyez:topos:feed</id>\n"
-                "  <updated>2026-11-03T06:00:00Z</updated>\n");
-    for(size_t i = 0; i < res.count; ++i) {
-      const ArticleRecord *a = res.hits[i].article;
-      buffer_format(out_json,
-                    "  <entry>\n"
-                    "    <id>urn:oyez:article:%u</id>\n"
-                    "    <title>",
-                    a->id);
-      xml_cstr(out_json, a->title ? a->title : "");
-      buffer_text(out_json, "</title>\n    <link href=\"");
-      xml_cstr(out_json, a->url ? a->url : "");
-      buffer_text(out_json, "\"/>\n    <updated>");
-      xml_cstr(out_json, (a->published_at && a->published_at[0]) ? a->published_at : "2026-11-03T00:00:00Z");
-      buffer_text(out_json, "</updated>\n    <summary>");
-      xml_cstr(out_json, a->summary ? a->summary : "");
-      buffer_text(out_json, "</summary>\n  </entry>\n");
-    }
-    buffer_text(out_json, "</feed>\n");
-    search_response_free(&res);
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/stream") == 0) {
-    TemporalSheafState temp;
-    engine_temporal_sheaf(eng, &temp);
+  OperadChain chains[16];
+  size_t count = engine_operad_compose(eng, r1, r2, r3, chains, 16u);
+  buffer_text(out_json, "{\"stage_regions\":[");
+  json_cstr(out_json, r1);
+  buffer_text(out_json, ",");
+  json_cstr(out_json, r2);
+  buffer_text(out_json, ",");
+  json_cstr(out_json, r3);
+  buffer_format(out_json, "],\"total\":%zu,\"operad_chains\":[", count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"witness_ab\":");
+    json_cstr(out_json, chains[i].witness_ab);
+    buffer_text(out_json, ",\"witness_bc\":");
+    json_cstr(out_json, chains[i].witness_bc);
     buffer_format(out_json,
-                  "event: topology\n"
-                  "data: {\"feeds\":%zu,\"articles\":%zu,\"leinster_magnitude\":%.4f,"
-                  "\"connection_laplacian\":%.4f,\"emerging_category\":\"%s\"}\n\n",
-                  eng->feed_count,
-                  eng->article_count,
-                  ontology_leinster_magnitude(),
-                  temp.connection_laplacian_norm,
-                  ontology_node(temp.fastest_emerging_node)->slug);
-    size_t emit = eng->article_count < 5u ? eng->article_count : 5u;
-    for(size_t i = 0; i < emit; ++i) {
-      const ArticleRecord *a = &eng->articles[eng->article_count - 1u - i];
-      buffer_text(out_json, "event: article\ndata: ");
-      serialize_article(out_json, a, 1.0, 0);
-      buffer_text(out_json, "\n\n");
-    }
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/centrality") == 0) {
-    RankedEntity ents[24];
-    ScoredArticle arts[16];
-    memset(ents, 0, sizeof(ents));
-    memset(arts, 0, sizeof(arts));
-    size_t ecount = engine_bipartite_pagerank(eng, 15u, 0.85, ents, 24u, arts, 16u);
-    size_t acount = (ecount > 0) ? (eng->article_count < 16u ? eng->article_count : 16u) : 0u;
-    buffer_text(out_json, "{\"entities\":[");
-    for(size_t i = 0; i < ecount; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"id\":"); json_cstr(out_json, ents[i].id);
-      buffer_text(out_json, ",\"label\":"); json_cstr(out_json, ents[i].label);
-      buffer_text(out_json, ",\"kind\":"); json_cstr(out_json, ents[i].kind);
-      buffer_format(out_json, ",\"score\":%.6f,\"degree\":%u}", ents[i].score, ents[i].degree);
-    }
-    buffer_text(out_json, "],\"top_articles\":[");
-    size_t emitted = 0;
-    for(size_t i = 0; i < acount; ++i) {
-      if(!arts[i].article) continue;
-      if(emitted++ > 0) buffer_text(out_json, ",");
-      serialize_article(out_json, arts[i].article, arts[i].score, 0);
-    }
-    buffer_text(out_json, "]}");
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/catalog") == 0) {
-    char reg[64], ctry[16], cat[64];
-    query_param(qs, "region", reg, sizeof(reg));
-    query_param(qs, "country", ctry, sizeof(ctry));
-    query_param(qs, "category", cat, sizeof(cat));
-
-    size_t total = 0;
-    const CatalogEntry *entries = catalog_entries(&total);
-    buffer_text(out_json, "{\"sources\":[");
-    size_t emitted = 0;
-    for(size_t i = 0; i < total; ++i) {
-      if(reg[0] && strcmp(world_region_slug(entries[i].region), reg) != 0) continue;
-      if(ctry[0] && strcmp(entries[i].country, ctry) != 0) continue;
-      if(cat[0] && strcmp(entries[i].category, cat) != 0) continue;
-      if(emitted > 0) buffer_text(out_json, ",");
-      buffer_text(out_json, "{\"title\":"); json_cstr(out_json, entries[i].title);
-      buffer_text(out_json, ",\"feed_url\":"); json_cstr(out_json, entries[i].feed_url);
-      buffer_text(out_json, ",\"site_url\":"); json_cstr(out_json, entries[i].site_url);
-      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, entries[i].category);
-      buffer_text(out_json, ",\"region\":"); json_cstr(out_json, world_region_slug(entries[i].region));
-      buffer_text(out_json, ",\"country\":"); json_cstr(out_json, entries[i].country);
-      buffer_text(out_json, ",\"subregion\":"); json_cstr(out_json, entries[i].subregion);
-      buffer_text(out_json, ",\"language\":"); json_cstr(out_json, entries[i].language);
-      buffer_text(out_json, ",\"source_tier\":"); json_cstr(out_json, entries[i].source_tier);
-      buffer_text(out_json, ",\"editorial_focus\":"); json_cstr(out_json, entries[i].editorial_focus);
-      buffer_text(out_json, "}");
-      emitted++;
-    }
-    buffer_format(out_json, "],\"total\":%zu}", emitted);
-    return 0;
-  }
-
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/catalog/seed") == 0) {
-    char reg[64], ctry[16];
-    query_or_json_param(qs, body, body_len, "region", reg, sizeof(reg));
-    query_or_json_param(qs, body, body_len, "country", ctry, sizeof(ctry));
-    size_t added = engine_seed_catalog(eng, reg[0] ? reg : NULL, ctry[0] ? ctry : NULL);
-    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
-    buffer_format(out_json, "{\"seeded\":%zu,\"total_feeds\":%zu}", added, eng->feed_count);
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/feeds") == 0) {
-    buffer_format(out_json, "{\"total\":%zu,\"feeds\":[", eng->feed_count);
-    for(size_t i = 0; i < eng->feed_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      serialize_feed(out_json, &eng->feeds[i]);
-    }
-    buffer_text(out_json, "]}");
-    return 0;
-  }
-
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/feeds/poll") == 0) {
-    char lim_s[16];
-    query_or_json_param(qs, body, body_len, "limit", lim_s, sizeof(lim_s));
-    size_t poll_limit = lim_s[0] ? (size_t)strtoul(lim_s, NULL, 10) : 16u;
-    if(poll_limit == 0u) poll_limit = 16u;
-    size_t ins = engine_poll_all(eng, poll_limit);
-    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
-    buffer_format(out_json, "{\"articles_ingested\":%zu,\"total_articles\":%zu}", ins, eng->article_count);
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/markets") == 0) {
-    buffer_text(out_json, "{\"fiscal_stances\":{");
-    for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
-      if(fs > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
-    }
-    buffer_text(out_json, "},\"assets\":");
-    serialize_fiber_counts(out_json, eng->by_asset, 128u);
-    buffer_text(out_json, ",\"fiscal_events\":");
-    serialize_fiber_counts(out_json, eng->by_fiscal_event, 64u);
+                  ",\"total_lawvere_geodesic\":%.4f,\"operad_composition_score\":%.4f,\"composite_topics\":",
+                  chains[i].total_lawvere_geodesic,
+                  chains[i].operad_composition_score);
+    serialize_ontology_mask_array(out_json, chains[i].composite_ontology_mask);
+    buffer_text(out_json, ",\"stage_a\":");
+    serialize_article(out_json, chains[i].stage_a, chains[i].operad_composition_score, 0);
+    buffer_text(out_json, ",\"stage_b\":");
+    serialize_article(out_json, chains[i].stage_b, chains[i].operad_composition_score, 0);
+    buffer_text(out_json, ",\"stage_c\":");
+    serialize_article(out_json, chains[i].stage_c, chains[i].operad_composition_score, 0);
     buffer_text(out_json, "}");
-    return 0;
   }
+  buffer_text(out_json, "]}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/security") == 0) {
-    buffer_text(out_json, "{\"clearance_levels\":{");
-    for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
-      if(cl > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
-    }
-    buffer_text(out_json, "},\"cves\":");
-    serialize_fiber_counts(out_json, eng->by_cve, 128u);
-    buffer_text(out_json, ",\"organizations\":");
-    serialize_fiber_counts(out_json, eng->by_org, 128u);
+static int handle_feed_xml(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char q_str[128], cat[64], reg[64];
+  query_param(qs, "q", q_str, sizeof(q_str));
+  query_param(qs, "category", cat, sizeof(cat));
+  query_param(qs, "region", reg, sizeof(reg));
+
+  ArticleQuery aq;
+  memset(&aq, 0, sizeof(aq));
+  aq.query = q_str[0] ? q_str : NULL;
+  aq.category = cat[0] ? cat : NULL;
+  aq.region = reg[0] ? reg : NULL;
+  aq.use_category_morphism = 1;
+  aq.limit = 25u;
+
+  SearchResponse res;
+  engine_search(eng, &aq, &res);
+
+  buffer_text(out_json,
+              "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+              "<feed xmlns=\"http://www.w3.org/2005/Atom\">\n"
+              "  <title>Oyez Category-Theoretic Intelligence Stream</title>\n"
+              "  <id>urn:oyez:topos:feed</id>\n"
+              "  <updated>2026-11-03T06:00:00Z</updated>\n");
+  for(size_t i = 0; i < res.count; ++i) {
+    const ArticleRecord *a = res.hits[i].article;
+    buffer_format(out_json,
+                  "  <entry>\n"
+                  "    <id>urn:oyez:article:%u</id>\n"
+                  "    <title>",
+                  a->id);
+    xml_cstr(out_json, a->title ? a->title : "");
+    buffer_text(out_json, "</title>\n    <link href=\"");
+    xml_cstr(out_json, a->url ? a->url : "");
+    buffer_text(out_json, "\"/>\n    <updated>");
+    xml_cstr(out_json, (a->published_at && a->published_at[0]) ? a->published_at : "2026-11-03T00:00:00Z");
+    buffer_text(out_json, "</updated>\n    <summary>");
+    xml_cstr(out_json, a->summary ? a->summary : "");
+    buffer_text(out_json, "</summary>\n  </entry>\n");
+  }
+  buffer_text(out_json, "</feed>\n");
+  search_response_free(&res);
+  return 0;
+}
+
+static int handle_stream(ServerContext *ctx,
+                         const char *path,
+                         const char *qs,
+                         const char *body,
+                         size_t body_len,
+                         int *out_status,
+                         Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  TemporalSheafState temp;
+  engine_temporal_sheaf(eng, &temp);
+  buffer_format(out_json,
+                "event: topology\n"
+                "data: {\"feeds\":%zu,\"articles\":%zu,\"leinster_magnitude\":%.4f,"
+                "\"connection_laplacian\":%.4f,\"emerging_category\":\"%s\"}\n\n",
+                eng->feed_count,
+                eng->article_count,
+                ontology_leinster_magnitude(),
+                temp.connection_laplacian_norm,
+                ontology_node(temp.fastest_emerging_node)->slug);
+  size_t emit = eng->article_count < 5u ? eng->article_count : 5u;
+  for(size_t i = 0; i < emit; ++i) {
+    const ArticleRecord *a = &eng->articles[eng->article_count - 1u - i];
+    buffer_text(out_json, "event: article\ndata: ");
+    serialize_article(out_json, a, 1.0, 0);
+    buffer_text(out_json, "\n\n");
+  }
+  return 0;
+}
+
+static int handle_centrality(ServerContext *ctx,
+                             const char *path,
+                             const char *qs,
+                             const char *body,
+                             size_t body_len,
+                             int *out_status,
+                             Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  RankedEntity ents[24];
+  ScoredArticle arts[16];
+  memset(ents, 0, sizeof(ents));
+  memset(arts, 0, sizeof(arts));
+  size_t ecount = engine_bipartite_pagerank(eng, 15u, 0.85, ents, 24u, arts, 16u);
+  size_t acount = (ecount > 0) ? (eng->article_count < 16u ? eng->article_count : 16u) : 0u;
+  buffer_text(out_json, "{\"entities\":[");
+  for(size_t i = 0; i < ecount; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"id\":"); json_cstr(out_json, ents[i].id);
+    buffer_text(out_json, ",\"label\":"); json_cstr(out_json, ents[i].label);
+    buffer_text(out_json, ",\"kind\":"); json_cstr(out_json, ents[i].kind);
+    buffer_format(out_json, ",\"score\":%.6f,\"degree\":%u}", ents[i].score, ents[i].degree);
+  }
+  buffer_text(out_json, "],\"top_articles\":[");
+  size_t emitted = 0;
+  for(size_t i = 0; i < acount; ++i) {
+    if(!arts[i].article) continue;
+    if(emitted++ > 0) buffer_text(out_json, ",");
+    serialize_article(out_json, arts[i].article, arts[i].score, 0);
+  }
+  buffer_text(out_json, "]}");
+  return 0;
+}
+
+static int handle_catalog(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)ctx; (void)path; (void)body; (void)body_len; (void)out_status;
+  char reg[64], ctry[16], cat[64];
+  query_param(qs, "region", reg, sizeof(reg));
+  query_param(qs, "country", ctry, sizeof(ctry));
+  query_param(qs, "category", cat, sizeof(cat));
+
+  size_t total = 0;
+  const CatalogEntry *entries = catalog_entries(&total);
+  buffer_text(out_json, "{\"sources\":[");
+  size_t emitted = 0;
+  for(size_t i = 0; i < total; ++i) {
+    if(reg[0] && strcmp(world_region_slug(entries[i].region), reg) != 0) continue;
+    if(ctry[0] && strcmp(entries[i].country, ctry) != 0) continue;
+    if(cat[0] && strcmp(entries[i].category, cat) != 0) continue;
+    if(emitted > 0) buffer_text(out_json, ",");
+    buffer_text(out_json, "{\"title\":"); json_cstr(out_json, entries[i].title);
+    buffer_text(out_json, ",\"feed_url\":"); json_cstr(out_json, entries[i].feed_url);
+    buffer_text(out_json, ",\"site_url\":"); json_cstr(out_json, entries[i].site_url);
+    buffer_text(out_json, ",\"category\":"); json_cstr(out_json, entries[i].category);
+    buffer_text(out_json, ",\"region\":"); json_cstr(out_json, world_region_slug(entries[i].region));
+    buffer_text(out_json, ",\"country\":"); json_cstr(out_json, entries[i].country);
+    buffer_text(out_json, ",\"subregion\":"); json_cstr(out_json, entries[i].subregion);
+    buffer_text(out_json, ",\"language\":"); json_cstr(out_json, entries[i].language);
+    buffer_text(out_json, ",\"source_tier\":"); json_cstr(out_json, entries[i].source_tier);
+    buffer_text(out_json, ",\"editorial_focus\":"); json_cstr(out_json, entries[i].editorial_focus);
     buffer_text(out_json, "}");
-    return 0;
+    emitted++;
   }
+  buffer_format(out_json, "],\"total\":%zu}", emitted);
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/ai") == 0) {
-    buffer_text(out_json, "{\"ai_compute_tiers\":{");
-    for(uint32_t at = 0; at < AI_TIER_COUNT; ++at) {
-      if(at > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ai_compute_tier_slug((AiComputeTier)at));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_tier[at]));
+static int handle_catalog_seed(ServerContext *ctx,
+                               const char *path,
+                               const char *qs,
+                               const char *body,
+                               size_t body_len,
+                               int *out_status,
+                               Buffer *out_json) {
+  (void)path; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char reg[64], ctry[16];
+  query_or_json_param(qs, body, body_len, "region", reg, sizeof(reg));
+  query_or_json_param(qs, body, body_len, "country", ctry, sizeof(ctry));
+  size_t added = engine_seed_catalog(eng, reg[0] ? reg : NULL, ctry[0] ? ctry : NULL);
+  if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+  buffer_format(out_json, "{\"seeded\":%zu,\"total_feeds\":%zu}", added, eng->feed_count);
+  return 0;
+}
+
+static int handle_feeds(ServerContext *ctx,
+                        const char *path,
+                        const char *qs,
+                        const char *body,
+                        size_t body_len,
+                        int *out_status,
+                        Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  buffer_format(out_json, "{\"total\":%zu,\"feeds\":[", eng->feed_count);
+  for(size_t i = 0; i < eng->feed_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    serialize_feed(out_json, &eng->feeds[i]);
+  }
+  buffer_text(out_json, "]}");
+  return 0;
+}
+
+static int handle_feeds_poll(ServerContext *ctx,
+                             const char *path,
+                             const char *qs,
+                             const char *body,
+                             size_t body_len,
+                             int *out_status,
+                             Buffer *out_json) {
+  (void)path; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char lim_s[16];
+  query_or_json_param(qs, body, body_len, "limit", lim_s, sizeof(lim_s));
+  size_t poll_limit = lim_s[0] ? (size_t)strtoul(lim_s, NULL, 10) : 16u;
+  if(poll_limit == 0u) poll_limit = 16u;
+  size_t ins = engine_poll_all(eng, poll_limit);
+  if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+  buffer_format(out_json, "{\"articles_ingested\":%zu,\"total_articles\":%zu}", ins, eng->article_count);
+  return 0;
+}
+
+static int handle_markets(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  buffer_text(out_json, "{\"fiscal_stances\":{");
+  for(uint32_t fs = 0; fs < FISCAL_STANCE_COUNT; ++fs) {
+    if(fs > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
+  }
+  buffer_text(out_json, "},\"assets\":");
+  serialize_fiber_counts(out_json, eng->by_asset, 128u);
+  buffer_text(out_json, ",\"fiscal_events\":");
+  serialize_fiber_counts(out_json, eng->by_fiscal_event, 64u);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_security(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  buffer_text(out_json, "{\"clearance_levels\":{");
+  for(uint32_t cl = 0; cl < CLEARANCE_LEVEL_COUNT; ++cl) {
+    if(cl > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
+  }
+  buffer_text(out_json, "},\"cves\":");
+  serialize_fiber_counts(out_json, eng->by_cve, 128u);
+  buffer_text(out_json, ",\"organizations\":");
+  serialize_fiber_counts(out_json, eng->by_org, 128u);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_ai(ServerContext *ctx,
+                     const char *path,
+                     const char *qs,
+                     const char *body,
+                     size_t body_len,
+                     int *out_status,
+                     Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  buffer_text(out_json, "{\"ai_compute_tiers\":{");
+  for(uint32_t at = 0; at < AI_TIER_COUNT; ++at) {
+    if(at > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ai_compute_tier_slug((AiComputeTier)at));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_tier[at]));
+  }
+  buffer_text(out_json, "},\"ai_license_spectrum\":{");
+  for(uint32_t al = 0; al < AI_LICENSE_COUNT; ++al) {
+    if(al > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ai_weight_license_slug((AiWeightLicense)al));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_license[al]));
+  }
+  uint32_t closed_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_CLOSED_PROPRIETARY]);
+  uint32_t open_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED]) +
+                      bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE]) +
+                      bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_SCIENCE_OSI]);
+  double open_ratio = (open_cnt + closed_cnt) > 0
+                          ? ((double)open_cnt / (double)(open_cnt + closed_cnt))
+                          : 0.0;
+  buffer_format(out_json,
+                "},\"open_vs_closed_summary\":{\"open_ecosystem_articles\":%u,"
+                "\"closed_frontier_articles\":%u,\"openness_ratio\":%.4f},\"ai_models\":",
+                open_cnt,
+                closed_cnt,
+                open_ratio);
+  serialize_fiber_counts(out_json, eng->by_ai_model, 128u);
+  buffer_text(out_json, ",\"ai_infrastructure\":");
+  serialize_fiber_counts(out_json, eng->by_ai_infra, 128u);
+  buffer_text(out_json, ",\"huggingface_repos\":");
+  serialize_fiber_counts(out_json, eng->by_hf_repo, 128u);
+  buffer_text(out_json, ",\"top_ai_articles\":");
+  serialize_top_articles_by_score(out_json, eng, article_ai_score, 12u);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_sports(ServerContext *ctx,
+                         const char *path,
+                         const char *qs,
+                         const char *body,
+                         size_t body_len,
+                         int *out_status,
+                         Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  uint32_t sp_total = bitset_popcount(&eng->by_closure_ontology[ONTO_SPORTS]);
+  buffer_format(out_json, "{\"sports_articles_count\":%u,\"sports_leagues\":", sp_total);
+  serialize_fiber_counts(out_json, eng->by_sport, 128u);
+  buffer_text(out_json, ",\"top_sports_articles\":");
+  serialize_top_articles_by_score(out_json, eng, article_sports_score, 12u);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_weather(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char t_str[32], rh_str[32], lat_str[32], u_str[32], f_str[32];
+  query_param(qs, "temp_c", t_str, sizeof(t_str));
+  query_param(qs, "humidity", rh_str, sizeof(rh_str));
+  query_param(qs, "lat_deg", lat_str, sizeof(lat_str));
+  query_param(qs, "u_wind", u_str, sizeof(u_str));
+  query_param(qs, "forcing", f_str, sizeof(f_str));
+
+  uint32_t wx_total = bitset_popcount(&eng->by_closure_ontology[ONTO_CLIMATE]);
+  uint32_t severe_cnt = bitset_popcount(&eng->by_weather_severity[WEATHER_WATCH]) +
+                        bitset_popcount(&eng->by_weather_severity[WEATHER_WARNING]) +
+                        bitset_popcount(&eng->by_weather_severity[WEATHER_CATASTROPHIC]);
+
+  double sum_wx_score = 0.0;
+  size_t wx_scored = 0;
+  for(size_t i = 0; i < eng->article_count; ++i) {
+    if(eng->articles[i].weather_score > 0.0) {
+      sum_wx_score += eng->articles[i].weather_score;
+      wx_scored++;
     }
-    buffer_text(out_json, "},\"ai_license_spectrum\":{");
-    for(uint32_t al = 0; al < AI_LICENSE_COUNT; ++al) {
-      if(al > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ai_weight_license_slug((AiWeightLicense)al));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_license[al]));
-    }
-    uint32_t closed_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_CLOSED_PROPRIETARY]);
-    uint32_t open_cnt = bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_RESTRICTED]) +
-                        bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_WEIGHTS_PERMISSIVE]) +
-                        bitset_popcount(&eng->by_ai_license[AI_LICENSE_OPEN_SCIENCE_OSI]);
-    double open_ratio = (open_cnt + closed_cnt) > 0
-                            ? ((double)open_cnt / (double)(open_cnt + closed_cnt))
-                            : 0.0;
+  }
+  double avg_wx_score = wx_scored > 0 ? (sum_wx_score / (double)wx_scored) : 2.5;
+
+  double temp_c = t_str[0] ? strtod(t_str, NULL) : (24.0 + 0.15 * (double)severe_cnt);
+  double rh_pct = rh_str[0] ? strtod(rh_str, NULL) : 68.0;
+  double u_wind = u_str[0] ? strtod(u_str, NULL) : 18.0;
+  double lat_deg = lat_str[0] ? strtod(lat_str, NULL) : 38.0;
+  double forcing = f_str[0] ? strtod(f_str, NULL) : avg_wx_score;
+
+  WeatherPhysicsState phys;
+  ontology_atmospheric_dynamics(temp_c, rh_pct, u_wind, lat_deg, forcing, &phys);
+
+  buffer_format(out_json,
+                "{\"weather_articles_count\":%u,\"severe_hazards_count\":%u,\"weather_severities\":{",
+                wx_total, severe_cnt);
+  for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
+    if(ws > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
+    buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
+  }
+  buffer_text(out_json, "},\"weather_phenomena\":");
+  serialize_fiber_counts(out_json, eng->by_weather, 128u);
+  buffer_format(out_json,
+                ",\"atmospheric_physics\":{"
+                "\"lorenz_63_attractor\":[%.6f,%.6f,%.6f],"
+                "\"maximal_lyapunov_exponent\":%.6f,"
+                "\"liouville_divergence\":%.6f,"
+                "\"kaplan_yorke_dimension\":%.6f,"
+                "\"predictability_horizon_units\":%.6f,"
+                "\"saturation_vapor_pressure_hpa\":%.4f,"
+                "\"wet_bulb_temperature_c\":%.4f,"
+                "\"rossby_phase_speed_ms\":%.4f,"
+                "\"rossby_stationary_wavenumber\":%.4f,"
+                "\"omega_blocking_regime\":%s"
+                "},\"top_weather_articles\":",
+                phys.lorenz_state[0],
+                phys.lorenz_state[1],
+                phys.lorenz_state[2],
+                phys.lyapunov_max,
+                phys.lyapunov_sum_div,
+                phys.kaplan_yorke_dim,
+                phys.predictability_horizon,
+                phys.saturation_vapor_hpa,
+                phys.wet_bulb_celsius,
+                phys.rossby_phase_speed,
+                phys.rossby_stationary_k,
+                phys.omega_blocking_regime ? "true" : "false");
+  serialize_top_articles_by_score(out_json, eng, article_weather_score, 12u);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_automation_get(ServerContext *ctx,
+                                 const char *path,
+                                 const char *qs,
+                                 const char *body,
+                                 size_t body_len,
+                                 int *out_status,
+                                 Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  buffer_format(out_json,
+                "{\"auto_poll_interval_sec\":%u,\"auto_cycles_completed\":%llu,"
+                "\"last_auto_cycle_ms\":%llu,\"total_bandit_pulls\":%llu,"
+                "\"rule_count\":%zu,\"alert_count\":%zu,\"rules\":[",
+                eng->auto_poll_interval_sec,
+                (unsigned long long)eng->auto_cycles_completed,
+                (unsigned long long)eng->last_auto_cycle_ms,
+                (unsigned long long)eng->total_bandit_pulls,
+                eng->automation_rule_count,
+                eng->automation_alert_count);
+  for(size_t i = 0; i < eng->automation_rule_count; ++i) {
+    const AutomationRule *r = &eng->automation_rules[i];
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_format(out_json, "{\"id\":%u,\"enabled\":%s,\"name\":",
+                  r->id, r->enabled ? "true" : "false");
+    json_cstr(out_json, r->name);
+    buffer_text(out_json, ",\"query\":"); json_cstr(out_json, r->query);
+    buffer_text(out_json, ",\"category\":"); json_cstr(out_json, r->category);
+    buffer_text(out_json, ",\"region\":"); json_cstr(out_json, r->region);
+    buffer_text(out_json, ",\"weather\":"); json_cstr(out_json, r->weather);
+    buffer_text(out_json, ",\"min_clearance\":"); json_cstr(out_json, clearance_level_slug(r->min_clearance));
+    buffer_text(out_json, ",\"fiscal_stance\":"); json_cstr(out_json, fiscal_stance_slug(r->fiscal_stance));
+    buffer_text(out_json, ",\"min_ai_tier\":"); json_cstr(out_json, ai_compute_tier_slug(r->min_ai_tier));
+    buffer_text(out_json, ",\"min_weather_severity\":"); json_cstr(out_json, weather_severity_slug(r->min_weather_severity));
+    buffer_format(out_json, ",\"min_score\":%.2f,\"action\":", r->min_score);
+    json_cstr(out_json, automation_action_slug(r->action));
+    buffer_text(out_json, ",\"target\":"); json_cstr(out_json, r->target);
     buffer_format(out_json,
-                  "},\"open_vs_closed_summary\":{\"open_ecosystem_articles\":%u,"
-                  "\"closed_frontier_articles\":%u,\"openness_ratio\":%.4f},\"ai_models\":",
-                  open_cnt,
-                  closed_cnt,
-                  open_ratio);
-    serialize_fiber_counts(out_json, eng->by_ai_model, 128u);
-    buffer_text(out_json, ",\"ai_infrastructure\":");
-    serialize_fiber_counts(out_json, eng->by_ai_infra, 128u);
-    buffer_text(out_json, ",\"huggingface_repos\":");
-    serialize_fiber_counts(out_json, eng->by_hf_repo, 128u);
-    buffer_text(out_json, ",\"top_ai_articles\":");
-    serialize_top_articles_by_score(out_json, eng, article_ai_score, 12u);
+                  ",\"hit_count\":%u,\"last_triggered_ms\":%llu}",
+                  r->hit_count, (unsigned long long)r->last_triggered_ms);
+  }
+  buffer_text(out_json, "],\"alerts\":[");
+  size_t emit_alerts = eng->automation_alert_count < 32u ? eng->automation_alert_count : 32u;
+  for(size_t k = 0; k < emit_alerts; ++k) {
+    size_t idx = (eng->automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
+    const AutomationAlert *al = &eng->automation_alerts[idx];
+    if(k > 0) buffer_text(out_json, ",");
+    buffer_format(out_json,
+                  "{\"alert_id\":%llu,\"rule_id\":%u,\"article_id\":%u,"
+                  "\"triggered_at_ms\":%llu,\"trigger_score\":%.4f,\"action\":",
+                  (unsigned long long)al->alert_id, al->rule_id, al->article_id,
+                  (unsigned long long)al->triggered_at_ms, al->trigger_score);
+    json_cstr(out_json, automation_action_slug(al->action_taken));
+    buffer_text(out_json, ",\"rule_name\":"); json_cstr(out_json, al->rule_name);
+    buffer_text(out_json, ",\"article_title\":"); json_cstr(out_json, al->article_title);
+    buffer_text(out_json, ",\"article_url\":"); json_cstr(out_json, al->article_url);
+    buffer_text(out_json, ",\"category\":"); json_cstr(out_json, al->category_slug);
+    buffer_text(out_json, ",\"weather_severity\":"); json_cstr(out_json, al->weather_severity_slug);
+    buffer_text(out_json, ",\"clearance\":"); json_cstr(out_json, al->clearance_slug);
     buffer_text(out_json, "}");
-    return 0;
   }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/sports") == 0) {
-    uint32_t sp_total = bitset_popcount(&eng->by_closure_ontology[ONTO_SPORTS]);
-    buffer_format(out_json, "{\"sports_articles_count\":%u,\"sports_leagues\":", sp_total);
-    serialize_fiber_counts(out_json, eng->by_sport, 128u);
-    buffer_text(out_json, ",\"top_sports_articles\":");
-    serialize_top_articles_by_score(out_json, eng, article_sports_score, 12u);
-    buffer_text(out_json, "}");
-    return 0;
-  }
-
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/weather") == 0) {
-    char t_str[32], rh_str[32], lat_str[32], u_str[32], f_str[32];
-    query_param(qs, "temp_c", t_str, sizeof(t_str));
-    query_param(qs, "humidity", rh_str, sizeof(rh_str));
-    query_param(qs, "lat_deg", lat_str, sizeof(lat_str));
-    query_param(qs, "u_wind", u_str, sizeof(u_str));
-    query_param(qs, "forcing", f_str, sizeof(f_str));
-
-    uint32_t wx_total = bitset_popcount(&eng->by_closure_ontology[ONTO_CLIMATE]);
-    uint32_t severe_cnt = bitset_popcount(&eng->by_weather_severity[WEATHER_WATCH]) +
-                          bitset_popcount(&eng->by_weather_severity[WEATHER_WARNING]) +
-                          bitset_popcount(&eng->by_weather_severity[WEATHER_CATASTROPHIC]);
-
-    double sum_wx_score = 0.0;
-    size_t wx_scored = 0;
-    for(size_t i = 0; i < eng->article_count; ++i) {
-      if(eng->articles[i].weather_score > 0.0) {
-        sum_wx_score += eng->articles[i].weather_score;
-        wx_scored++;
-      }
-    }
-    double avg_wx_score = wx_scored > 0 ? (sum_wx_score / (double)wx_scored) : 2.5;
-
-    double temp_c = t_str[0] ? strtod(t_str, NULL) : (24.0 + 0.15 * (double)severe_cnt);
-    double rh_pct = rh_str[0] ? strtod(rh_str, NULL) : 68.0;
-    double u_wind = u_str[0] ? strtod(u_str, NULL) : 18.0;
-    double lat_deg = lat_str[0] ? strtod(lat_str, NULL) : 38.0;
-    double forcing = f_str[0] ? strtod(f_str, NULL) : avg_wx_score;
-
-    WeatherPhysicsState phys;
-    ontology_atmospheric_dynamics(temp_c, rh_pct, u_wind, lat_deg, forcing, &phys);
-
+  buffer_text(out_json, "],\"bandit_schedule\":[");
+  BanditFeedPriority prio[16];
+  size_t bcount = engine_bandit_select_feeds(eng, prio, 16u);
+  for(size_t i = 0; i < bcount; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_format(out_json, "{\"feed_id\":%u,\"title\":", prio[i].feed_id);
+    json_cstr(out_json, prio[i].title);
+    buffer_text(out_json, ",\"category\":"); json_cstr(out_json, prio[i].category);
     buffer_format(out_json,
-                  "{\"weather_articles_count\":%u,\"severe_hazards_count\":%u,\"weather_severities\":{",
-                  wx_total, severe_cnt);
-    for(uint32_t ws = 0; ws < WEATHER_SEVERITY_COUNT; ++ws) {
-      if(ws > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
-      buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
-    }
-    buffer_text(out_json, "},\"weather_phenomena\":");
-    serialize_fiber_counts(out_json, eng->by_weather, 128u);
-    buffer_format(out_json,
-                  ",\"atmospheric_physics\":{"
-                  "\"lorenz_63_attractor\":[%.6f,%.6f,%.6f],"
-                  "\"maximal_lyapunov_exponent\":%.6f,"
-                  "\"liouville_divergence\":%.6f,"
-                  "\"kaplan_yorke_dimension\":%.6f,"
-                  "\"predictability_horizon_units\":%.6f,"
-                  "\"saturation_vapor_pressure_hpa\":%.4f,"
-                  "\"wet_bulb_temperature_c\":%.4f,"
-                  "\"rossby_phase_speed_ms\":%.4f,"
-                  "\"rossby_stationary_wavenumber\":%.4f,"
-                  "\"omega_blocking_regime\":%s"
-                  "},\"top_weather_articles\":",
-                  phys.lorenz_state[0],
-                  phys.lorenz_state[1],
-                  phys.lorenz_state[2],
-                  phys.lyapunov_max,
-                  phys.lyapunov_sum_div,
-                  phys.kaplan_yorke_dim,
-                  phys.predictability_horizon,
-                  phys.saturation_vapor_hpa,
-                  phys.wet_bulb_celsius,
-                  phys.rossby_phase_speed,
-                  phys.rossby_stationary_k,
-                  phys.omega_blocking_regime ? "true" : "false");
-    serialize_top_articles_by_score(out_json, eng, article_weather_score, 12u);
-    buffer_text(out_json, "}");
+                  ",\"ucb1_score\":%.4f,\"empirical_yield\":%.4f,"
+                  "\"exploration_bonus\":%.4f,\"staleness_bonus\":%.4f,\"error_penalty\":%.4f}",
+                  prio[i].ucb1_score, prio[i].empirical_yield,
+                  prio[i].exploration_bonus, prio[i].staleness_bonus, prio[i].error_penalty);
+  }
+  buffer_text(out_json, "]}");
+  return 0;
+}
+
+static int handle_automation_rules_post(ServerContext *ctx,
+                                        const char *path,
+                                        const char *qs,
+                                        const char *body,
+                                        size_t body_len,
+                                        int *out_status,
+                                        Buffer *out_json) {
+  (void)path; (void)qs;
+  OyezEngine *eng = ctx->engine;
+  char id_s[16], en_s[16], name_s[64], q_s[64], cat_s[32], reg_s[32], wx_s[32];
+  char clr_s[24], fst_s[24], ait_s[24], wxs_s[24], sc_s[24], act_s[32], tgt_s[128];
+  json_extract_field(body, body_len, "id", id_s, sizeof(id_s));
+  json_extract_field(body, body_len, "enabled", en_s, sizeof(en_s));
+  json_extract_field(body, body_len, "name", name_s, sizeof(name_s));
+  json_extract_field(body, body_len, "query", q_s, sizeof(q_s));
+  if(q_s[0] == '\0') json_extract_field(body, body_len, "query_terms", q_s, sizeof(q_s));
+  json_extract_field(body, body_len, "category", cat_s, sizeof(cat_s));
+  json_extract_field(body, body_len, "region", reg_s, sizeof(reg_s));
+  json_extract_field(body, body_len, "weather", wx_s, sizeof(wx_s));
+  json_extract_field(body, body_len, "min_clearance", clr_s, sizeof(clr_s));
+  json_extract_field(body, body_len, "fiscal_stance", fst_s, sizeof(fst_s));
+  json_extract_field(body, body_len, "min_ai_tier", ait_s, sizeof(ait_s));
+  json_extract_field(body, body_len, "min_weather_severity", wxs_s, sizeof(wxs_s));
+  json_extract_field(body, body_len, "min_score", sc_s, sizeof(sc_s));
+  json_extract_field(body, body_len, "action", act_s, sizeof(act_s));
+  json_extract_field(body, body_len, "target", tgt_s, sizeof(tgt_s));
+
+  if(name_s[0] == '\0') {
+    *out_status = 400;
+    buffer_text(out_json, "{\"error\":\"missing_rule_name\"}");
     return 0;
   }
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/automation") == 0) {
-    buffer_format(out_json,
-                  "{\"auto_poll_interval_sec\":%u,\"auto_cycles_completed\":%llu,"
-                  "\"last_auto_cycle_ms\":%llu,\"total_bandit_pulls\":%llu,"
-                  "\"rule_count\":%zu,\"alert_count\":%zu,\"rules\":[",
-                  eng->auto_poll_interval_sec,
-                  (unsigned long long)eng->auto_cycles_completed,
-                  (unsigned long long)eng->last_auto_cycle_ms,
-                  (unsigned long long)eng->total_bandit_pulls,
-                  eng->automation_rule_count,
-                  eng->automation_alert_count);
-    for(size_t i = 0; i < eng->automation_rule_count; ++i) {
-      const AutomationRule *r = &eng->automation_rules[i];
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json, "{\"id\":%u,\"enabled\":%s,\"name\":",
-                    r->id, r->enabled ? "true" : "false");
-      json_cstr(out_json, r->name);
-      buffer_text(out_json, ",\"query\":"); json_cstr(out_json, r->query);
-      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, r->category);
-      buffer_text(out_json, ",\"region\":"); json_cstr(out_json, r->region);
-      buffer_text(out_json, ",\"weather\":"); json_cstr(out_json, r->weather);
-      buffer_text(out_json, ",\"min_clearance\":"); json_cstr(out_json, clearance_level_slug(r->min_clearance));
-      buffer_text(out_json, ",\"fiscal_stance\":"); json_cstr(out_json, fiscal_stance_slug(r->fiscal_stance));
-      buffer_text(out_json, ",\"min_ai_tier\":"); json_cstr(out_json, ai_compute_tier_slug(r->min_ai_tier));
-      buffer_text(out_json, ",\"min_weather_severity\":"); json_cstr(out_json, weather_severity_slug(r->min_weather_severity));
-      buffer_format(out_json, ",\"min_score\":%.2f,\"action\":", r->min_score);
-      json_cstr(out_json, automation_action_slug(r->action));
-      buffer_text(out_json, ",\"target\":"); json_cstr(out_json, r->target);
-      buffer_format(out_json,
-                    ",\"hit_count\":%u,\"last_triggered_ms\":%llu}",
-                    r->hit_count, (unsigned long long)r->last_triggered_ms);
-    }
-    buffer_text(out_json, "],\"alerts\":[");
-    size_t emit_alerts = eng->automation_alert_count < 32u ? eng->automation_alert_count : 32u;
-    for(size_t k = 0; k < emit_alerts; ++k) {
-      size_t idx = (eng->automation_alert_head + MAX_AUTOMATION_ALERTS - 1u - k) % MAX_AUTOMATION_ALERTS;
-      const AutomationAlert *al = &eng->automation_alerts[idx];
-      if(k > 0) buffer_text(out_json, ",");
-      buffer_format(out_json,
-                    "{\"alert_id\":%llu,\"rule_id\":%u,\"article_id\":%u,"
-                    "\"triggered_at_ms\":%llu,\"trigger_score\":%.4f,\"action\":",
-                    (unsigned long long)al->alert_id, al->rule_id, al->article_id,
-                    (unsigned long long)al->triggered_at_ms, al->trigger_score);
-      json_cstr(out_json, automation_action_slug(al->action_taken));
-      buffer_text(out_json, ",\"rule_name\":"); json_cstr(out_json, al->rule_name);
-      buffer_text(out_json, ",\"article_title\":"); json_cstr(out_json, al->article_title);
-      buffer_text(out_json, ",\"article_url\":"); json_cstr(out_json, al->article_url);
-      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, al->category_slug);
-      buffer_text(out_json, ",\"weather_severity\":"); json_cstr(out_json, al->weather_severity_slug);
-      buffer_text(out_json, ",\"clearance\":"); json_cstr(out_json, al->clearance_slug);
-      buffer_text(out_json, "}");
-    }
-    buffer_text(out_json, "],\"bandit_schedule\":[");
-    BanditFeedPriority prio[16];
-    size_t bcount = engine_bandit_select_feeds(eng, prio, 16u);
-    for(size_t i = 0; i < bcount; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json, "{\"feed_id\":%u,\"title\":", prio[i].feed_id);
-      json_cstr(out_json, prio[i].title);
-      buffer_text(out_json, ",\"category\":"); json_cstr(out_json, prio[i].category);
-      buffer_format(out_json,
-                    ",\"ucb1_score\":%.4f,\"empirical_yield\":%.4f,"
-                    "\"exploration_bonus\":%.4f,\"staleness_bonus\":%.4f,\"error_penalty\":%.4f}",
-                    prio[i].ucb1_score, prio[i].empirical_yield,
-                    prio[i].exploration_bonus, prio[i].staleness_bonus, prio[i].error_penalty);
-    }
-    buffer_text(out_json, "]}");
+  AutomationRule rule;
+  memset(&rule, 0, sizeof(rule));
+  rule.id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
+  rule.enabled = (strcmp(en_s, "0") == 0 || strcmp(en_s, "false") == 0) ? 0 : 1;
+  snprintf(rule.name, sizeof(rule.name), "%s", name_s);
+  snprintf(rule.query, sizeof(rule.query), "%s", q_s);
+  snprintf(rule.category, sizeof(rule.category), "%s", cat_s);
+  snprintf(rule.region, sizeof(rule.region), "%s", reg_s);
+  snprintf(rule.weather, sizeof(rule.weather), "%s", wx_s);
+  if(clr_s[0] != '\0') clearance_level_from_slug(clr_s, &rule.min_clearance);
+  if(fst_s[0] != '\0') fiscal_stance_from_slug(fst_s, &rule.fiscal_stance);
+  if(ait_s[0] != '\0') ai_compute_tier_from_slug(ait_s, &rule.min_ai_tier);
+  if(wxs_s[0] != '\0') weather_severity_from_slug(wxs_s, &rule.min_weather_severity);
+  rule.min_score = sc_s[0] ? strtod(sc_s, NULL) : 0.0;
+  AutomationActionType act = AUTO_ACTION_ALERT_RING;
+  if(act_s[0] != '\0') automation_action_from_slug(act_s, &act);
+  rule.action = act;
+  snprintf(rule.target, sizeof(rule.target), "%s", tgt_s);
+
+  uint32_t rule_id = 0;
+  if(engine_upsert_automation_rule(eng, &rule, &rule_id) != 0) {
+    *out_status = 400;
+    buffer_text(out_json, "{\"error\":\"rule_capacity_exceeded\"}");
     return 0;
   }
+  size_t triggered = engine_evaluate_all_automation_rules(eng);
+  if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+  buffer_format(out_json,
+                "{\"status\":\"ok\",\"rule_id\":%u,\"rule_count\":%zu,\"alerts_triggered\":%zu}",
+                rule_id, eng->automation_rule_count, triggered);
+  return 0;
+}
 
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/automation/rules") == 0) {
-    char id_s[16], en_s[16], name_s[64], q_s[64], cat_s[32], reg_s[32], wx_s[32];
-    char clr_s[24], fst_s[24], ait_s[24], wxs_s[24], sc_s[24], act_s[32], tgt_s[128];
-    json_extract_field(body, body_len, "id", id_s, sizeof(id_s));
-    json_extract_field(body, body_len, "enabled", en_s, sizeof(en_s));
-    json_extract_field(body, body_len, "name", name_s, sizeof(name_s));
-    json_extract_field(body, body_len, "query", q_s, sizeof(q_s));
-    if(q_s[0] == '\0') json_extract_field(body, body_len, "query_terms", q_s, sizeof(q_s));
-    json_extract_field(body, body_len, "category", cat_s, sizeof(cat_s));
-    json_extract_field(body, body_len, "region", reg_s, sizeof(reg_s));
-    json_extract_field(body, body_len, "weather", wx_s, sizeof(wx_s));
-    json_extract_field(body, body_len, "min_clearance", clr_s, sizeof(clr_s));
-    json_extract_field(body, body_len, "fiscal_stance", fst_s, sizeof(fst_s));
-    json_extract_field(body, body_len, "min_ai_tier", ait_s, sizeof(ait_s));
-    json_extract_field(body, body_len, "min_weather_severity", wxs_s, sizeof(wxs_s));
-    json_extract_field(body, body_len, "min_score", sc_s, sizeof(sc_s));
-    json_extract_field(body, body_len, "action", act_s, sizeof(act_s));
-    json_extract_field(body, body_len, "target", tgt_s, sizeof(tgt_s));
-
-    if(name_s[0] == '\0') {
-      *out_status = 400;
-      buffer_text(out_json, "{\"error\":\"missing_rule_name\"}");
-      return 0;
-    }
-
-    AutomationRule rule;
-    memset(&rule, 0, sizeof(rule));
-    rule.id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
-    rule.enabled = (strcmp(en_s, "0") == 0 || strcmp(en_s, "false") == 0) ? 0 : 1;
-    snprintf(rule.name, sizeof(rule.name), "%s", name_s);
-    snprintf(rule.query, sizeof(rule.query), "%s", q_s);
-    snprintf(rule.category, sizeof(rule.category), "%s", cat_s);
-    snprintf(rule.region, sizeof(rule.region), "%s", reg_s);
-    snprintf(rule.weather, sizeof(rule.weather), "%s", wx_s);
-    if(clr_s[0] != '\0') clearance_level_from_slug(clr_s, &rule.min_clearance);
-    if(fst_s[0] != '\0') fiscal_stance_from_slug(fst_s, &rule.fiscal_stance);
-    if(ait_s[0] != '\0') ai_compute_tier_from_slug(ait_s, &rule.min_ai_tier);
-    if(wxs_s[0] != '\0') weather_severity_from_slug(wxs_s, &rule.min_weather_severity);
-    rule.min_score = sc_s[0] ? strtod(sc_s, NULL) : 0.0;
-    AutomationActionType act = AUTO_ACTION_ALERT_RING;
-    if(act_s[0] != '\0') automation_action_from_slug(act_s, &act);
-    rule.action = act;
-    snprintf(rule.target, sizeof(rule.target), "%s", tgt_s);
-
-    uint32_t rule_id = 0;
-    if(engine_upsert_automation_rule(eng, &rule, &rule_id) != 0) {
-      *out_status = 400;
-      buffer_text(out_json, "{\"error\":\"rule_capacity_exceeded\"}");
-      return 0;
-    }
-    size_t triggered = engine_evaluate_all_automation_rules(eng);
-    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
-    buffer_format(out_json,
-                  "{\"status\":\"ok\",\"rule_id\":%u,\"rule_count\":%zu,\"alerts_triggered\":%zu}",
-                  rule_id, eng->automation_rule_count, triggered);
+static int handle_automation_rules_delete(ServerContext *ctx,
+                                          const char *path,
+                                          const char *qs,
+                                          const char *body,
+                                          size_t body_len,
+                                          int *out_status,
+                                          Buffer *out_json) {
+  (void)path;
+  OyezEngine *eng = ctx->engine;
+  char id_s[16];
+  query_or_json_param(qs, body, body_len, "id", id_s, sizeof(id_s));
+  uint32_t rule_id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
+  if(rule_id == 0u || engine_delete_automation_rule(eng, rule_id) != 0) {
+    *out_status = 404;
+    buffer_text(out_json, "{\"error\":\"rule_not_found\"}");
     return 0;
   }
+  if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+  buffer_format(out_json, "{\"status\":\"deleted\",\"rule_id\":%u,\"rule_count\":%zu}",
+                rule_id, eng->automation_rule_count);
+  return 0;
+}
 
-  if(strcmp(method, "DELETE") == 0 && strcmp(path, "/api/v1/automation/rules") == 0) {
-    char id_s[16];
-    query_or_json_param(qs, body, body_len, "id", id_s, sizeof(id_s));
-    uint32_t rule_id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
-    if(rule_id == 0u || engine_delete_automation_rule(eng, rule_id) != 0) {
-      *out_status = 404;
-      buffer_text(out_json, "{\"error\":\"rule_not_found\"}");
-      return 0;
-    }
-    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
-    buffer_format(out_json, "{\"status\":\"deleted\",\"rule_id\":%u,\"rule_count\":%zu}",
-                  rule_id, eng->automation_rule_count);
-    return 0;
+static int handle_automation_run(ServerContext *ctx,
+                                 const char *path,
+                                 const char *qs,
+                                 const char *body,
+                                 size_t body_len,
+                                 int *out_status,
+                                 Buffer *out_json) {
+  (void)path; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char batch_s[16], intv_s[16];
+  query_or_json_param(qs, body, body_len, "poll_batch", batch_s, sizeof(batch_s));
+  query_or_json_param(qs, body, body_len, "auto_poll_interval_sec", intv_s, sizeof(intv_s));
+  if(intv_s[0] != '\0') {
+    eng->auto_poll_interval_sec = (uint32_t)strtoul(intv_s, NULL, 10);
   }
-
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/automation/run") == 0) {
-    char batch_s[16], intv_s[16];
-    query_or_json_param(qs, body, body_len, "poll_batch", batch_s, sizeof(batch_s));
-    query_or_json_param(qs, body, body_len, "auto_poll_interval_sec", intv_s, sizeof(intv_s));
-    if(intv_s[0] != '\0') {
-      eng->auto_poll_interval_sec = (uint32_t)strtoul(intv_s, NULL, 10);
-    }
-    size_t poll_batch = batch_s[0] ? (size_t)strtoul(batch_s, NULL, 10) : 0u;
-    size_t before_alerts = eng->automation_alert_count;
-    size_t ingested = 0;
-    if(poll_batch > 0u) {
-      ingested = engine_poll_bandit_auto(eng, poll_batch, 4u);
-    } else {
-      engine_evaluate_all_automation_rules(eng);
-      eng->last_auto_cycle_ms = wall_time_ms();
-      eng->auto_cycles_completed++;
-    }
-    size_t new_alerts = eng->automation_alert_count >= before_alerts
-                            ? (eng->automation_alert_count - before_alerts)
-                            : 0u;
-    if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
-    buffer_format(out_json,
-                  "{\"status\":\"ok\",\"auto_cycles_completed\":%llu,\"articles_ingested\":%zu,"
-                  "\"alerts_triggered\":%zu,\"total_alerts\":%zu}",
-                  (unsigned long long)eng->auto_cycles_completed, ingested, new_alerts, eng->automation_alert_count);
-    return 0;
+  size_t poll_batch = batch_s[0] ? (size_t)strtoul(batch_s, NULL, 10) : 0u;
+  size_t before_alerts = eng->automation_alert_count;
+  size_t ingested = 0;
+  if(poll_batch > 0u) {
+    ingested = engine_poll_bandit_auto(eng, poll_batch, 4u);
+  } else {
+    engine_evaluate_all_automation_rules(eng);
+    eng->last_auto_cycle_ms = wall_time_ms();
+    eng->auto_cycles_completed++;
   }
+  size_t new_alerts = eng->automation_alert_count >= before_alerts
+                          ? (eng->automation_alert_count - before_alerts)
+                          : 0u;
+  if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
+  buffer_format(out_json,
+                "{\"status\":\"ok\",\"auto_cycles_completed\":%llu,\"articles_ingested\":%zu,"
+                "\"alerts_triggered\":%zu,\"total_alerts\":%zu}",
+                (unsigned long long)eng->auto_cycles_completed, ingested, new_alerts, eng->automation_alert_count);
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 &&
-     (strcmp(path, "/api/v1/appliance") == 0 || strcmp(path, "/api/v1/machine") == 0)) {
-    EngineApplianceState app;
-    engine_appliance_state(eng, &app);
-    size_t cat_count = 0;
-    catalog_entries(&cat_count);
+static int handle_appliance(ServerContext *ctx,
+                            const char *path,
+                            const char *qs,
+                            const char *body,
+                            size_t body_len,
+                            int *out_status,
+                            Buffer *out_json) {
+  (void)path; (void)qs; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  EngineApplianceState app;
+  engine_appliance_state(eng, &app);
+  size_t cat_count = 0;
+  catalog_entries(&cat_count);
 
     buffer_format(out_json,
                   "{\"appliance\":\"oyez-one-machine-c99\",\"status\":\"%s\","
@@ -2077,269 +2281,422 @@ int http_handle_request(ServerContext *ctx,
     }
     buffer_text(out_json, "]}}");
     return 0;
+}
+
+static int handle_articles_search(ServerContext *ctx,
+                                  const char *path,
+                                  const char *qs,
+                                  const char *body,
+                                  size_t body_len,
+                                  int *out_status,
+                                  Buffer *out_json) {
+  (void)path; (void)body; (void)body_len; (void)out_status;
+  OyezEngine *eng = ctx->engine;
+  char q_str[256], cat[64], ex_cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
+  char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[64], sp_str[32];
+  char wx_str[32], wxs_str[32];
+  char reg[64], ctry[16], mctry[16], lang[16], tier[32];
+  char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
+  query_param(qs, "q", q_str, sizeof(q_str));
+  query_param(qs, "category", cat, sizeof(cat));
+  query_param(qs, "exclude_category", ex_cat, sizeof(ex_cat));
+  query_param(qs, "category_morphism", morph, sizeof(morph));
+  query_param(qs, "news_type", ntype, sizeof(ntype));
+  query_param(qs, "clearance", clr, sizeof(clr));
+  query_param(qs, "fiscal_stance", fst, sizeof(fst));
+  query_param(qs, "asset", asset, sizeof(asset));
+  query_param(qs, "fiscal_event", fev, sizeof(fev));
+  query_param(qs, "cve", cve_str, sizeof(cve_str));
+  query_param(qs, "organization", org_str, sizeof(org_str));
+  query_param(qs, "ai_tier", ait_str, sizeof(ait_str));
+  query_param(qs, "ai_model", aim_str, sizeof(aim_str));
+  query_param(qs, "ai_infra", aii_str, sizeof(aii_str));
+  query_param(qs, "ai_license", ail_str, sizeof(ail_str));
+  query_param(qs, "hf_repo", hfr_str, sizeof(hfr_str));
+  query_param(qs, "sport", sp_str, sizeof(sp_str));
+  query_param(qs, "weather", wx_str, sizeof(wx_str));
+  query_param(qs, "weather_severity", wxs_str, sizeof(wxs_str));
+  query_param(qs, "region", reg, sizeof(reg));
+  query_param(qs, "country", ctry, sizeof(ctry));
+  query_param(qs, "mentioned_country", mctry, sizeof(mctry));
+  query_param(qs, "language", lang, sizeof(lang));
+  query_param(qs, "source_tier", tier, sizeof(tier));
+  query_param(qs, "diversify", div_str, sizeof(div_str));
+  query_param(qs, "lambda", lam_str, sizeof(lam_str));
+  query_param(qs, "limit", lim_str, sizeof(lim_str));
+  query_param(qs, "offset", off_str, sizeof(off_str));
+  query_param(qs, "feed_id", fid_str, sizeof(fid_str));
+
+  ArticleQuery aq;
+  article_query_init(&aq);
+  aq.query = q_str[0] ? q_str : NULL;
+  aq.category = cat[0] ? cat : NULL;
+  aq.exclude_category = ex_cat[0] ? ex_cat : NULL;
+  aq.use_category_morphism = (strcmp(morph, "0") != 0 && strcmp(morph, "false") != 0);
+  aq.news_type = ntype[0] ? ntype : NULL;
+  aq.clearance = clr[0] ? clr : NULL;
+  aq.fiscal_stance = fst[0] ? fst : NULL;
+  aq.asset = asset[0] ? asset : NULL;
+  aq.fiscal_event = fev[0] ? fev : NULL;
+  aq.cve = cve_str[0] ? cve_str : NULL;
+  aq.organization = org_str[0] ? org_str : NULL;
+  aq.ai_tier = ait_str[0] ? ait_str : NULL;
+  aq.ai_model = aim_str[0] ? aim_str : NULL;
+  aq.ai_infra = aii_str[0] ? aii_str : NULL;
+  aq.ai_license = ail_str[0] ? ail_str : NULL;
+  aq.hf_repo = hfr_str[0] ? hfr_str : NULL;
+  aq.sport = sp_str[0] ? sp_str : NULL;
+  aq.weather = wx_str[0] ? wx_str : NULL;
+  aq.weather_severity = wxs_str[0] ? wxs_str : NULL;
+  aq.region = reg[0] ? reg : NULL;
+  aq.country = ctry[0] ? ctry : NULL;
+  aq.mentioned_country = mctry[0] ? mctry : NULL;
+  aq.language = lang[0] ? lang : NULL;
+  aq.source_tier = tier[0] ? tier : NULL;
+  aq.feed_id = fid_str[0] ? (uint32_t)strtoul(fid_str, NULL, 10) : 0u;
+  aq.diversify_mmr = (strcmp(div_str, "2") == 0 || strcmp(div_str, "dpp") == 0)
+                         ? 2
+                         : ((strcmp(div_str, "1") == 0 || strcmp(div_str, "true") == 0) ? 1 : 0);
+  if(lam_str[0]) aq.mmr_lambda = strtod(lam_str, NULL);
+  aq.limit = lim_str[0] ? (size_t)strtoul(lim_str, NULL, 10) : 50u;
+  aq.offset = off_str[0] ? (size_t)strtoul(off_str, NULL, 10) : 0u;
+
+  SearchResponse res;
+  engine_search(eng, &aq, &res);
+  buffer_format(out_json,
+                "{\"total\":%zu,\"count\":%zu,\"query_time_ms\":%.4f,\"articles\":[",
+                res.total, res.count, res.query_time_ms);
+  for(size_t i = 0; i < res.count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    serialize_article_with_query(out_json, res.hits[i].article, res.hits[i].score, 0, aq.query);
   }
+  buffer_text(out_json, "]}");
+  search_response_free(&res);
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/articles") == 0) {
-    char q_str[256], cat[64], ex_cat[64], morph[16], ntype[64], clr[64], fst[64], asset[32], fev[32];
-    char cve_str[32], org_str[32], ait_str[64], aim_str[32], aii_str[32], ail_str[64], hfr_str[64], sp_str[32];
-    char wx_str[32], wxs_str[32];
-    char reg[64], ctry[16], mctry[16], lang[16], tier[32];
-    char div_str[16], lam_str[16], lim_str[16], off_str[16], fid_str[16];
-    query_param(qs, "q", q_str, sizeof(q_str));
-    query_param(qs, "category", cat, sizeof(cat));
-    query_param(qs, "exclude_category", ex_cat, sizeof(ex_cat));
-    query_param(qs, "category_morphism", morph, sizeof(morph));
-    query_param(qs, "news_type", ntype, sizeof(ntype));
-    query_param(qs, "clearance", clr, sizeof(clr));
-    query_param(qs, "fiscal_stance", fst, sizeof(fst));
-    query_param(qs, "asset", asset, sizeof(asset));
-    query_param(qs, "fiscal_event", fev, sizeof(fev));
-    query_param(qs, "cve", cve_str, sizeof(cve_str));
-    query_param(qs, "organization", org_str, sizeof(org_str));
-    query_param(qs, "ai_tier", ait_str, sizeof(ait_str));
-    query_param(qs, "ai_model", aim_str, sizeof(aim_str));
-    query_param(qs, "ai_infra", aii_str, sizeof(aii_str));
-    query_param(qs, "ai_license", ail_str, sizeof(ail_str));
-    query_param(qs, "hf_repo", hfr_str, sizeof(hfr_str));
-    query_param(qs, "sport", sp_str, sizeof(sp_str));
-    query_param(qs, "weather", wx_str, sizeof(wx_str));
-    query_param(qs, "weather_severity", wxs_str, sizeof(wxs_str));
-    query_param(qs, "region", reg, sizeof(reg));
-    query_param(qs, "country", ctry, sizeof(ctry));
-    query_param(qs, "mentioned_country", mctry, sizeof(mctry));
-    query_param(qs, "language", lang, sizeof(lang));
-    query_param(qs, "source_tier", tier, sizeof(tier));
-    query_param(qs, "diversify", div_str, sizeof(div_str));
-    query_param(qs, "lambda", lam_str, sizeof(lam_str));
-    query_param(qs, "limit", lim_str, sizeof(lim_str));
-    query_param(qs, "offset", off_str, sizeof(off_str));
-    query_param(qs, "feed_id", fid_str, sizeof(fid_str));
-
-    ArticleQuery aq;
-    article_query_init(&aq);
-    aq.query = q_str[0] ? q_str : NULL;
-    aq.category = cat[0] ? cat : NULL;
-    aq.exclude_category = ex_cat[0] ? ex_cat : NULL;
-    aq.use_category_morphism = (strcmp(morph, "0") != 0 && strcmp(morph, "false") != 0);
-    aq.news_type = ntype[0] ? ntype : NULL;
-    aq.clearance = clr[0] ? clr : NULL;
-    aq.fiscal_stance = fst[0] ? fst : NULL;
-    aq.asset = asset[0] ? asset : NULL;
-    aq.fiscal_event = fev[0] ? fev : NULL;
-    aq.cve = cve_str[0] ? cve_str : NULL;
-    aq.organization = org_str[0] ? org_str : NULL;
-    aq.ai_tier = ait_str[0] ? ait_str : NULL;
-    aq.ai_model = aim_str[0] ? aim_str : NULL;
-    aq.ai_infra = aii_str[0] ? aii_str : NULL;
-    aq.ai_license = ail_str[0] ? ail_str : NULL;
-    aq.hf_repo = hfr_str[0] ? hfr_str : NULL;
-    aq.sport = sp_str[0] ? sp_str : NULL;
-    aq.weather = wx_str[0] ? wx_str : NULL;
-    aq.weather_severity = wxs_str[0] ? wxs_str : NULL;
-    aq.region = reg[0] ? reg : NULL;
-    aq.country = ctry[0] ? ctry : NULL;
-    aq.mentioned_country = mctry[0] ? mctry : NULL;
-    aq.language = lang[0] ? lang : NULL;
-    aq.source_tier = tier[0] ? tier : NULL;
-    aq.feed_id = fid_str[0] ? (uint32_t)strtoul(fid_str, NULL, 10) : 0u;
-    aq.diversify_mmr = (strcmp(div_str, "2") == 0 || strcmp(div_str, "dpp") == 0)
-                           ? 2
-                           : ((strcmp(div_str, "1") == 0 || strcmp(div_str, "true") == 0) ? 1 : 0);
-    if(lam_str[0]) aq.mmr_lambda = strtod(lam_str, NULL);
-    aq.limit = lim_str[0] ? (size_t)strtoul(lim_str, NULL, 10) : 50u;
-    aq.offset = off_str[0] ? (size_t)strtoul(off_str, NULL, 10) : 0u;
-
-    SearchResponse res;
-    engine_search(eng, &aq, &res);
-    buffer_format(out_json,
-                  "{\"total\":%zu,\"count\":%zu,\"query_time_ms\":%.4f,\"articles\":[",
-                  res.total, res.count, res.query_time_ms);
-    for(size_t i = 0; i < res.count; ++i) {
+static int handle_article_by_id(ServerContext *ctx,
+                                const char *path,
+                                const char *qs,
+                                const char *body,
+                                size_t body_len,
+                                int *out_status,
+                                Buffer *out_json) {
+  (void)qs; (void)body; (void)body_len;
+  OyezEngine *eng = ctx->engine;
+  uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
+  const ArticleRecord *a = engine_get_article_by_id(eng, id);
+  if(!a) {
+    *out_status = 404;
+    buffer_text(out_json, "{\"error\":\"article_not_found\"}");
+    return 0;
+  }
+  if(strstr(path + 17u, "/similar") != NULL) {
+    const ArticleRecord *dups[16];
+    uint32_t dists[16];
+    size_t n = engine_find_near_duplicates(eng, id, 18u, dups, dists, 16u);
+    buffer_format(out_json, "{\"article_id\":%u,\"similar\":[", id);
+    for(size_t i = 0; i < n; ++i) {
       if(i > 0) buffer_text(out_json, ",");
-      serialize_article_with_query(out_json, res.hits[i].article, res.hits[i].score, 0, aq.query);
+      buffer_format(out_json, "{\"hamming_distance\":%u,\"article\":", dists[i]);
+      serialize_article(out_json, dups[i], 1.0, 0);
+      buffer_text(out_json, "}");
     }
     buffer_text(out_json, "]}");
-    search_response_free(&res);
     return 0;
   }
+  buffer_text(out_json, "{\"article\":");
+  serialize_article(out_json, a, 1.0, 1);
+  buffer_text(out_json, "}");
+  return 0;
+}
 
-  if(strcmp(method, "GET") == 0 && strncmp(path, "/api/v1/articles/", 17u) == 0) {
-    uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
-    const ArticleRecord *a = engine_get_article_by_id(eng, id);
-    if(!a) {
-      *out_status = 404;
-      buffer_text(out_json, "{\"error\":\"article_not_found\"}");
-      return 0;
-    }
-    if(strstr(path + 17u, "/similar") != NULL) {
-      const ArticleRecord *dups[16];
-      uint32_t dists[16];
-      size_t n = engine_find_near_duplicates(eng, id, 18u, dups, dists, 16u);
-      buffer_format(out_json, "{\"article_id\":%u,\"similar\":[", id);
-      for(size_t i = 0; i < n; ++i) {
-        if(i > 0) buffer_text(out_json, ",");
-        buffer_format(out_json, "{\"hamming_distance\":%u,\"article\":", dists[i]);
-        serialize_article(out_json, dups[i], 1.0, 0);
-        buffer_text(out_json, "}");
-      }
-      buffer_text(out_json, "]}");
-      return 0;
-    }
-    buffer_text(out_json, "{\"article\":");
-    serialize_article(out_json, a, 1.0, 1);
-    buffer_text(out_json, "}");
+static int handle_article_enrich(ServerContext *ctx,
+                                 const char *path,
+                                 const char *qs,
+                                 const char *body,
+                                 size_t body_len,
+                                 int *out_status,
+                                 Buffer *out_json) {
+  (void)qs;
+  if(strstr(path + 17u, "/enrich") == NULL) {
+    *out_status = 404;
+    buffer_text(out_json, "{\"error\":\"not_found\"}");
     return 0;
   }
-
-  if(strcmp(method, "POST") == 0 && strncmp(path, "/api/v1/articles/", 17u) == 0 &&
-     strstr(path + 17u, "/enrich") != NULL) {
-    uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
-    const ArticleRecord *a = engine_get_article_by_id(eng, id);
-    if(!a) {
-      *out_status = 404;
-      buffer_text(out_json, "{\"error\":\"article_not_found\"}");
-      return 0;
-    }
-    ExtractedContent ex;
-    if(extract_html_from_request_or_url(body, body_len, a->url, &ex, out_status, out_json,
-                                        "enrichment_source_unavailable") != 0) {
-      return 0;
-    }
-    int upgraded = engine_enrich_article(eng, id, ex.byline, ex.excerpt, ex.markdown,
-                                         ex.text_content, ex.lead_image_url);
-    readability_free(&ex);
-
-    const ArticleRecord *updated = engine_get_article_by_id(eng, id);
-    buffer_format(out_json, "{\"status\":\"enriched\",\"upgraded\":%s,\"article\":",
-                  upgraded > 0 ? "true" : "false");
-    serialize_article(out_json, updated, 1.0, 1);
-    buffer_text(out_json, "}");
+  OyezEngine *eng = ctx->engine;
+  uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
+  const ArticleRecord *a = engine_get_article_by_id(eng, id);
+  if(!a) {
+    *out_status = 404;
+    buffer_text(out_json, "{\"error\":\"article_not_found\"}");
     return 0;
   }
-
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/extract") == 0) {
-    char aid_str[16];
-    json_extract_field(body, body_len, "article_id", aid_str, sizeof(aid_str));
-    ExtractedContent ex;
-    if(extract_html_from_request_or_url(body, body_len, NULL, &ex, out_status, out_json,
-                                        "missing_html_or_url") != 0) {
-      return 0;
-    }
-    if(aid_str[0] != '\0') {
-      uint32_t aid = (uint32_t)strtoul(aid_str, NULL, 10);
-      if(aid > 0u) {
-        engine_enrich_article(eng, aid, ex.byline, ex.excerpt, ex.markdown,
-                              ex.text_content, ex.lead_image_url);
-      }
-    }
-    ExtractedEntities ent;
-    entities_extract(ex.title, ex.excerpt, ex.text_content, NULL, NULL, 0, &ent);
-
-    buffer_text(out_json, "{\"extracted\":{\"title\":"); json_cstr(out_json, ex.title);
-    buffer_text(out_json, ",\"byline\":"); json_cstr(out_json, ex.byline);
-    buffer_text(out_json, ",\"excerpt\":"); json_cstr(out_json, ex.excerpt);
-    buffer_text(out_json, ",\"site_name\":"); json_cstr(out_json, ex.site_name);
-    buffer_text(out_json, ",\"published_time\":"); json_cstr(out_json, ex.published_time);
-    buffer_text(out_json, ",\"lead_image_url\":"); json_cstr(out_json, ex.lead_image_url);
-    buffer_text(out_json, ",\"text_content\":"); json_cstr(out_json, ex.text_content);
-    buffer_text(out_json, ",\"markdown\":"); json_cstr(out_json, ex.markdown);
-    buffer_format(out_json, ",\"word_count\":%u,\"reading_time_minutes\":%u},\"entities\":{\"news_type\":",
-                  ex.word_count, ex.reading_time_minutes);
-    json_cstr(out_json, news_type_slug(ent.news_type));
-    buffer_text(out_json, ",\"clearance\":");
-    json_cstr(out_json, clearance_level_slug(ent.clearance));
-    buffer_format(out_json, ",\"opsec_score\":%.2f,\"fiscal_stance\":", ent.opsec_score);
-    json_cstr(out_json, fiscal_stance_slug(ent.fiscal_stance));
-    buffer_format(out_json, ",\"macro_score\":%.2f,\"topics\":", ent.macro_score);
-    serialize_ontology_mask_array(out_json, ent.direct_ontology_mask);
-    buffer_text(out_json, ",\"category_closure\":");
-    serialize_ontology_mask_array(out_json, ent.closure_ontology_mask);
-    buffer_text(out_json, ",\"countries\":[");
-    for(size_t i = 0; i < ent.country_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.countries[i]);
-    }
-    buffer_text(out_json, "],\"organizations\":[");
-    for(size_t i = 0; i < ent.org_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.organizations[i]);
-    }
-    buffer_text(out_json, "],\"cves\":[");
-    for(size_t i = 0; i < ent.cve_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.cves[i]);
-    }
-    buffer_text(out_json, "],\"assets\":[");
-    for(size_t i = 0; i < ent.asset_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.assets[i]);
-    }
-    buffer_text(out_json, "],\"fiscal_events\":[");
-    for(size_t i = 0; i < ent.fiscal_event_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.fiscal_events[i]);
-    }
-    buffer_text(out_json, "],\"ai_tier\":");
-    json_cstr(out_json, ai_compute_tier_slug(ent.ai_tier));
-    buffer_format(out_json, ",\"ai_compute_score\":%.2f,\"ai_license\":", ent.ai_compute_score);
-    json_cstr(out_json, ai_weight_license_slug(ent.ai_license));
-    buffer_format(out_json, ",\"openness_score\":%.2f,\"ai_models\":[", ent.openness_score);
-    for(size_t i = 0; i < ent.ai_model_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.ai_models[i]);
-    }
-    buffer_text(out_json, "],\"ai_infra\":[");
-    for(size_t i = 0; i < ent.ai_infra_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.ai_infra[i]);
-    }
-    buffer_text(out_json, "],\"hf_repos\":[");
-    for(size_t i = 0; i < ent.hf_repo_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.hf_repos[i]);
-    }
-    buffer_format(out_json, "],\"sports_score\":%.2f,\"sports\":[", ent.sports_score);
-    for(size_t i = 0; i < ent.sport_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.sports[i]);
-    }
-    buffer_text(out_json, "],\"weather_severity\":");
-    json_cstr(out_json, weather_severity_slug(ent.weather_severity));
-    buffer_format(out_json, ",\"weather_score\":%.2f,\"weather\":[", ent.weather_score);
-    for(size_t i = 0; i < ent.weather_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      json_cstr(out_json, ent.weather[i]);
-    }
-    buffer_text(out_json, "]}}");
-
-    readability_free(&ex);
+  ExtractedContent ex;
+  if(extract_html_from_request_or_url(body, body_len, a->url, &ex, out_status, out_json,
+                                      "enrichment_source_unavailable") != 0) {
     return 0;
   }
+  int upgraded = engine_enrich_article(eng, id, ex.byline, ex.excerpt, ex.markdown,
+                                       ex.text_content, ex.lead_image_url);
+  readability_free(&ex);
 
-  if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/tokenize") == 0 && ctx->tokenizer) {
-    char *text = malloc(16384u);
-    if(!text) {
-      *out_status = 500;
-      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
-      return 0;
-    }
-    json_extract_field(body, body_len, "text", text, 16384u);
-    uint32_t *tokens = NULL;
-    size_t count = 0;
-    m1_tokenizer_encode(ctx->tokenizer, (const uint8_t *)text, strlen(text), &tokens, &count);
-    free(text);
-    buffer_format(out_json,
-                  "{\"vocab_size\":%u,\"sha256\":\"%s\",\"token_count\":%zu,\"tokens\":[",
-                  m1_tokenizer_vocab_size(ctx->tokenizer),
-                  ctx->tokenizer->sha256,
-                  count);
-    for(size_t i = 0; i < count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      buffer_format(out_json, "%u", tokens[i]);
-    }
-    buffer_text(out_json, "]}");
-    free(tokens);
+  const ArticleRecord *updated = engine_get_article_by_id(eng, id);
+  buffer_format(out_json, "{\"status\":\"enriched\",\"upgraded\":%s,\"article\":",
+                upgraded > 0 ? "true" : "false");
+  serialize_article(out_json, updated, 1.0, 1);
+  buffer_text(out_json, "}");
+  return 0;
+}
+
+static int handle_extract(ServerContext *ctx,
+                          const char *path,
+                          const char *qs,
+                          const char *body,
+                          size_t body_len,
+                          int *out_status,
+                          Buffer *out_json) {
+  (void)path; (void)qs;
+  OyezEngine *eng = ctx->engine;
+  char aid_str[16];
+  json_extract_field(body, body_len, "article_id", aid_str, sizeof(aid_str));
+  ExtractedContent ex;
+  if(extract_html_from_request_or_url(body, body_len, NULL, &ex, out_status, out_json,
+                                      "missing_html_or_url") != 0) {
     return 0;
+  }
+  if(aid_str[0] != '\0') {
+    uint32_t aid = (uint32_t)strtoul(aid_str, NULL, 10);
+    if(aid > 0u) {
+      engine_enrich_article(eng, aid, ex.byline, ex.excerpt, ex.markdown,
+                            ex.text_content, ex.lead_image_url);
+    }
+  }
+  ExtractedEntities ent;
+  entities_extract(ex.title, ex.excerpt, ex.text_content, NULL, NULL, 0, &ent);
+
+  buffer_text(out_json, "{\"extracted\":{\"title\":"); json_cstr(out_json, ex.title);
+  buffer_text(out_json, ",\"byline\":"); json_cstr(out_json, ex.byline);
+  buffer_text(out_json, ",\"excerpt\":"); json_cstr(out_json, ex.excerpt);
+  buffer_text(out_json, ",\"site_name\":"); json_cstr(out_json, ex.site_name);
+  buffer_text(out_json, ",\"published_time\":"); json_cstr(out_json, ex.published_time);
+  buffer_text(out_json, ",\"lead_image_url\":"); json_cstr(out_json, ex.lead_image_url);
+  buffer_text(out_json, ",\"text_content\":"); json_cstr(out_json, ex.text_content);
+  buffer_text(out_json, ",\"markdown\":"); json_cstr(out_json, ex.markdown);
+  buffer_format(out_json, ",\"word_count\":%u,\"reading_time_minutes\":%u},\"entities\":{\"news_type\":",
+                ex.word_count, ex.reading_time_minutes);
+  json_cstr(out_json, news_type_slug(ent.news_type));
+  buffer_text(out_json, ",\"clearance\":");
+  json_cstr(out_json, clearance_level_slug(ent.clearance));
+  buffer_format(out_json, ",\"opsec_score\":%.2f,\"fiscal_stance\":", ent.opsec_score);
+  json_cstr(out_json, fiscal_stance_slug(ent.fiscal_stance));
+  buffer_format(out_json, ",\"macro_score\":%.2f,\"topics\":", ent.macro_score);
+  serialize_ontology_mask_array(out_json, ent.direct_ontology_mask);
+  buffer_text(out_json, ",\"category_closure\":");
+  serialize_ontology_mask_array(out_json, ent.closure_ontology_mask);
+  buffer_text(out_json, ",\"countries\":[");
+  for(size_t i = 0; i < ent.country_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.countries[i]);
+  }
+  buffer_text(out_json, "],\"organizations\":[");
+  for(size_t i = 0; i < ent.org_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.organizations[i]);
+  }
+  buffer_text(out_json, "],\"cves\":[");
+  for(size_t i = 0; i < ent.cve_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.cves[i]);
+  }
+  buffer_text(out_json, "],\"assets\":[");
+  for(size_t i = 0; i < ent.asset_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.assets[i]);
+  }
+  buffer_text(out_json, "],\"fiscal_events\":[");
+  for(size_t i = 0; i < ent.fiscal_event_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.fiscal_events[i]);
+  }
+  buffer_text(out_json, "],\"ai_tier\":");
+  json_cstr(out_json, ai_compute_tier_slug(ent.ai_tier));
+  buffer_format(out_json, ",\"ai_compute_score\":%.2f,\"ai_license\":", ent.ai_compute_score);
+  json_cstr(out_json, ai_weight_license_slug(ent.ai_license));
+  buffer_format(out_json, ",\"openness_score\":%.2f,\"ai_models\":[", ent.openness_score);
+  for(size_t i = 0; i < ent.ai_model_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.ai_models[i]);
+  }
+  buffer_text(out_json, "],\"ai_infra\":[");
+  for(size_t i = 0; i < ent.ai_infra_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.ai_infra[i]);
+  }
+  buffer_text(out_json, "],\"hf_repos\":[");
+  for(size_t i = 0; i < ent.hf_repo_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.hf_repos[i]);
+  }
+  buffer_format(out_json, "],\"sports_score\":%.2f,\"sports\":[", ent.sports_score);
+  for(size_t i = 0; i < ent.sport_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.sports[i]);
+  }
+  buffer_text(out_json, "],\"weather_severity\":");
+  json_cstr(out_json, weather_severity_slug(ent.weather_severity));
+  buffer_format(out_json, ",\"weather_score\":%.2f,\"weather\":[", ent.weather_score);
+  for(size_t i = 0; i < ent.weather_count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    json_cstr(out_json, ent.weather[i]);
+  }
+  buffer_text(out_json, "]}}");
+
+  readability_free(&ex);
+  return 0;
+}
+
+static int handle_tokenize(ServerContext *ctx,
+                           const char *path,
+                           const char *qs,
+                           const char *body,
+                           size_t body_len,
+                           int *out_status,
+                           Buffer *out_json) {
+  (void)path; (void)qs;
+  if(!ctx->tokenizer) {
+    *out_status = 404;
+    buffer_text(out_json, "{\"error\":\"not_found\"}");
+    return 0;
+  }
+  char *text = malloc(16384u);
+  if(!text) {
+    *out_status = 500;
+    buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
+    return 0;
+  }
+  json_extract_field(body, body_len, "text", text, 16384u);
+  uint32_t *tokens = NULL;
+  size_t count = 0;
+  m1_tokenizer_encode(ctx->tokenizer, (const uint8_t *)text, strlen(text), &tokens, &count);
+  free(text);
+  buffer_format(out_json,
+                "{\"vocab_size\":%u,\"sha256\":\"%s\",\"token_count\":%zu,\"tokens\":[",
+                m1_tokenizer_vocab_size(ctx->tokenizer),
+                ctx->tokenizer->sha256,
+                count);
+  for(size_t i = 0; i < count; ++i) {
+    if(i > 0) buffer_text(out_json, ",");
+    buffer_format(out_json, "%u", tokens[i]);
+  }
+  buffer_text(out_json, "]}");
+  free(tokens);
+  return 0;
+}
+
+typedef int (*HttpRouteHandler)(ServerContext *ctx,
+                                const char *path,
+                                const char *qs,
+                                const char *body,
+                                size_t body_len,
+                                int *out_status,
+                                Buffer *out_json);
+
+typedef struct {
+  const char *method;
+  const char *path;
+  int prefix_match;
+  int is_write;
+  const char *content_type;
+  HttpRouteHandler handler;
+} HttpRoute;
+
+static const HttpRoute k_http_routes[] = {
+  {"GET", "/console", 0, 0, "text/html; charset=utf-8", handle_console},
+  {"GET", "/index.html", 0, 0, "text/html; charset=utf-8", handle_console},
+  {"GET", "/", 0, 0, NULL, handle_health},
+  {"GET", "/health", 0, 0, NULL, handle_health},
+  {"GET", "/api/v1/stats", 0, 0, NULL, handle_stats},
+  {"GET", "/api/v1/ontology", 0, 0, NULL, handle_ontology},
+  {"GET", "/api/v1/facets", 0, 0, NULL, handle_facets},
+  {"GET", "/api/v1/trending", 0, 0, NULL, handle_facets},
+  {"GET", "/api/v1/concepts", 0, 0, NULL, handle_concepts},
+  {"GET", "/api/v1/pullback", 0, 0, NULL, handle_pullback},
+  {"GET", "/api/v1/pushout", 0, 0, NULL, handle_pushout},
+  {"GET", "/api/v1/fibration", 0, 0, NULL, handle_fibration},
+  {"GET", "/api/v1/temporal", 0, 0, NULL, handle_temporal},
+  {"GET", "/api/v1/topos", 0, 0, NULL, handle_topos},
+  {"GET", "/api/v1/operad", 0, 0, NULL, handle_operad},
+  {"GET", "/api/v1/feed.xml", 0, 0, "application/atom+xml; charset=utf-8", handle_feed_xml},
+  {"GET", "/api/v1/stream", 0, 0, "text/event-stream; charset=utf-8", handle_stream},
+  {"GET", "/api/v1/centrality", 0, 0, NULL, handle_centrality},
+  {"GET", "/api/v1/catalog", 0, 0, NULL, handle_catalog},
+  {"POST", "/api/v1/catalog/seed", 0, 1, NULL, handle_catalog_seed},
+  {"GET", "/api/v1/feeds", 0, 0, NULL, handle_feeds},
+  {"POST", "/api/v1/feeds/poll", 0, 1, NULL, handle_feeds_poll},
+  {"GET", "/api/v1/markets", 0, 0, NULL, handle_markets},
+  {"GET", "/api/v1/security", 0, 0, NULL, handle_security},
+  {"GET", "/api/v1/ai", 0, 0, NULL, handle_ai},
+  {"GET", "/api/v1/sports", 0, 0, NULL, handle_sports},
+  {"GET", "/api/v1/weather", 0, 0, NULL, handle_weather},
+  {"GET", "/api/v1/automation", 0, 0, NULL, handle_automation_get},
+  {"POST", "/api/v1/automation/rules", 0, 1, NULL, handle_automation_rules_post},
+  {"DELETE", "/api/v1/automation/rules", 0, 1, NULL, handle_automation_rules_delete},
+  {"POST", "/api/v1/automation/run", 0, 1, NULL, handle_automation_run},
+  {"GET", "/api/v1/appliance", 0, 0, NULL, handle_appliance},
+  {"GET", "/api/v1/machine", 0, 0, NULL, handle_appliance},
+  {"GET", "/api/v1/articles", 0, 0, NULL, handle_articles_search},
+  {"GET", "/api/v1/articles/", 1, 0, NULL, handle_article_by_id},
+  {"POST", "/api/v1/articles/", 1, 1, NULL, handle_article_enrich},
+  {"POST", "/api/v1/extract", 0, 1, NULL, handle_extract},
+  {"POST", "/api/v1/tokenize", 0, 0, NULL, handle_tokenize}
+};
+
+static const HttpRoute *find_http_route(const char *method,
+                                        const char *target,
+                                        char *out_path,
+                                        size_t out_path_cap,
+                                        const char **out_qs) {
+  if(!method || !target || !out_path || out_path_cap == 0) return NULL;
+  const char *qmark = strchr(target, '?');
+  size_t path_len = qmark ? (size_t)(qmark - target) : strlen(target);
+  if(path_len >= out_path_cap) path_len = out_path_cap - 1u;
+  memcpy(out_path, target, path_len);
+  out_path[path_len] = '\0';
+  while(path_len > 1u && out_path[path_len - 1u] == '/') {
+    out_path[--path_len] = '\0';
+  }
+  if(out_qs) *out_qs = qmark ? (qmark + 1u) : "";
+
+  size_t nroutes = sizeof(k_http_routes) / sizeof(k_http_routes[0]);
+  for(size_t i = 0; i < nroutes; ++i) {
+    const HttpRoute *r = &k_http_routes[i];
+    if(strcmp(method, r->method) != 0) continue;
+    if(r->prefix_match) {
+      if(strncmp(out_path, r->path, strlen(r->path)) == 0) return r;
+    } else {
+      if(strcmp(out_path, r->path) == 0) return r;
+    }
+  }
+  return NULL;
+}
+
+int http_handle_request(ServerContext *ctx,
+                        const char *method,
+                        const char *target,
+                        const char *body,
+                        size_t body_len,
+                        int *out_status,
+                        Buffer *out_json) {
+  if(!ctx || !method || !target || !out_status || !out_json) return -1;
+  buffer_init(out_json);
+  *out_status = 200;
+
+  char path[512];
+  const char *qs = "";
+  const HttpRoute *route = find_http_route(method, target, path, sizeof(path), &qs);
+  if(route && route->handler) {
+    return route->handler(ctx, path, qs, body, body_len, out_status, out_json);
   }
 
   *out_status = 404;
@@ -2362,19 +2719,6 @@ typedef struct {
   ServerContext *ctx;
   int client_fd;
 } ClientConnTask;
-
-static const char *detect_content_type(const char *target) {
-  if(strncmp(target, "/console", 8u) == 0 || strncmp(target, "/index.html", 11u) == 0) {
-    return "text/html; charset=utf-8";
-  }
-  if(strncmp(target, "/api/v1/feed.xml", 16u) == 0) {
-    return "application/atom+xml; charset=utf-8";
-  }
-  if(strncmp(target, "/api/v1/stream", 14u) == 0) {
-    return "text/event-stream; charset=utf-8";
-  }
-  return "application/json; charset=utf-8";
-}
 
 static int send_all(int fd, const char *data, size_t len) {
   size_t sent = 0;
@@ -2552,12 +2896,9 @@ void http_serve_client(ServerContext *ctx, int client) {
     const char *body = req + hdr_len;
     size_t body_len = expected_body;
 
-    int is_write = ((strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0) &&
-                    (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
-                     strncmp(target, "/api/v1/feeds/poll", 18u) == 0 ||
-                     strncmp(target, "/api/v1/automation/", 19u) == 0 ||
-                     strncmp(target, "/api/v1/articles/", 17u) == 0 ||
-                     strncmp(target, "/api/v1/extract", 15u) == 0));
+    char route_path[512];
+    const HttpRoute *matched = find_http_route(method, target, route_path, sizeof(route_path), NULL);
+    int is_write = (matched && matched->is_write) ? 1 : 0;
     if(is_write) engine_write_lock(ctx->engine);
     else engine_read_lock(ctx->engine);
 
@@ -2567,7 +2908,9 @@ void http_serve_client(ServerContext *ctx, int client) {
 
     engine_unlock(ctx->engine);
 
-    const char *ctype = detect_content_type(target);
+    const char *ctype = (matched && matched->content_type)
+                            ? matched->content_type
+                            : "application/json; charset=utf-8";
     Buffer resp;
     buffer_init(&resp);
     buffer_format(&resp,
