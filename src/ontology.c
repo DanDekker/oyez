@@ -1787,8 +1787,8 @@ static void normalize_simplex32(const double *raw, double *out_prob) {
 
 static double sinkhorn_solve_pair(const double *mu,
                                   const double *nu,
-                                  const double c_mat[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT],
-                                  const double k_mat[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT],
+                                  double c_mat[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT],
+                                  double k_mat[ONTOLOGY_NODE_COUNT][ONTOLOGY_NODE_COUNT],
                                   double eps,
                                   double *out_linear_cost,
                                   double *out_entropy,
