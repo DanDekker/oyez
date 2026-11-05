@@ -464,7 +464,7 @@ static size_t evaluate_article_automation_rules(OyezEngine *engine, const Articl
     if(already) continue;
 
     r->hit_count++;
-    r->last_triggered_ms = a->published_ms > 0 ? a->published_ms : wall_time_ms();
+    r->last_triggered_ms = a->published_ms > 0 ? a->published_ms : (uint64_t)wall_time_ms();
 
     size_t slot = engine->automation_alert_head % MAX_AUTOMATION_ALERTS;
     engine->automation_alert_head = (engine->automation_alert_head + 1u) % MAX_AUTOMATION_ALERTS;
@@ -1177,7 +1177,7 @@ int engine_ingest_article(OyezEngine *engine,
   a->content_text = markup_clean_cstr((content_html && content_html[0]) ? content_html : summary);
   if(!a->content_text) a->content_text = dup_str("");
   a->published_at = arena_strdup(engine, published_at ? published_at : "2026-11-03T00:00:00Z");
-  a->published_ms = published_ms > 0 ? published_ms : wall_time_ms();
+  a->published_ms = published_ms > 0 ? published_ms : (uint64_t)wall_time_ms();
   a->image_url = arena_strdup(engine, image_url ? image_url : "");
   a->feed_title = arena_strdup(engine, feed->title);
   a->feed_category = arena_strdup(engine, feed->category);
