@@ -486,7 +486,8 @@ static bool encode_symbols(const Tokenizer *t, const void *bytes, const uint32_t
     }
     if (length > TOKEN_MAX_CORPUS) { if (error) snprintf(error, 256, "token: input too large"); return false; }
     if (symbols) for (size_t i = 0; i < length; ++i) if (symbols[i] >= TOKEN_MAX_VOCAB) {
-        if (error) snprintf(error, 256, "token: symbol outside vocabulary address space"); return false;
+        if (error) snprintf(error, 256, "token: symbol outside vocabulary address space");
+        return false;
     }
 
     const unsigned char *b = bytes;
@@ -644,7 +645,8 @@ bool token_load(Tokenizer *t, const void *bytes, size_t length, char error[256])
     if (!wire_read_u32(body, body_len, &pos, &n_merges)) { if (error) snprintf(error, 256, "token: truncated"); goto done; }
     if (!wire_read_u32(body, body_len, &pos, &n_special)) { if (error) snprintf(error, 256, "token: truncated"); goto done; }
     if (n_special > TOKEN_MAX_SPECIAL || TOKEN_BASE + (uint64_t)n_merges + n_special > TOKEN_MAX_VOCAB) {
-        if (error) snprintf(error, 256, "token: vocab exceeds cap"); goto done;
+        if (error) snprintf(error, 256, "token: vocab exceeds cap");
+        goto done;
     }
 
     if (n_merges) {
@@ -654,10 +656,12 @@ bool token_load(Tokenizer *t, const void *bytes, size_t length, char error[256])
     }
     for (uint32_t i = 0; i < n_merges; ++i) {
         if (!wire_read_u32(body, body_len, &pos, &t->merge_left[i]) || !wire_read_u32(body, body_len, &pos, &t->merge_right[i])) {
-            if (error) snprintf(error, 256, "token: truncated merges"); goto done;
+            if (error) snprintf(error, 256, "token: truncated merges");
+            goto done;
         }
         if (t->merge_left[i] >= TOKEN_BASE + i || t->merge_right[i] >= TOKEN_BASE + i) {
-            if (error) snprintf(error, 256, "token: merge references a later or unknown token"); goto done;
+            if (error) snprintf(error, 256, "token: merge references a later or unknown token");
+            goto done;
         }
     }
     t->n_merges = n_merges;
