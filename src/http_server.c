@@ -15,40 +15,22 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted) {
-  if(out_inserted) *out_inserted = 0;
-  FeedRecord *feed = NULL;
-  for(size_t i = 0; i < engine->feed_count; ++i) {
-    if(engine->feeds[i].id == feed_id) {
-      feed = &engine->feeds[i];
-      break;
-    }
+static void set_feed_error(FeedRecord *feed, const char *err) {
+  if(!feed) return;
+  size_t len = err ? strlen(err) : 0u;
+  char *copy = malloc(len + 1u);
+  if(copy) {
+    if(len > 0u) memcpy(copy, err, len);
+    copy[len] = '\0';
   }
-  if(!feed) return -1;
+  free(feed->last_error);
+  feed->last_error = copy;
+}
 
-  Buffer raw;
-  if(http_fetch_url(feed->feed_url, &raw) != 0) {
-    feed->error_count++;
-    free(feed->last_error);
-    feed->last_error = malloc(32u);
-    if(feed->last_error) strcpy(feed->last_error, "fetch_failed");
-    return -1;
-  }
-
-  ParsedFeed parsed;
-  if(feed_parse(raw.data, raw.len, feed->site_url, &parsed) != 0) {
-    buffer_free(&raw);
-    feed->error_count++;
-    free(feed->last_error);
-    feed->last_error = malloc(32u);
-    if(feed->last_error) strcpy(feed->last_error, "parse_failed");
-    return -1;
-  }
-  buffer_free(&raw);
-
+static size_t ingest_parsed_feed_items(OyezEngine *engine, FeedRecord *feed, const ParsedFeed *parsed) {
   size_t inserted = 0;
-  for(size_t i = 0; i < parsed.item_count; ++i) {
-    ParsedFeedItem *it = &parsed.items[i];
+  for(size_t i = 0; i < parsed->item_count; ++i) {
+    const ParsedFeedItem *it = &parsed->items[i];
     int ins = 0;
     uint64_t pub_ms = parse_timestamp_ms(it->published_at);
     if(pub_ms == 0u) pub_ms = (uint64_t)wall_time_ms();
@@ -71,13 +53,36 @@ int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_insert
       inserted++;
     }
   }
-
   feed->fetch_count++;
   feed->last_fetched_ms = wall_time_ms();
   engine->total_bandit_pulls++;
-  free(feed->last_error);
-  feed->last_error = malloc(1u);
-  if(feed->last_error) feed->last_error[0] = '\0';
+  set_feed_error(feed, "");
+  return inserted;
+}
+
+int engine_refresh_feed(OyezEngine *engine, uint32_t feed_id, size_t *out_inserted) {
+  if(out_inserted) *out_inserted = 0;
+  if(!engine) return -1;
+  FeedRecord *feed = (FeedRecord *)engine_find_feed(engine, feed_id);
+  if(!feed) return -1;
+
+  Buffer raw;
+  if(http_fetch_url(feed->feed_url, &raw) != 0) {
+    feed->error_count++;
+    set_feed_error(feed, "fetch_failed");
+    return -1;
+  }
+
+  ParsedFeed parsed;
+  if(feed_parse(raw.data, raw.len, feed->site_url, &parsed) != 0) {
+    buffer_free(&raw);
+    feed->error_count++;
+    set_feed_error(feed, "parse_failed");
+    return -1;
+  }
+  buffer_free(&raw);
+
+  size_t inserted = ingest_parsed_feed_items(engine, feed, &parsed);
   feed_free(&parsed);
   if(out_inserted) *out_inserted = inserted;
   return 0;
@@ -112,7 +117,6 @@ static void *poll_worker_main(void *arg) {
       pthread_mutex_unlock(&pool->idx_lock);
       continue;
     }
-    uint32_t feed_id = pool->engine->feeds[idx].id;
     const char *feed_url = pool->engine->feeds[idx].feed_url;
     const char *site_url = pool->engine->feeds[idx].site_url;
     pthread_mutex_unlock(&pool->idx_lock);
@@ -121,6 +125,7 @@ static void *poll_worker_main(void *arg) {
     if(http_fetch_url(feed_url, &raw) != 0) {
       pthread_mutex_lock(&pool->eng_lock);
       pool->engine->feeds[idx].error_count++;
+      set_feed_error(&pool->engine->feeds[idx], "fetch_failed");
       pool->engine->total_bandit_pulls++;
       pthread_mutex_unlock(&pool->eng_lock);
       continue;
@@ -131,6 +136,7 @@ static void *poll_worker_main(void *arg) {
       buffer_free(&raw);
       pthread_mutex_lock(&pool->eng_lock);
       pool->engine->feeds[idx].error_count++;
+      set_feed_error(&pool->engine->feeds[idx], "parse_failed");
       pool->engine->total_bandit_pulls++;
       pthread_mutex_unlock(&pool->eng_lock);
       continue;
@@ -138,35 +144,7 @@ static void *poll_worker_main(void *arg) {
     buffer_free(&raw);
 
     pthread_mutex_lock(&pool->eng_lock);
-    size_t ins_count = 0;
-    for(size_t i = 0; i < parsed.item_count; ++i) {
-      ParsedFeedItem *it = &parsed.items[i];
-      int ins = 0;
-      uint64_t pub_ms = parse_timestamp_ms(it->published_at);
-      if(pub_ms == 0u) pub_ms = (uint64_t)wall_time_ms();
-      if(engine_ingest_article(pool->engine,
-                               feed_id,
-                               it->guid,
-                               it->title,
-                               it->url,
-                               it->author,
-                               it->summary,
-                               it->content_html,
-                               it->published_at,
-                               pub_ms,
-                               it->image_url,
-                               (const char *const *)it->categories,
-                               it->category_count,
-                               NULL,
-                               &ins) == 0 &&
-         ins) {
-        ins_count++;
-      }
-    }
-    pool->engine->feeds[idx].fetch_count++;
-    pool->engine->feeds[idx].last_fetched_ms = wall_time_ms();
-    pool->engine->total_bandit_pulls++;
-    pool->total_inserted += ins_count;
+    pool->total_inserted += ingest_parsed_feed_items(pool->engine, &pool->engine->feeds[idx], &parsed);
     pthread_mutex_unlock(&pool->eng_lock);
 
     feed_free(&parsed);
@@ -174,9 +152,11 @@ static void *poll_worker_main(void *arg) {
   return NULL;
 }
 
-size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count) {
-  if(!engine || engine->feed_count == 0) return 0;
-  size_t limit = (max_feeds > 0 && max_feeds < engine->feed_count) ? max_feeds : engine->feed_count;
+static size_t run_poll_pool(OyezEngine *engine,
+                            const uint32_t *feed_ids,
+                            size_t limit,
+                            size_t thread_count) {
+  if(!engine || limit == 0) return 0;
   if(thread_count == 0) thread_count = 1u;
   if(thread_count > 16u) thread_count = 16u;
   if(thread_count > limit) thread_count = limit;
@@ -184,7 +164,7 @@ size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t threa
   PollPool pool;
   memset(&pool, 0, sizeof(pool));
   pool.engine = engine;
-  pool.feed_ids = NULL;
+  pool.feed_ids = feed_ids;
   pool.limit = limit;
   pthread_mutex_init(&pool.idx_lock, NULL);
   pthread_mutex_init(&pool.eng_lock, NULL);
@@ -202,6 +182,12 @@ size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t threa
   return pool.total_inserted;
 }
 
+size_t engine_poll_concurrent(OyezEngine *engine, size_t max_feeds, size_t thread_count) {
+  if(!engine || engine->feed_count == 0) return 0;
+  size_t limit = (max_feeds > 0 && max_feeds < engine->feed_count) ? max_feeds : engine->feed_count;
+  return run_poll_pool(engine, NULL, limit, thread_count);
+}
+
 size_t engine_poll_bandit_auto(OyezEngine *engine, size_t batch_size, size_t thread_count) {
   if(!engine) return 0;
   size_t inserted = 0;
@@ -212,29 +198,7 @@ size_t engine_poll_bandit_auto(OyezEngine *engine, size_t batch_size, size_t thr
     if(selected > 0) {
       uint32_t fids[64];
       for(size_t i = 0; i < selected; ++i) fids[i] = prio[i].feed_id;
-      if(thread_count == 0) thread_count = 1u;
-      if(thread_count > 16u) thread_count = 16u;
-      if(thread_count > selected) thread_count = selected;
-
-      PollPool pool;
-      memset(&pool, 0, sizeof(pool));
-      pool.engine = engine;
-      pool.feed_ids = fids;
-      pool.limit = selected;
-      pthread_mutex_init(&pool.idx_lock, NULL);
-      pthread_mutex_init(&pool.eng_lock, NULL);
-
-      pthread_t threads[16];
-      for(size_t t = 0; t < thread_count; ++t) {
-        pthread_create(&threads[t], NULL, poll_worker_main, &pool);
-      }
-      for(size_t t = 0; t < thread_count; ++t) {
-        pthread_join(threads[t], NULL);
-      }
-
-      pthread_mutex_destroy(&pool.idx_lock);
-      pthread_mutex_destroy(&pool.eng_lock);
-      inserted = pool.total_inserted;
+      inserted = run_poll_pool(engine, fids, selected, thread_count);
     }
   }
   engine_evaluate_all_automation_rules(engine);
