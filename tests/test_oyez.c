@@ -1833,6 +1833,22 @@ static void test_http_connection_framing(void) {
   assert(count_substring(response.data, "HTTP/1.1 200 OK") == 1u);
   buffer_free(&response);
 
+  const char *token_header =
+      "GET /health HTTP/1.1\r\nX_!#$%&'*+-.^`|~: value\r\nConnection: close\r\n\r\n";
+  http_socket_exchange(&ctx, token_header, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 200 OK") == 1u);
+  buffer_free(&response);
+
+  const char *invalid_names[] = {"X Bad", "X(Bad)", "X/Bad", "X\x80"};
+  for(size_t i = 0; i < sizeof(invalid_names) / sizeof(invalid_names[0]); ++i) {
+    char request[256];
+    snprintf(request, sizeof(request),
+             "GET /health HTTP/1.1\r\n%s: value\r\nConnection: close\r\n\r\n", invalid_names[i]);
+    http_socket_exchange(&ctx, request, 0, &response);
+    assert(count_substring(response.data, "HTTP/1.1 400 Bad Request") == 1u);
+    buffer_free(&response);
+  }
+
   const char *bare_newline =
       "GET /health HTTP/1.1\r\nX-Note: value\ncontinued\r\n\r\n";
   http_socket_exchange(&ctx, bare_newline, 0, &response);

@@ -2564,7 +2564,9 @@ static int parse_request_headers(char *req, size_t hdr_len, size_t cap,
     if(!colon || colon == p) return 400;
     for(char *q = p; q < colon; ++q) {
       unsigned char c = (unsigned char)*q;
-      if(!isalnum(c) && c != '-') return 400;
+      int ascii_alnum = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                        (c >= 'a' && c <= 'z');
+      if(!ascii_alnum && !strchr("!#$%&'*+-.^_`|~", c)) return 400;
     }
     const char *value = colon + 1u;
     while(value < end && (*value == ' ' || *value == '\t')) value++;
