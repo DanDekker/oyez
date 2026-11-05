@@ -573,6 +573,7 @@ void engine_extract_query_snippet(const ArticleRecord *a,
                                   const char *query,
                                   char *out_buf,
                                   size_t out_cap);
+void article_query_init(ArticleQuery *q);
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out);
 void search_response_free(SearchResponse *res);
 double engine_dpp_rerank(ScoredArticle *pool, size_t count, double lambda);

@@ -256,6 +256,31 @@ static BitSet *country_fiber_get(CountryFiber *table, size_t cap, const char *co
   return NULL;
 }
 
+static void country_fiber_set_slot(CountryFiber *table, size_t cap, const char *code, uint32_t slot) {
+  BitSet *cb = country_fiber_get(table, cap, code, 1);
+  if(cb) bitset_set(cb, slot);
+}
+
+static void country_fiber_free_array(CountryFiber *table, size_t cap) {
+  for(size_t i = 0; i < cap; ++i) {
+    if(table[i].occupied) bitset_free(&table[i].bits);
+  }
+}
+
+static int filter_by_country_fiber(BitSet *candidates,
+                                   const CountryFiber *table,
+                                   size_t cap,
+                                   const char *code) {
+  if(!code || !code[0]) return 1;
+  const BitSet *fb = country_fiber_get((CountryFiber *)table, cap, code, 0);
+  if(!fb) {
+    bitset_free(candidates);
+    return 0;
+  }
+  bitset_and_inplace(candidates, fb);
+  return 1;
+}
+
 static int inv_table_grow(OyezEngine *engine) {
   size_t next_cap = engine->inv_cap ? (engine->inv_cap * 2u) : 4096u;
   InvertedBucket *next = calloc(next_cap, sizeof(InvertedBucket));
@@ -644,23 +669,17 @@ void engine_free(OyezEngine *engine) {
     bitset_free(&engine->by_direct_ontology[i]);
     bitset_free(&engine->by_closure_ontology[i]);
   }
-  for(size_t i = 0; i < 256u; ++i) {
-    if(engine->by_source_country[i].occupied) bitset_free(&engine->by_source_country[i].bits);
-    if(engine->by_mentioned_country[i].occupied) bitset_free(&engine->by_mentioned_country[i].bits);
-  }
-  for(size_t i = 0; i < 128u; ++i) {
-    if(engine->by_asset[i].occupied) bitset_free(&engine->by_asset[i].bits);
-    if(engine->by_cve[i].occupied) bitset_free(&engine->by_cve[i].bits);
-    if(engine->by_org[i].occupied) bitset_free(&engine->by_org[i].bits);
-    if(engine->by_ai_model[i].occupied) bitset_free(&engine->by_ai_model[i].bits);
-    if(engine->by_ai_infra[i].occupied) bitset_free(&engine->by_ai_infra[i].bits);
-    if(engine->by_hf_repo[i].occupied) bitset_free(&engine->by_hf_repo[i].bits);
-    if(engine->by_sport[i].occupied) bitset_free(&engine->by_sport[i].bits);
-    if(engine->by_weather[i].occupied) bitset_free(&engine->by_weather[i].bits);
-  }
-  for(size_t i = 0; i < 64u; ++i) {
-    if(engine->by_fiscal_event[i].occupied) bitset_free(&engine->by_fiscal_event[i].bits);
-  }
+  country_fiber_free_array(engine->by_source_country, 256u);
+  country_fiber_free_array(engine->by_mentioned_country, 256u);
+  country_fiber_free_array(engine->by_asset, 128u);
+  country_fiber_free_array(engine->by_fiscal_event, 64u);
+  country_fiber_free_array(engine->by_cve, 128u);
+  country_fiber_free_array(engine->by_org, 128u);
+  country_fiber_free_array(engine->by_ai_model, 128u);
+  country_fiber_free_array(engine->by_ai_infra, 128u);
+  country_fiber_free_array(engine->by_hf_repo, 128u);
+  country_fiber_free_array(engine->by_sport, 128u);
+  country_fiber_free_array(engine->by_weather, 128u);
   for(size_t i = 0; i < engine->inv_cap; ++i) {
     if(engine->inv_table[i].occupied) {
       free(engine->inv_table[i].slots);
@@ -790,48 +809,36 @@ static void index_article_record(OyezEngine *engine, ArticleRecord *a) {
     }
   }
 
-  BitSet *src_cb = country_fiber_get(engine->by_source_country, 256u, a->feed_country, 1);
-  if(src_cb) bitset_set(src_cb, slot);
-
+  country_fiber_set_slot(engine->by_source_country, 256u, a->feed_country, slot);
   for(size_t i = 0; i < a->mentioned_country_count; ++i) {
-    BitSet *m_cb = country_fiber_get(engine->by_mentioned_country, 256u, a->mentioned_countries[i], 1);
-    if(m_cb) bitset_set(m_cb, slot);
+    country_fiber_set_slot(engine->by_mentioned_country, 256u, a->mentioned_countries[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_asset_count; ++i) {
-    BitSet *a_cb = country_fiber_get(engine->by_asset, 128u, a->mentioned_assets[i], 1);
-    if(a_cb) bitset_set(a_cb, slot);
+    country_fiber_set_slot(engine->by_asset, 128u, a->mentioned_assets[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_fiscal_event_count; ++i) {
-    BitSet *e_cb = country_fiber_get(engine->by_fiscal_event, 64u, a->mentioned_fiscal_events[i], 1);
-    if(e_cb) bitset_set(e_cb, slot);
+    country_fiber_set_slot(engine->by_fiscal_event, 64u, a->mentioned_fiscal_events[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_cve_count; ++i) {
-    BitSet *c_cb = country_fiber_get(engine->by_cve, 128u, a->mentioned_cves[i], 1);
-    if(c_cb) bitset_set(c_cb, slot);
+    country_fiber_set_slot(engine->by_cve, 128u, a->mentioned_cves[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_org_count; ++i) {
-    BitSet *o_cb = country_fiber_get(engine->by_org, 128u, a->mentioned_orgs[i], 1);
-    if(o_cb) bitset_set(o_cb, slot);
+    country_fiber_set_slot(engine->by_org, 128u, a->mentioned_orgs[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_ai_model_count; ++i) {
-    BitSet *m_cb = country_fiber_get(engine->by_ai_model, 128u, a->mentioned_ai_models[i], 1);
-    if(m_cb) bitset_set(m_cb, slot);
+    country_fiber_set_slot(engine->by_ai_model, 128u, a->mentioned_ai_models[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_ai_infra_count; ++i) {
-    BitSet *i_cb = country_fiber_get(engine->by_ai_infra, 128u, a->mentioned_ai_infra[i], 1);
-    if(i_cb) bitset_set(i_cb, slot);
+    country_fiber_set_slot(engine->by_ai_infra, 128u, a->mentioned_ai_infra[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_hf_repo_count; ++i) {
-    BitSet *h_cb = country_fiber_get(engine->by_hf_repo, 128u, a->mentioned_hf_repos[i], 1);
-    if(h_cb) bitset_set(h_cb, slot);
+    country_fiber_set_slot(engine->by_hf_repo, 128u, a->mentioned_hf_repos[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_sport_count; ++i) {
-    BitSet *sp_cb = country_fiber_get(engine->by_sport, 128u, a->mentioned_sports[i], 1);
-    if(sp_cb) bitset_set(sp_cb, slot);
+    country_fiber_set_slot(engine->by_sport, 128u, a->mentioned_sports[i], slot);
   }
   for(size_t i = 0; i < a->mentioned_weather_count; ++i) {
-    BitSet *wx_cb = country_fiber_get(engine->by_weather, 128u, a->mentioned_weather[i], 1);
-    if(wx_cb) bitset_set(wx_cb, slot);
+    country_fiber_set_slot(engine->by_weather, 128u, a->mentioned_weather[i], slot);
   }
 
   LexicalTerm terms[MAX_LEXICAL_TOKENS];
@@ -1351,6 +1358,15 @@ static uint64_t hash_article_query(const ArticleQuery *q, uint64_t gen) {
   return h;
 }
 
+void article_query_init(ArticleQuery *q) {
+  if(!q) return;
+  memset(q, 0, sizeof(*q));
+  q->use_category_morphism = 1;
+  q->diversify_mmr = 1;
+  q->mmr_lambda = 0.65;
+  q->limit = 40u;
+}
+
 int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchResponse *out) {
   if(!engine || !q || !out) return -1;
   memset(out, 0, sizeof(*out));
@@ -1424,41 +1440,10 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
-  if(q->asset && q->asset[0]) {
-    const BitSet *ab = country_fiber_get((CountryFiber *)engine->by_asset, 128u, q->asset, 0);
-    if(ab) bitset_and_inplace(&candidates, ab);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->fiscal_event && q->fiscal_event[0]) {
-    const BitSet *eb = country_fiber_get((CountryFiber *)engine->by_fiscal_event, 64u, q->fiscal_event, 0);
-    if(eb) bitset_and_inplace(&candidates, eb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->cve && q->cve[0]) {
-    const BitSet *cvb = country_fiber_get((CountryFiber *)engine->by_cve, 128u, q->cve, 0);
-    if(cvb) bitset_and_inplace(&candidates, cvb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->organization && q->organization[0]) {
-    const BitSet *ob = country_fiber_get((CountryFiber *)engine->by_org, 128u, q->organization, 0);
-    if(ob) bitset_and_inplace(&candidates, ob);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
+  if(!filter_by_country_fiber(&candidates, engine->by_asset, 128u, q->asset)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_fiscal_event, 64u, q->fiscal_event)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_cve, 128u, q->cve)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_org, 128u, q->organization)) return 0;
 
   if(q->ai_tier && q->ai_tier[0]) {
     AiComputeTier at;
@@ -1470,23 +1455,8 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
-  if(q->ai_model && q->ai_model[0]) {
-    const BitSet *mb = country_fiber_get((CountryFiber *)engine->by_ai_model, 128u, q->ai_model, 0);
-    if(mb) bitset_and_inplace(&candidates, mb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->ai_infra && q->ai_infra[0]) {
-    const BitSet *ib = country_fiber_get((CountryFiber *)engine->by_ai_infra, 128u, q->ai_infra, 0);
-    if(ib) bitset_and_inplace(&candidates, ib);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
+  if(!filter_by_country_fiber(&candidates, engine->by_ai_model, 128u, q->ai_model)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_ai_infra, 128u, q->ai_infra)) return 0;
 
   if(q->ai_license && q->ai_license[0]) {
     AiWeightLicense al;
@@ -1498,32 +1468,9 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
-  if(q->hf_repo && q->hf_repo[0]) {
-    const BitSet *hb = country_fiber_get((CountryFiber *)engine->by_hf_repo, 128u, q->hf_repo, 0);
-    if(hb) bitset_and_inplace(&candidates, hb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->sport && q->sport[0]) {
-    const BitSet *spb = country_fiber_get((CountryFiber *)engine->by_sport, 128u, q->sport, 0);
-    if(spb) bitset_and_inplace(&candidates, spb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->weather && q->weather[0]) {
-    const BitSet *wxb = country_fiber_get((CountryFiber *)engine->by_weather, 128u, q->weather, 0);
-    if(wxb) bitset_and_inplace(&candidates, wxb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
+  if(!filter_by_country_fiber(&candidates, engine->by_hf_repo, 128u, q->hf_repo)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_sport, 128u, q->sport)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_weather, 128u, q->weather)) return 0;
 
   if(q->weather_severity && q->weather_severity[0]) {
     WeatherSeverity ws;
@@ -1556,23 +1503,8 @@ int engine_search(const OyezEngine *engine, const ArticleQuery *q, SearchRespons
     }
   }
 
-  if(q->country && q->country[0]) {
-    const BitSet *cb = country_fiber_get((CountryFiber *)engine->by_source_country, 256u, q->country, 0);
-    if(cb) bitset_and_inplace(&candidates, cb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
-
-  if(q->mentioned_country && q->mentioned_country[0]) {
-    const BitSet *mcb = country_fiber_get((CountryFiber *)engine->by_mentioned_country, 256u, q->mentioned_country, 0);
-    if(mcb) bitset_and_inplace(&candidates, mcb);
-    else {
-      bitset_free(&candidates);
-      return 0;
-    }
-  }
+  if(!filter_by_country_fiber(&candidates, engine->by_source_country, 256u, q->country)) return 0;
+  if(!filter_by_country_fiber(&candidates, engine->by_mentioned_country, 256u, q->mentioned_country)) return 0;
 
   LexicalTerm qterms[32];
   size_t qterm_count = 0;
@@ -2753,6 +2685,29 @@ size_t engine_operad_compose(const OyezEngine *engine,
   return found;
 }
 
+static void collect_pagerank_fiber_entities(const CountryFiber *table,
+                                            size_t cap,
+                                            const char *id_prefix,
+                                            const char *kind,
+                                            RankedEntity *ents,
+                                            const BitSet **ent_fibers,
+                                            size_t *ent_count,
+                                            size_t max_ents) {
+  for(size_t i = 0; i < cap && *ent_count < max_ents; ++i) {
+    if(table[i].occupied) {
+      uint32_t deg = bitset_popcount(&table[i].bits);
+      if(deg == 0) continue;
+      ent_fibers[*ent_count] = &table[i].bits;
+      RankedEntity *e = &ents[(*ent_count)++];
+      snprintf(e->id, sizeof(e->id), "%s:%s", id_prefix, table[i].key);
+      snprintf(e->label, sizeof(e->label), "%s", table[i].key);
+      e->kind = kind;
+      e->degree = deg;
+      e->score = 1.0;
+    }
+  }
+}
+
 size_t engine_bipartite_pagerank(const OyezEngine *engine,
                                  uint32_t iterations,
                                  double damping,
@@ -2778,117 +2733,14 @@ size_t engine_bipartite_pagerank(const OyezEngine *engine,
     e->score = 1.0;
   }
 
-  for(size_t i = 0; i < 256u && ent_count < 256u; ++i) {
-    if(engine->by_mentioned_country[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_mentioned_country[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_mentioned_country[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "geo:%s", engine->by_mentioned_country[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_mentioned_country[i].key);
-      e->kind = "country";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_asset[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_asset[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_asset[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "asset:%s", engine->by_asset[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_asset[i].key);
-      e->kind = "asset";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_org[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_org[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_org[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "org:%s", engine->by_org[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_org[i].key);
-      e->kind = "organization";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_ai_model[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_ai_model[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_ai_model[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "model:%s", engine->by_ai_model[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_ai_model[i].key);
-      e->kind = "ai_model";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_ai_infra[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_ai_infra[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_ai_infra[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "infra:%s", engine->by_ai_infra[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_ai_infra[i].key);
-      e->kind = "ai_infra";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_hf_repo[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_hf_repo[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_hf_repo[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "hf:%s", engine->by_hf_repo[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_hf_repo[i].key);
-      e->kind = "hf_repo";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_sport[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_sport[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_sport[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "sport:%s", engine->by_sport[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_sport[i].key);
-      e->kind = "sport";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
-
-  for(size_t i = 0; i < 128u && ent_count < 256u; ++i) {
-    if(engine->by_weather[i].occupied) {
-      uint32_t deg = bitset_popcount(&engine->by_weather[i].bits);
-      if(deg == 0) continue;
-      ent_fibers[ent_count] = &engine->by_weather[i].bits;
-      RankedEntity *e = &ents[ent_count++];
-      snprintf(e->id, sizeof(e->id), "weather:%s", engine->by_weather[i].key);
-      snprintf(e->label, sizeof(e->label), "%s", engine->by_weather[i].key);
-      e->kind = "weather";
-      e->degree = deg;
-      e->score = 1.0;
-    }
-  }
+  collect_pagerank_fiber_entities(engine->by_mentioned_country, 256u, "geo", "country", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_asset, 128u, "asset", "asset", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_org, 128u, "org", "organization", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_ai_model, 128u, "model", "ai_model", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_ai_infra, 128u, "infra", "ai_infra", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_hf_repo, 128u, "hf", "hf_repo", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_sport, 128u, "sport", "sport", ents, ent_fibers, &ent_count, 256u);
+  collect_pagerank_fiber_entities(engine->by_weather, 128u, "weather", "weather", ents, ent_fibers, &ent_count, 256u);
 
   if(ent_count == 0) return 0;
   size_t N_art = engine->article_count;
