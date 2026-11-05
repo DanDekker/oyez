@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
   OyezEngine *engine;
   M1Tokenizer *tokenizer;
@@ -45,5 +49,9 @@ int http_handle_request(ServerContext *ctx,
 int http_server_listen(ServerContext *ctx);
 /* Takes ownership of client_fd and closes it before returning. */
 void http_serve_client(ServerContext *ctx, int client_fd);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

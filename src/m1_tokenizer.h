@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum {
   M1_INDENT_BASE = 256,
   M1_INDENT_COUNT = 26,
@@ -98,5 +102,9 @@ int m1_sequence_assistant(M1Sequence *seq,
 uint64_t m1_structural_sketch64(const char *text,
                                 size_t len,
                                 uint32_t *out_landmark_hits);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

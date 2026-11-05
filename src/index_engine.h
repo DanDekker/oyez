@@ -9,6 +9,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
   uint64_t *words;
   size_t word_cap;
@@ -652,5 +656,9 @@ size_t engine_bandit_select_feeds(const OyezEngine *engine,
                                   size_t max_out);
 void engine_appliance_state(const OyezEngine *engine,
                             EngineApplianceState *out_app);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum {
   WORLD_REGION_COUNT = 11,
   NEWS_TYPE_COUNT = 10,
@@ -510,5 +514,9 @@ size_t lexical_analyze(const char *text,
                        uint32_t *out_word_tokens);
 uint64_t simhash64_compute(const LexicalTerm *terms, size_t count);
 uint32_t simhash64_distance(uint64_t a, uint64_t b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

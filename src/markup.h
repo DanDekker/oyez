@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
   FEED_FORMAT_UNKNOWN = 0,
   FEED_FORMAT_RSS2 = 1,
@@ -61,5 +65,9 @@ const char *feed_format_name(FeedFormat format);
 
 int readability_extract(const char *html, size_t len, const char *url, ExtractedContent *out);
 void readability_free(ExtractedContent *content);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

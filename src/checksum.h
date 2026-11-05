@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 uint32_t checksum_crc32(const void *bytes, size_t length);
 uint32_t checksum_crc32_update(uint32_t previous, const void *bytes, size_t length);
 
@@ -20,5 +24,9 @@ bool sha256_update(Sha256Digest *digest, const void *bytes, size_t length);
 void sha256_end(const Sha256Digest *digest, char hex[65]);
 void sha256_hex(const void *bytes, size_t length, char hex[65]);
 bool sha256_valid_hex(const char hex[65]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

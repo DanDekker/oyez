@@ -3,6 +3,10 @@
 
 #include "core.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define TOKEN_BASE 256u
 #define TOKEN_MAX_VOCAB 131072u
 #define TOKEN_MAX_SPECIAL 64u
@@ -51,5 +55,9 @@ const char *token_id_name(const Tokenizer *t, uint32_t id);
 
 bool token_save(const Tokenizer *t, Buffer *out);
 bool token_load(Tokenizer *t, const void *bytes, size_t length, char error[256]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

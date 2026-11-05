@@ -1,8 +1,4 @@
-#include "catalog.h"
-#include "core.h"
-#include "http_server.h"
-#include "index_engine.h"
-#include "m1_tokenizer.h"
+#include "oyez.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -6,6 +6,10 @@
 #include <float.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline void wire_append_le(Buffer *out, uint64_t value, unsigned bytes)
 {
     assert(bytes > 0 && bytes <= 8);
@@ -81,5 +85,9 @@ static inline bool wire_read_f64(const unsigned char *data, size_t length,
     memcpy(out, &bits, sizeof(bits));
     return true;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

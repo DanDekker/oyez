@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
   const char *title;
   const char *feed_url;
@@ -20,5 +24,9 @@ typedef struct {
 } CatalogEntry;
 
 const CatalogEntry *catalog_entries(size_t *out_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

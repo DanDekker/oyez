@@ -8,6 +8,10 @@
 #include <float.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define OYEZ_C99_STATIC_ASSERT(cond, name) \
     typedef char oyez_c99_static_assert_##name[(cond) ? 1 : -1]
 
@@ -297,5 +301,9 @@ static inline double f64_cos(double x)
     c = 2.0 * c * c - 1.0;
     return c;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -1,13 +1,4 @@
-#include "catalog.h"
-#include "checksum.h"
-#include "core.h"
-#include "http_server.h"
-#include "index_engine.h"
-#include "m1_tokenizer.h"
-#include "markup.h"
-#include "ontology.h"
-#include "token.h"
-#include "wire.h"
+#include "oyez.h"
 
 #include <assert.h>
 #include <pthread.h>
