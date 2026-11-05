@@ -19,7 +19,7 @@ LIB_SRCS = \
 LIB_HDRS = $(wildcard src/*.h)
 LIB_OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 
-.PHONY: all test bench clean
+.PHONY: all test sanitize bench clean
 
 all: $(BUILD_DIR)/oyez $(BUILD_DIR)/test_oyez
 
@@ -37,6 +37,11 @@ $(BUILD_DIR)/test_oyez: $(LIB_OBJS) tests/test_oyez.c | $(BUILD_DIR)
 
 test: $(BUILD_DIR)/test_oyez
 	./$(BUILD_DIR)/test_oyez
+
+sanitize:
+	$(MAKE) BUILD_DIR=$(BUILD_DIR)/sanitize CC=clang \
+		CFLAGS='-std=c99 -Wall -Wextra -Werror -Wpedantic -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' all
+	UBSAN_OPTIONS=halt_on_error=1 ./$(BUILD_DIR)/sanitize/test_oyez
 
 bench: $(BUILD_DIR)/oyez
 	./$(BUILD_DIR)/oyez bench
