@@ -9,6 +9,31 @@
 #include <string.h>
 #include <sys/stat.h>
 
+static void print_usage(FILE *out) {
+  fputs("Usage: oyez [command] [argument]\n"
+        "\n"
+        "  serve [port]     Start the HTTP server (default: 8787)\n"
+        "  seed             Add catalog feeds to the snapshot\n"
+        "  poll [limit]     Poll feeds (default: 12)\n"
+        "  automate [batch] Evaluate watchpoints and optionally poll feeds\n"
+        "  weather          Show weather diagnostics\n"
+        "  stats            Show engine statistics\n"
+        "  tui              Show the terminal dashboard\n"
+        "  bench            Run the synthetic benchmarks\n"
+        "  help             Show this help\n",
+        out);
+}
+
+static int known_command(const char *cmd) {
+  const char *commands[] = {
+      "serve", "seed", "poll", "automate", "watch", "weather",
+      "stats", "status", "appliance", "machine", "tui", "top", "bench"};
+  for(size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+    if(strcmp(cmd, commands[i]) == 0) return 1;
+  }
+  return 0;
+}
+
 static void ensure_data_dir(void) {
   mkdir("data", 0755);
 }
@@ -241,6 +266,15 @@ static int run_bench(void) {
 
 int main(int argc, char **argv) {
   const char *cmd = argc > 1 ? argv[1] : "serve";
+  if(strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
+    print_usage(stdout);
+    return 0;
+  }
+  if(!known_command(cmd)) {
+    fprintf(stderr, "Unknown command: %s\n\n", cmd);
+    print_usage(stderr);
+    return 2;
+  }
   if(strcmp(cmd, "bench") == 0) {
     return run_bench();
   }
