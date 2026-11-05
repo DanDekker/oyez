@@ -2015,6 +2015,7 @@ size_t engine_formal_concepts(const OyezEngine *engine,
         continue;
       }
       if(bitset_popcount(&engine->by_closure_ontology[b]) < min_support) continue;
+      bitset_free(&inter);
       if(bitset_clone(&engine->by_closure_ontology[a], &inter) != 0) continue;
       bitset_and_inplace(&inter, &engine->by_closure_ontology[b]);
       maybe_add_formal_concept(engine, &inter, min_support, out_concepts, &count, max_concepts);
