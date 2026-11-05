@@ -2075,11 +2075,11 @@ static int handle_automation_rules_post(ServerContext *ctx,
   memset(&rule, 0, sizeof(rule));
   rule.id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
   rule.enabled = (strcmp(en_s, "0") == 0 || strcmp(en_s, "false") == 0) ? 0 : 1;
-  snprintf(rule.name, sizeof(rule.name), "%s", name_s);
+  snprintf(rule.name, sizeof(rule.name), "%.*s", (int)sizeof(rule.name) - 1, name_s);
   snprintf(rule.query, sizeof(rule.query), "%s", q_s);
   snprintf(rule.category, sizeof(rule.category), "%s", cat_s);
   snprintf(rule.region, sizeof(rule.region), "%s", reg_s);
-  snprintf(rule.weather, sizeof(rule.weather), "%s", wx_s);
+  snprintf(rule.weather, sizeof(rule.weather), "%.*s", (int)sizeof(rule.weather) - 1, wx_s);
   if(clr_s[0] != '\0') clearance_level_from_slug(clr_s, &rule.min_clearance);
   if(fst_s[0] != '\0') fiscal_stance_from_slug(fst_s, &rule.fiscal_stance);
   if(ait_s[0] != '\0') ai_compute_tier_from_slug(ait_s, &rule.min_ai_tier);
