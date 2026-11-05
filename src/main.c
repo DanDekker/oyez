@@ -34,6 +34,20 @@ static int known_command(const char *cmd) {
   return 0;
 }
 
+static int parse_port(const char *value, uint16_t *port) {
+  unsigned parsed = 0;
+  if(!value[0]) return 0;
+  for(const char *p = value; *p; ++p) {
+    if(*p < '0' || *p > '9') return 0;
+    unsigned digit = (unsigned)(*p - '0');
+    if(parsed > (65535u - digit) / 10u) return 0;
+    parsed = parsed * 10u + digit;
+  }
+  if(parsed == 0u) return 0;
+  *port = (uint16_t)parsed;
+  return 1;
+}
+
 static void ensure_data_dir(void) {
   mkdir("data", 0755);
 }
@@ -275,6 +289,14 @@ int main(int argc, char **argv) {
     print_usage(stderr);
     return 2;
   }
+  uint16_t port = 8787u;
+  if(strcmp(cmd, "serve") == 0) {
+    const char *port_arg = argc > 2 ? argv[2] : getenv("PORT");
+    if(port_arg && (argc > 2 || port_arg[0]) && !parse_port(port_arg, &port)) {
+      fprintf(stderr, "Invalid port: %s (expected 1-65535)\n", port_arg);
+      return 2;
+    }
+  }
   if(strcmp(cmd, "bench") == 0) {
     return run_bench();
   }
@@ -512,11 +534,6 @@ int main(int argc, char **argv) {
     engine_free(&eng);
     return 0;
   }
-
-  uint16_t port = 8787u;
-  const char *env_port = getenv("PORT");
-  if(env_port && env_port[0]) port = (uint16_t)strtoul(env_port, NULL, 10);
-  if(argc > 2) port = (uint16_t)strtoul(argv[2], NULL, 10);
 
   ServerContext ctx = {&eng, &tok, snap_path, port};
   int rc = http_server_listen(&ctx);
