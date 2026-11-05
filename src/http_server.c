@@ -297,6 +297,31 @@ static void json_extract_field(const char *json, size_t len, const char *key, ch
   }
 }
 
+static void query_or_json_param(const char *qs,
+                                const char *body,
+                                size_t body_len,
+                                const char *key,
+                                char *out,
+                                size_t cap) {
+  if(!query_param(qs, key, out, cap) || out[0] == '\0') {
+    json_extract_field(body, body_len, key, out, cap);
+  }
+}
+
+static void serialize_fiber_counts(Buffer *buf, const CountryFiber *table, size_t cap) {
+  buffer_text(buf, "{");
+  int first = 1;
+  for(size_t i = 0; i < cap; ++i) {
+    if(table[i].occupied) {
+      if(!first) buffer_text(buf, ",");
+      json_cstr(buf, table[i].key);
+      buffer_format(buf, ":%u", bitset_popcount(&table[i].bits));
+      first = 0;
+    }
+  }
+  buffer_text(buf, "}");
+}
+
 static void serialize_ontology_mask_array(Buffer *buf, uint32_t mask) {
   buffer_text(buf, "[");
   int first = 1;
@@ -457,6 +482,111 @@ static void serialize_article_with_query(Buffer *buf,
 
 static void serialize_article(Buffer *buf, const ArticleRecord *a, double score, int include_content) {
   serialize_article_with_query(buf, a, score, include_content, NULL);
+}
+
+static double article_ai_score(const ArticleRecord *a) {
+  return a ? a->ai_compute_score : 0.0;
+}
+
+static double article_sports_score(const ArticleRecord *a) {
+  return a ? a->sports_score : 0.0;
+}
+
+static double article_weather_score(const ArticleRecord *a) {
+  return a ? a->weather_score : 0.0;
+}
+
+static void serialize_top_articles_by_score(Buffer *buf,
+                                            const OyezEngine *eng,
+                                            double (*score_fn)(const ArticleRecord *),
+                                            size_t max_k) {
+  buffer_text(buf, "[");
+  if(eng && score_fn && max_k > 0) {
+    if(max_k > 16u) max_k = 16u;
+    const ArticleRecord *top[16];
+    double top_scores[16];
+    size_t top_count = 0;
+    for(size_t i = 0; i < eng->article_count; ++i) {
+      const ArticleRecord *a = &eng->articles[i];
+      double sc = score_fn(a);
+      if(sc <= 0.0) continue;
+      if(top_count < max_k) {
+        top[top_count] = a;
+        top_scores[top_count] = sc;
+        top_count++;
+      } else {
+        size_t min_idx = 0;
+        for(size_t k = 1u; k < max_k; ++k) {
+          if(top_scores[k] < top_scores[min_idx]) min_idx = k;
+        }
+        if(sc > top_scores[min_idx]) {
+          top[min_idx] = a;
+          top_scores[min_idx] = sc;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      for(size_t j = i + 1u; j < top_count; ++j) {
+        if(top_scores[j] > top_scores[i]) {
+          const ArticleRecord *tmp_a = top[i];
+          double tmp_s = top_scores[i];
+          top[i] = top[j];
+          top_scores[i] = top_scores[j];
+          top[j] = tmp_a;
+          top_scores[j] = tmp_s;
+        }
+      }
+    }
+    for(size_t i = 0; i < top_count; ++i) {
+      if(i > 0) buffer_text(buf, ",");
+      serialize_article(buf, top[i], top_scores[i], 0);
+    }
+  }
+  buffer_text(buf, "]");
+}
+
+static int extract_html_from_request_or_url(const char *body,
+                                            size_t body_len,
+                                            const char *fallback_url,
+                                            ExtractedContent *out_ex,
+                                            int *out_status,
+                                            Buffer *out_json,
+                                            const char *missing_err_code) {
+  char *html = malloc(65536u);
+  if(!html) {
+    *out_status = 500;
+    buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
+    return -1;
+  }
+  char url[512];
+  json_extract_field(body, body_len, "html", html, 65536u);
+  json_extract_field(body, body_len, "url", url, sizeof(url));
+  if(url[0] == '\0' && fallback_url) {
+    snprintf(url, sizeof(url), "%s", fallback_url);
+  }
+
+  Buffer fetched;
+  buffer_init(&fetched);
+  const char *src_html = html;
+  size_t src_len = strlen(html);
+  if(src_len == 0 && url[0] != '\0') {
+    if(http_fetch_url(url, &fetched) == 0) {
+      src_html = fetched.data;
+      src_len = fetched.len;
+    }
+  }
+  if(src_len == 0) {
+    free(html);
+    buffer_free(&fetched);
+    *out_status = 400;
+    buffer_format(out_json, "{\"error\":\"%s\"}", missing_err_code);
+    return -1;
+  }
+
+  readability_extract(src_html, src_len, url, out_ex);
+  free(html);
+  buffer_free(&fetched);
+  return 0;
 }
 
 static void serialize_feed(Buffer *buf, const FeedRecord *f) {
@@ -1487,8 +1617,8 @@ int http_handle_request(ServerContext *ctx,
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/catalog/seed") == 0) {
     char reg[64], ctry[16];
-    json_extract_field(body, body_len, "region", reg, sizeof(reg));
-    json_extract_field(body, body_len, "country", ctry, sizeof(ctry));
+    query_or_json_param(qs, body, body_len, "region", reg, sizeof(reg));
+    query_or_json_param(qs, body, body_len, "country", ctry, sizeof(ctry));
     size_t added = engine_seed_catalog(eng, reg[0] ? reg : NULL, ctry[0] ? ctry : NULL);
     if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
     buffer_format(out_json, "{\"seeded\":%zu,\"total_feeds\":%zu}", added, eng->feed_count);
@@ -1506,7 +1636,11 @@ int http_handle_request(ServerContext *ctx,
   }
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/feeds/poll") == 0) {
-    size_t ins = engine_poll_all(eng, 16u);
+    char lim_s[16];
+    query_or_json_param(qs, body, body_len, "limit", lim_s, sizeof(lim_s));
+    size_t poll_limit = lim_s[0] ? (size_t)strtoul(lim_s, NULL, 10) : 16u;
+    if(poll_limit == 0u) poll_limit = 16u;
+    size_t ins = engine_poll_all(eng, poll_limit);
     if(ctx->snapshot_path) engine_save_snapshot(eng, ctx->snapshot_path);
     buffer_format(out_json, "{\"articles_ingested\":%zu,\"total_articles\":%zu}", ins, eng->article_count);
     return 0;
@@ -1519,27 +1653,11 @@ int http_handle_request(ServerContext *ctx,
       json_cstr(out_json, fiscal_stance_slug((FiscalStance)fs));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_stance[fs]));
     }
-    buffer_text(out_json, "},\"assets\":{");
-    int first_a = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_asset[i].occupied) {
-        if(!first_a) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_asset[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_asset[i].bits));
-        first_a = 0;
-      }
-    }
-    buffer_text(out_json, "},\"fiscal_events\":{");
-    int first_e = 1;
-    for(size_t i = 0; i < 64u; ++i) {
-      if(eng->by_fiscal_event[i].occupied) {
-        if(!first_e) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_fiscal_event[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_fiscal_event[i].bits));
-        first_e = 0;
-      }
-    }
-    buffer_text(out_json, "}}");
+    buffer_text(out_json, "},\"assets\":");
+    serialize_fiber_counts(out_json, eng->by_asset, 128u);
+    buffer_text(out_json, ",\"fiscal_events\":");
+    serialize_fiber_counts(out_json, eng->by_fiscal_event, 64u);
+    buffer_text(out_json, "}");
     return 0;
   }
 
@@ -1550,27 +1668,11 @@ int http_handle_request(ServerContext *ctx,
       json_cstr(out_json, clearance_level_slug((ClearanceLevel)cl));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_clearance[cl]));
     }
-    buffer_text(out_json, "},\"cves\":{");
-    int first_c = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_cve[i].occupied) {
-        if(!first_c) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_cve[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_cve[i].bits));
-        first_c = 0;
-      }
-    }
-    buffer_text(out_json, "},\"organizations\":{");
-    int first_o = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_org[i].occupied) {
-        if(!first_o) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_org[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_org[i].bits));
-        first_o = 0;
-      }
-    }
-    buffer_text(out_json, "}}");
+    buffer_text(out_json, "},\"cves\":");
+    serialize_fiber_counts(out_json, eng->by_cve, 128u);
+    buffer_text(out_json, ",\"organizations\":");
+    serialize_fiber_counts(out_json, eng->by_org, 128u);
+    buffer_text(out_json, "}");
     return 0;
   }
 
@@ -1596,118 +1698,28 @@ int http_handle_request(ServerContext *ctx,
                             : 0.0;
     buffer_format(out_json,
                   "},\"open_vs_closed_summary\":{\"open_ecosystem_articles\":%u,"
-                  "\"closed_frontier_articles\":%u,\"openness_ratio\":%.4f},\"ai_models\":{",
+                  "\"closed_frontier_articles\":%u,\"openness_ratio\":%.4f},\"ai_models\":",
                   open_cnt,
                   closed_cnt,
                   open_ratio);
-    int first_m = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_ai_model[i].occupied) {
-        if(!first_m) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_ai_model[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_model[i].bits));
-        first_m = 0;
-      }
-    }
-    buffer_text(out_json, "},\"ai_infrastructure\":{");
-    int first_i = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_ai_infra[i].occupied) {
-        if(!first_i) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_ai_infra[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_ai_infra[i].bits));
-        first_i = 0;
-      }
-    }
-    buffer_text(out_json, "},\"huggingface_repos\":{");
-    int first_h = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_hf_repo[i].occupied) {
-        if(!first_h) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_hf_repo[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_hf_repo[i].bits));
-        first_h = 0;
-      }
-    }
-    buffer_text(out_json, "},\"top_ai_articles\":[");
-    const ArticleRecord *top_ai[12];
-    size_t top_count = 0;
-    for(size_t i = 0; i < eng->article_count; ++i) {
-      const ArticleRecord *a = &eng->articles[i];
-      if(a->ai_compute_score <= 0.0) continue;
-      if(top_count < 12u) {
-        top_ai[top_count++] = a;
-      } else {
-        size_t min_idx = 0;
-        for(size_t k = 1u; k < 12u; ++k) {
-          if(top_ai[k]->ai_compute_score < top_ai[min_idx]->ai_compute_score) min_idx = k;
-        }
-        if(a->ai_compute_score > top_ai[min_idx]->ai_compute_score) {
-          top_ai[min_idx] = a;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      for(size_t j = i + 1u; j < top_count; ++j) {
-        if(top_ai[j]->ai_compute_score > top_ai[i]->ai_compute_score) {
-          const ArticleRecord *tmp = top_ai[i];
-          top_ai[i] = top_ai[j];
-          top_ai[j] = tmp;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      serialize_article(out_json, top_ai[i], top_ai[i]->ai_compute_score, 0);
-    }
-    buffer_text(out_json, "]}");
+    serialize_fiber_counts(out_json, eng->by_ai_model, 128u);
+    buffer_text(out_json, ",\"ai_infrastructure\":");
+    serialize_fiber_counts(out_json, eng->by_ai_infra, 128u);
+    buffer_text(out_json, ",\"huggingface_repos\":");
+    serialize_fiber_counts(out_json, eng->by_hf_repo, 128u);
+    buffer_text(out_json, ",\"top_ai_articles\":");
+    serialize_top_articles_by_score(out_json, eng, article_ai_score, 12u);
+    buffer_text(out_json, "}");
     return 0;
   }
 
   if(strcmp(method, "GET") == 0 && strcmp(path, "/api/v1/sports") == 0) {
     uint32_t sp_total = bitset_popcount(&eng->by_closure_ontology[ONTO_SPORTS]);
-    buffer_format(out_json, "{\"sports_articles_count\":%u,\"sports_leagues\":{", sp_total);
-    int first_s = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_sport[i].occupied) {
-        if(!first_s) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_sport[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_sport[i].bits));
-        first_s = 0;
-      }
-    }
-    buffer_text(out_json, "},\"top_sports_articles\":[");
-    const ArticleRecord *top_sp[12];
-    size_t top_count = 0;
-    for(size_t i = 0; i < eng->article_count; ++i) {
-      const ArticleRecord *a = &eng->articles[i];
-      if(a->sports_score <= 0.0) continue;
-      if(top_count < 12u) {
-        top_sp[top_count++] = a;
-      } else {
-        size_t min_idx = 0;
-        for(size_t k = 1u; k < 12u; ++k) {
-          if(top_sp[k]->sports_score < top_sp[min_idx]->sports_score) min_idx = k;
-        }
-        if(a->sports_score > top_sp[min_idx]->sports_score) {
-          top_sp[min_idx] = a;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      for(size_t j = i + 1u; j < top_count; ++j) {
-        if(top_sp[j]->sports_score > top_sp[i]->sports_score) {
-          const ArticleRecord *tmp = top_sp[i];
-          top_sp[i] = top_sp[j];
-          top_sp[j] = tmp;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      serialize_article(out_json, top_sp[i], top_sp[i]->sports_score, 0);
-    }
-    buffer_text(out_json, "]}");
+    buffer_format(out_json, "{\"sports_articles_count\":%u,\"sports_leagues\":", sp_total);
+    serialize_fiber_counts(out_json, eng->by_sport, 128u);
+    buffer_text(out_json, ",\"top_sports_articles\":");
+    serialize_top_articles_by_score(out_json, eng, article_sports_score, 12u);
+    buffer_text(out_json, "}");
     return 0;
   }
 
@@ -1751,18 +1763,10 @@ int http_handle_request(ServerContext *ctx,
       json_cstr(out_json, weather_severity_slug((WeatherSeverity)ws));
       buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather_severity[ws]));
     }
-    buffer_text(out_json, "},\"weather_phenomena\":{");
-    int first_w = 1;
-    for(size_t i = 0; i < 128u; ++i) {
-      if(eng->by_weather[i].occupied) {
-        if(!first_w) buffer_text(out_json, ",");
-        json_cstr(out_json, eng->by_weather[i].key);
-        buffer_format(out_json, ":%u", bitset_popcount(&eng->by_weather[i].bits));
-        first_w = 0;
-      }
-    }
+    buffer_text(out_json, "},\"weather_phenomena\":");
+    serialize_fiber_counts(out_json, eng->by_weather, 128u);
     buffer_format(out_json,
-                  "},\"atmospheric_physics\":{"
+                  ",\"atmospheric_physics\":{"
                   "\"lorenz_63_attractor\":[%.6f,%.6f,%.6f],"
                   "\"maximal_lyapunov_exponent\":%.6f,"
                   "\"liouville_divergence\":%.6f,"
@@ -1773,7 +1777,7 @@ int http_handle_request(ServerContext *ctx,
                   "\"rossby_phase_speed_ms\":%.4f,"
                   "\"rossby_stationary_wavenumber\":%.4f,"
                   "\"omega_blocking_regime\":%s"
-                  "},\"top_weather_articles\":[",
+                  "},\"top_weather_articles\":",
                   phys.lorenz_state[0],
                   phys.lorenz_state[1],
                   phys.lorenz_state[2],
@@ -1786,38 +1790,8 @@ int http_handle_request(ServerContext *ctx,
                   phys.rossby_phase_speed,
                   phys.rossby_stationary_k,
                   phys.omega_blocking_regime ? "true" : "false");
-
-    const ArticleRecord *top_wx[12];
-    size_t top_count = 0;
-    for(size_t i = 0; i < eng->article_count; ++i) {
-      const ArticleRecord *a = &eng->articles[i];
-      if(a->weather_score <= 0.0) continue;
-      if(top_count < 12u) {
-        top_wx[top_count++] = a;
-      } else {
-        size_t min_idx = 0;
-        for(size_t k = 1u; k < 12u; ++k) {
-          if(top_wx[k]->weather_score < top_wx[min_idx]->weather_score) min_idx = k;
-        }
-        if(a->weather_score > top_wx[min_idx]->weather_score) {
-          top_wx[min_idx] = a;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      for(size_t j = i + 1u; j < top_count; ++j) {
-        if(top_wx[j]->weather_score > top_wx[i]->weather_score) {
-          const ArticleRecord *tmp = top_wx[i];
-          top_wx[i] = top_wx[j];
-          top_wx[j] = tmp;
-        }
-      }
-    }
-    for(size_t i = 0; i < top_count; ++i) {
-      if(i > 0) buffer_text(out_json, ",");
-      serialize_article(out_json, top_wx[i], top_wx[i]->weather_score, 0);
-    }
-    buffer_text(out_json, "]}");
+    serialize_top_articles_by_score(out_json, eng, article_weather_score, 12u);
+    buffer_text(out_json, "}");
     return 0;
   }
 
@@ -1951,9 +1925,7 @@ int http_handle_request(ServerContext *ctx,
 
   if(strcmp(method, "DELETE") == 0 && strcmp(path, "/api/v1/automation/rules") == 0) {
     char id_s[16];
-    if(!query_param(qs, "id", id_s, sizeof(id_s)) || id_s[0] == '\0') {
-      json_extract_field(body, body_len, "id", id_s, sizeof(id_s));
-    }
+    query_or_json_param(qs, body, body_len, "id", id_s, sizeof(id_s));
     uint32_t rule_id = id_s[0] ? (uint32_t)strtoul(id_s, NULL, 10) : 0u;
     if(rule_id == 0u || engine_delete_automation_rule(eng, rule_id) != 0) {
       *out_status = 404;
@@ -1968,12 +1940,8 @@ int http_handle_request(ServerContext *ctx,
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/automation/run") == 0) {
     char batch_s[16], intv_s[16];
-    if(!query_param(qs, "poll_batch", batch_s, sizeof(batch_s)) || batch_s[0] == '\0') {
-      json_extract_field(body, body_len, "poll_batch", batch_s, sizeof(batch_s));
-    }
-    if(!query_param(qs, "auto_poll_interval_sec", intv_s, sizeof(intv_s)) || intv_s[0] == '\0') {
-      json_extract_field(body, body_len, "auto_poll_interval_sec", intv_s, sizeof(intv_s));
-    }
+    query_or_json_param(qs, body, body_len, "poll_batch", batch_s, sizeof(batch_s));
+    query_or_json_param(qs, body, body_len, "auto_poll_interval_sec", intv_s, sizeof(intv_s));
     if(intv_s[0] != '\0') {
       eng->auto_poll_interval_sec = (uint32_t)strtoul(intv_s, NULL, 10);
     }
@@ -2148,7 +2116,7 @@ int http_handle_request(ServerContext *ctx,
     query_param(qs, "feed_id", fid_str, sizeof(fid_str));
 
     ArticleQuery aq;
-    memset(&aq, 0, sizeof(aq));
+    article_query_init(&aq);
     aq.query = q_str[0] ? q_str : NULL;
     aq.category = cat[0] ? cat : NULL;
     aq.exclude_category = ex_cat[0] ? ex_cat : NULL;
@@ -2177,7 +2145,7 @@ int http_handle_request(ServerContext *ctx,
     aq.diversify_mmr = (strcmp(div_str, "2") == 0 || strcmp(div_str, "dpp") == 0)
                            ? 2
                            : ((strcmp(div_str, "1") == 0 || strcmp(div_str, "true") == 0) ? 1 : 0);
-    aq.mmr_lambda = lam_str[0] ? strtod(lam_str, NULL) : 0.65;
+    if(lam_str[0]) aq.mmr_lambda = strtod(lam_str, NULL);
     aq.limit = lim_str[0] ? (size_t)strtoul(lim_str, NULL, 10) : 50u;
     aq.offset = off_str[0] ? (size_t)strtoul(off_str, NULL, 10) : 0u;
 
@@ -2232,44 +2200,14 @@ int http_handle_request(ServerContext *ctx,
       buffer_text(out_json, "{\"error\":\"article_not_found\"}");
       return 0;
     }
-    char *html = malloc(65536u);
-    if(!html) {
-      *out_status = 500;
-      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
-      return 0;
-    }
-    char url[512];
-    json_extract_field(body, body_len, "html", html, 65536u);
-    json_extract_field(body, body_len, "url", url, sizeof(url));
-    if(url[0] == '\0' && a->url) {
-      snprintf(url, sizeof(url), "%s", a->url);
-    }
-
-    Buffer fetched;
-    buffer_init(&fetched);
-    const char *src_html = html;
-    size_t src_len = strlen(html);
-    if(src_len == 0 && url[0] != '\0') {
-      if(http_fetch_url(url, &fetched) == 0) {
-        src_html = fetched.data;
-        src_len = fetched.len;
-      }
-    }
-    if(src_len == 0) {
-      free(html);
-      buffer_free(&fetched);
-      *out_status = 400;
-      buffer_text(out_json, "{\"error\":\"enrichment_source_unavailable\"}");
-      return 0;
-    }
-
     ExtractedContent ex;
-    readability_extract(src_html, src_len, url, &ex);
+    if(extract_html_from_request_or_url(body, body_len, a->url, &ex, out_status, out_json,
+                                        "enrichment_source_unavailable") != 0) {
+      return 0;
+    }
     int upgraded = engine_enrich_article(eng, id, ex.byline, ex.excerpt, ex.markdown,
                                          ex.text_content, ex.lead_image_url);
     readability_free(&ex);
-    free(html);
-    buffer_free(&fetched);
 
     const ArticleRecord *updated = engine_get_article_by_id(eng, id);
     buffer_format(out_json, "{\"status\":\"enriched\",\"upgraded\":%s,\"article\":",
@@ -2280,37 +2218,13 @@ int http_handle_request(ServerContext *ctx,
   }
 
   if(strcmp(method, "POST") == 0 && strcmp(path, "/api/v1/extract") == 0) {
-    char *html = malloc(65536u);
-    if(!html) {
-      *out_status = 500;
-      buffer_text(out_json, "{\"error\":\"out_of_memory\"}");
-      return 0;
-    }
-    char url[512], aid_str[16];
-    json_extract_field(body, body_len, "html", html, 65536u);
-    json_extract_field(body, body_len, "url", url, sizeof(url));
+    char aid_str[16];
     json_extract_field(body, body_len, "article_id", aid_str, sizeof(aid_str));
-
-    Buffer fetched;
-    buffer_init(&fetched);
-    const char *src_html = html;
-    size_t src_len = strlen(html);
-    if(src_len == 0 && url[0] != '\0') {
-      if(http_fetch_url(url, &fetched) == 0) {
-        src_html = fetched.data;
-        src_len = fetched.len;
-      }
-    }
-    if(src_len == 0) {
-      free(html);
-      buffer_free(&fetched);
-      *out_status = 400;
-      buffer_text(out_json, "{\"error\":\"missing_html_or_url\"}");
+    ExtractedContent ex;
+    if(extract_html_from_request_or_url(body, body_len, NULL, &ex, out_status, out_json,
+                                        "missing_html_or_url") != 0) {
       return 0;
     }
-
-    ExtractedContent ex;
-    readability_extract(src_html, src_len, url, &ex);
     if(aid_str[0] != '\0') {
       uint32_t aid = (uint32_t)strtoul(aid_str, NULL, 10);
       if(aid > 0u) {
@@ -2399,8 +2313,6 @@ int http_handle_request(ServerContext *ctx,
     buffer_text(out_json, "]}}");
 
     readability_free(&ex);
-    buffer_free(&fetched);
-    free(html);
     return 0;
   }
 
@@ -2643,7 +2555,9 @@ void http_serve_client(ServerContext *ctx, int client) {
     int is_write = ((strcmp(method, "POST") == 0 || strcmp(method, "DELETE") == 0) &&
                     (strncmp(target, "/api/v1/catalog/seed", 20u) == 0 ||
                      strncmp(target, "/api/v1/feeds/poll", 18u) == 0 ||
-                     strncmp(target, "/api/v1/automation/", 19u) == 0));
+                     strncmp(target, "/api/v1/automation/", 19u) == 0 ||
+                     strncmp(target, "/api/v1/articles/", 17u) == 0 ||
+                     strncmp(target, "/api/v1/extract", 15u) == 0));
     if(is_write) engine_write_lock(ctx->engine);
     else engine_read_lock(ctx->engine);
 
