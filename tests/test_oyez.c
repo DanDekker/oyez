@@ -1806,6 +1806,31 @@ static void test_http_connection_framing(void) {
   assert(count_substring(response.data, "HTTP/1.1 200 OK") == 2u);
   buffer_free(&response);
 
+  const char *connection_headers[] = {
+      "Connection: close, keep-alive\r\n",
+      "Connection: close\r\nConnection: keep-alive\r\n",
+      "Connection: keep-alive\r\nConnection: close\r\n"};
+  for(unsigned version = 0; version <= 1; ++version) {
+    for(size_t i = 0; i < sizeof(connection_headers) / sizeof(connection_headers[0]); ++i) {
+      char request[512];
+      snprintf(request, sizeof(request),
+               "GET /health HTTP/1.%u\r\nHost: localhost\r\n%s\r\n"
+               "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+               version, connection_headers[i]);
+      http_socket_exchange(&ctx, request, 0, &response);
+      assert(count_substring(response.data, "HTTP/1.1 200 OK") == 1u);
+      assert(strstr(response.data, "Connection: close\r\n") != NULL);
+      buffer_free(&response);
+    }
+  }
+
+  const char *legacy_keep_alive =
+      "GET /health HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
+      "GET /health HTTP/1.0\r\nConnection: close\r\n\r\n";
+  http_socket_exchange(&ctx, legacy_keep_alive, 0, &response);
+  assert(count_substring(response.data, "HTTP/1.1 200 OK") == 2u);
+  buffer_free(&response);
+
   const char *body = "{\"html\":\"<p>Framed body text</p>\"}";
   char post_then_get[512];
   int written = snprintf(post_then_get, sizeof(post_then_get),

@@ -2555,6 +2555,7 @@ static int parse_request_headers(char *req, size_t hdr_len, size_t cap,
   *body_len = 0;
   *want_close = strcmp(version, "HTTP/1.0") == 0;
   int saw_length = 0;
+  int saw_close = 0, saw_keep_alive = 0;
   char *p = first_end + 2u;
   char *headers_end = req + hdr_len - 4u;
   while(p < headers_end) {
@@ -2588,12 +2589,12 @@ static int parse_request_headers(char *req, size_t hdr_len, size_t cap,
     } else if(name_len == 17u && strncasecmp(p, "Transfer-Encoding", 17u) == 0) {
       return 400; /* Chunked bodies are not implemented. */
     } else if(name_len == 10u && strncasecmp(p, "Connection", 10u) == 0) {
-      if(header_has_token(value, (size_t)(end - value), "close")) *want_close = 1;
-      if(strcmp(version, "HTTP/1.0") == 0 &&
-         header_has_token(value, (size_t)(end - value), "keep-alive")) *want_close = 0;
+      saw_close |= header_has_token(value, (size_t)(end - value), "close");
+      saw_keep_alive |= header_has_token(value, (size_t)(end - value), "keep-alive");
     }
     p = end + 2u;
   }
+  *want_close = saw_close || (strcmp(version, "HTTP/1.0") == 0 && !saw_keep_alive);
   if(*body_len > cap - hdr_len - 1u) return 413;
   return 0;
 }
