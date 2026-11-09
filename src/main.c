@@ -88,6 +88,8 @@ static int run_bench(void) {
       "Artificial intelligence neural network open source kernel linux",
       "NOAA NHC Hurricane Category 4 Tornado Warning Solar Flare X-Class USGS M7.2"};
 
+  const char *published_at = "2026-11-03T00:00:00Z";
+  uint64_t published_ms = parse_timestamp_ms(published_at);
   size_t N = 2000u;
   uint64_t t0 = monotonic_ns();
   for(size_t i = 0; i < N; ++i) {
@@ -109,8 +111,8 @@ static int run_bench(void) {
                           "Oyez Bureau",
                           title,
                           body,
-                          "2026-11-03T00:00:00Z",
-                          1762128000000ULL + i,
+                          published_at,
+                          published_ms,
                           "",
                           NULL,
                           0,
@@ -132,7 +134,7 @@ static int run_bench(void) {
     aq.category = (i & 1u) ? "knowledge-economy" : "public-affairs";
     aq.use_category_morphism = 1;
     aq.limit = 25u;
-    aq.offset = i % 8u; /* Vary offset across 16 distinct queries to measure both cold BM25 and hot cache */
+    aq.offset = (i / 2u) % 8u; /* Use each of the eight offsets with both queries. */
     SearchResponse res;
     engine_search(&eng, &aq, &res);
     total_hits += res.total;
