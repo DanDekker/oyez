@@ -75,7 +75,7 @@ make bench                                # run the synthetic benchmark suite
 
 The benchmark uses generated articles and repeated searches, including cached queries; it is useful for comparing changes on the same machine, not as a measure of real-world throughput.
 
-## Embedding as a C/C++ library
+## Embedding as a C99 library
 
 Build the static library (`build/liboyez.a`) with `make lib` and include the single umbrella header [`src/oyez.h`](src/oyez.h). Save this example as `example.c`:
 
@@ -112,7 +112,7 @@ cc -std=c99 -Isrc example.c build/liboyez.a -pthread -o example
 ./example
 ```
 
-For C++, save it as `example.cpp` and use `c++` with `-std=c++11`. The example seeds feed definitions only, so it prints `0 matches` until articles are ingested or loaded from a populated snapshot.
+The example seeds feed definitions only, so it prints `0 matches` until articles are ingested or loaded from a populated snapshot.
 
 ## Architecture
 
@@ -127,7 +127,7 @@ For C++, save it as `example.cpp` and use `c++` with `-std=c++11`. The example s
 
 | Component | Source |
 | --- | --- |
-| Umbrella C/C++ header and static archive | [oyez.h](src/oyez.h), `build/liboyez.a` |
+| Public C99 header and static archive | [oyez.h](src/oyez.h), `build/liboyez.a` |
 | Feed catalog and fetching | [catalog.c](src/catalog.c), [url_fetch.c](src/url_fetch.c) |
 | Feed parsing and text extraction | [markup.c](src/markup.c) |
 | In-memory index, ranking, snapshots, and automation | [index_engine.c](src/index_engine.c) |
