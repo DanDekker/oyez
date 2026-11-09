@@ -128,7 +128,7 @@ The example seeds feed definitions only, so it prints `0 matches` until articles
 | Component | Source |
 | --- | --- |
 | Public C99 header and static archive | [oyez.h](src/oyez.h), `build/liboyez.a` |
-| Feed catalog and fetching | [catalog.c](src/catalog.c), [url_fetch.c](src/url_fetch.c) |
+| Feed catalog, fetching, and polling | [catalog.c](src/catalog.c), [url_fetch.c](src/url_fetch.c), [feed_poll.c](src/feed_poll.c) |
 | Feed parsing and text extraction | [markup.c](src/markup.c) |
 | In-memory index, ranking, snapshots, and automation | [index_engine.c](src/index_engine.c) |
 | Topic poset, ideal completion, exact sieves, and numerical models | [ontology.c](src/ontology.c) |

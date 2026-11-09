@@ -12,9 +12,9 @@ Oyez combines a production-oriented feed and search pipeline with an experimenta
 | Tokenizers | [`token.h`](../src/token.h), [`token.c`](../src/token.c), [`m1_tokenizer.h`](../src/m1_tokenizer.h), [`m1_tokenizer.c`](../src/m1_tokenizer.c) | Byte-level BPE and the fixed-vocabulary M1 pre-segmenter |
 | Parsing and extraction | [`markup.h`](../src/markup.h), [`markup.c`](../src/markup.c) | RSS, Atom, RDF, and JSON Feed parsing; readability scoring; HTML-to-Markdown conversion |
 | Ontology and analytics | [`ontology.h`](../src/ontology.h), [`ontology.c`](../src/ontology.c) | Finite-poset operations, ideal algebra, exact sieves, graph and topological summaries, and numerical models |
-| Feed catalog | [`catalog.h`](../src/catalog.h), [`catalog.c`](../src/catalog.c) | Curated source metadata across regions and subject areas |
+| Feed catalog and polling | [`catalog.c`](../src/catalog.c), [`feed_poll.c`](../src/feed_poll.c) | Curated source metadata and workers that fetch, parse, and ingest feeds |
 | Search engine | [`index_engine.h`](../src/index_engine.h), [`index_engine.c`](../src/index_engine.c) | In-memory BM25+ index, snapshots, filters, similarity search, clustering, ranking, and watchpoints |
-| HTTP server and CLI | [`http_server.h`](../src/http_server.h), [`http_server.c`](../src/http_server.c), [`main.c`](../src/main.c) | HTTP/1.1 API, embedded console, polling workers, and command-line entry points |
+| HTTP server and CLI | [`http_server.h`](../src/http_server.h), [`http_server.c`](../src/http_server.c), [`main.c`](../src/main.c) | HTTP/1.1 API, embedded console, and command-line entry points |
 
 ## Categorical model
 

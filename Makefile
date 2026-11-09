@@ -16,6 +16,7 @@ LIB_SRCS = \
 	src/catalog.c \
 	src/index_engine.c \
 	src/url_fetch.c \
+	src/feed_poll.c \
 	src/http_server.c
 
 LIB_HDRS = $(wildcard src/*.h)

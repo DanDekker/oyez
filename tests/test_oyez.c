@@ -1923,6 +1923,9 @@ static void test_url_fetch_redirect_policy(void) {
       "  http://1.1.1.1/start) printf moved; printf '301 http://8.8.8.8/final' >&2 ;;\n"
       "  http://8.8.8.8/final) printf 'public feed'; printf '200 ' >&2 ;;\n"
       "  http://1.1.1.1/private-start) printf moved; printf '302 http://127.0.0.1/secret' >&2 ;;\n"
+      "  https://1.1.1.1/feed) printf '%s' '<rss><channel><item><title>Test Dispatch</title>"
+      "<guid>poll-test</guid><link>https://example.org/story</link></item></channel></rss>'; printf '200 ' >&2 ;;\n"
+      "  https://1.1.1.1/blank) printf ' '; printf '200 ' >&2 ;;\n"
       "  *) printf unexpected; printf '500 ' >&2 ;;\n"
       "esac\n";
   assert(fwrite(script_text, 1u, strlen(script_text), script) == strlen(script_text));
@@ -1944,6 +1947,27 @@ static void test_url_fetch_redirect_policy(void) {
 
   assert(http_fetch_url("http://1.1.1.1/private-start", &fetched) == -1);
   assert(file_size_or_zero(calls_path) == 3);
+
+  OyezEngine engine;
+  engine_init(&engine);
+  CatalogEntry feed = {"Poll Test", "https://1.1.1.1/feed", "https://example.org", "technology",
+                       REGION_NORTH_AMERICA, "US", "North America", "en", "independent", "Tech"};
+  uint32_t good_id, blank_id, blocked_id;
+  assert(engine_upsert_feed(&engine, &feed, &good_id) == 0);
+  feed.feed_url = "https://1.1.1.1/blank";
+  assert(engine_upsert_feed(&engine, &feed, &blank_id) == 0);
+  feed.feed_url = "https://127.0.0.1/feed";
+  assert(engine_upsert_feed(&engine, &feed, &blocked_id) == 0);
+
+  assert(engine_poll_concurrent(&engine, 0, 3) == 1u);
+  assert(engine.article_count == 1u && engine.total_bandit_pulls == 3u);
+  assert(engine_find_feed(&engine, good_id)->fetch_count == 1u);
+  assert(strcmp(engine_find_feed(&engine, blank_id)->last_error, "parse_failed") == 0);
+  assert(strcmp(engine_find_feed(&engine, blocked_id)->last_error, "fetch_failed") == 0);
+  size_t inserted;
+  assert(engine_refresh_feed(&engine, good_id, &inserted) == 0 && inserted == 0u);
+  assert(engine_find_feed(&engine, good_id)->fetch_count == 2u);
+  engine_free(&engine);
 
   assert(setenv("PATH", saved_path, 1) == 0);
   unsetenv("OYEZ_TEST_CALLS");
