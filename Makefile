@@ -1,7 +1,8 @@
 CC ?= cc
 AR ?= ar
 CPPFLAGS = -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -Isrc
-CFLAGS = -std=c99 -Wall -Wextra -Werror -Wpedantic -O3
+C99_CFLAGS = -std=c99 -pedantic-errors -Wall -Wextra -Werror
+CFLAGS = $(C99_CFLAGS) -O3
 LDLIBS = -lpthread
 
 BUILD_DIR = build
@@ -49,7 +50,7 @@ test: $(BUILD_DIR)/test_oyez
 
 sanitize:
 	$(MAKE) BUILD_DIR=$(BUILD_DIR)/sanitize CC=clang \
-		CFLAGS='-std=c99 -Wall -Wextra -Werror -Wpedantic -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' all
+		CFLAGS='$(C99_CFLAGS) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' all
 	UBSAN_OPTIONS=halt_on_error=1 ./$(BUILD_DIR)/sanitize/test_oyez
 
 bench: $(BUILD_DIR)/oyez

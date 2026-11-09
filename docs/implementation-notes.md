@@ -1,6 +1,6 @@
 # Implementation notes
 
-Oyez combines a production-oriented feed and search pipeline with an experimental mathematical analytics layer, implemented in strict first-party ISO C99 (`-std=c99 -Wall -Wextra -Werror -Wpedantic -O3`) with zero compiler builtins or C11/C23/GNU extensions. This page distinguishes exact finite constructions from numerical summaries so the output can be interpreted correctly.
+Oyez combines a production-oriented feed and search pipeline with an experimental mathematical analytics layer. Both the normal and sanitizer builds enforce ISO C99 with `-std=c99 -pedantic-errors`. Oyez uses POSIX APIs for sockets, threads, and clocks. This page distinguishes exact finite constructions from numerical summaries so the output can be interpreted correctly.
 
 ## System map
 
