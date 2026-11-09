@@ -299,15 +299,19 @@ static void cli_runtime_free(CliRuntime *rt) {
   engine_free(&rt->eng);
 }
 
-static int cmd_serve(CliRuntime *rt, int argc, char **argv) {
+static int run_serve(int argc, char **argv) {
   uint16_t port = 8787u;
   const char *port_arg = argc > 2 ? argv[2] : getenv("PORT");
   if(port_arg && (argc > 2 || port_arg[0]) && !parse_port(port_arg, &port)) {
     fprintf(stderr, "Invalid port: %s (expected 1-65535)\n", port_arg);
     return 2;
   }
-  ServerContext ctx = {&rt->eng, &rt->tok, rt->snap_path, port};
-  return http_server_listen(&ctx);
+  CliRuntime rt;
+  cli_runtime_init(&rt);
+  ServerContext ctx = {&rt.eng, &rt.tok, rt.snap_path, port};
+  int rc = http_server_listen(&ctx);
+  cli_runtime_free(&rt);
+  return rc;
 }
 
 static int cmd_seed(CliRuntime *rt, int argc, char **argv) {
@@ -618,7 +622,6 @@ typedef struct {
 } CliCommand;
 
 static const CliCommand k_cli_commands[] = {
-  {"serve", cmd_serve},
   {"seed", cmd_seed},
   {"poll", cmd_poll},
   {"search", cmd_search},
@@ -657,22 +660,15 @@ int main(int argc, char **argv) {
   if(strcmp(cmd, "bench") == 0) {
     return run_bench();
   }
+  if(strcmp(cmd, "serve") == 0) {
+    return run_serve(argc, argv);
+  }
 
   const CliCommand *entry = find_cli_command(cmd);
   if(!entry) {
     fprintf(stderr, "Unknown command: %s\n\n", cmd);
     print_usage(stderr);
     return 2;
-  }
-
-  /* Validate port before initializing the engine snapshot when running 'serve'. */
-  if(strcmp(cmd, "serve") == 0) {
-    uint16_t port = 8787u;
-    const char *port_arg = argc > 2 ? argv[2] : getenv("PORT");
-    if(port_arg && (argc > 2 || port_arg[0]) && !parse_port(port_arg, &port)) {
-      fprintf(stderr, "Invalid port: %s (expected 1-65535)\n", port_arg);
-      return 2;
-    }
   }
 
   CliRuntime rt;
