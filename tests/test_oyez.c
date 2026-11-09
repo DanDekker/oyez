@@ -2454,6 +2454,33 @@ static void test_unified_developer_surface(void) {
 
   const char *enrich_json =
       "{\"html\":\"<article><p>Expanded semiconductor lithography report covering CVE-2026-3141 and TSMC wafer capacity in Taipei.</p></article>\"}";
+  char article_path[96];
+  snprintf(article_path, sizeof(article_path), "/api/v1/articles/%u", aid);
+  assert(http_handle_request(&ctx, "GET", article_path, NULL, 0, &status, &out) == 0);
+  assert(status == 200 && strstr(out.data, "Taiwan Semiconductor Dispatch") != NULL);
+  buffer_free(&out);
+
+  snprintf(article_path, sizeof(article_path), "/api/v1/articles/%u/similar/?unused=1", aid);
+  assert(http_handle_request(&ctx, "GET", article_path, NULL, 0, &status, &out) == 0);
+  assert(status == 200 && strstr(out.data, "\"similar\":") != NULL);
+  buffer_free(&out);
+
+  snprintf(article_path, sizeof(article_path), "/api/v1/articles/%u/similar-extra", aid);
+  assert(http_handle_request(&ctx, "GET", article_path, NULL, 0, &status, &out) == 0);
+  assert(status == 404);
+  buffer_free(&out);
+
+  snprintf(article_path, sizeof(article_path), "/api/v1/articles/%u/enrich/extra", aid);
+  assert(http_handle_request(&ctx, "POST", article_path, enrich_json, strlen(enrich_json), &status, &out) == 0);
+  assert(status == 404);
+  buffer_free(&out);
+
+  snprintf(article_path, sizeof(article_path), "/api/v1/articles/%llu/enrich",
+           (unsigned long long)UINT32_MAX + 1ULL + aid);
+  assert(http_handle_request(&ctx, "POST", article_path, enrich_json, strlen(enrich_json), &status, &out) == 0);
+  assert(status == 404);
+  buffer_free(&out);
+
   char req[512];
   int n = snprintf(req, sizeof(req),
                    "POST /api/v1/articles/%u/enrich HTTP/1.1\r\n"

@@ -2183,6 +2183,28 @@ static int handle_articles_search(ServerContext *ctx,
   return 0;
 }
 
+static const char article_path_prefix[] = "/api/v1/articles/";
+
+/* The router has already matched the prefix. Return the suffix after the ID. */
+static const char *parse_article_id(const char *path, uint32_t *out_id) {
+  const char *p = path + sizeof(article_path_prefix) - 1u;
+  if(*p < '0' || *p > '9') return NULL;
+  uint32_t id = 0;
+  while(*p >= '0' && *p <= '9') {
+    unsigned digit = (unsigned)(*p++ - '0');
+    if(id > (UINT32_MAX - digit) / 10u) return NULL;
+    id = id * 10u + digit;
+  }
+  *out_id = id;
+  return p;
+}
+
+static int respond_not_found(int *out_status, Buffer *out_json) {
+  *out_status = 404;
+  buffer_text(out_json, "{\"error\":\"not_found\"}");
+  return 0;
+}
+
 static int handle_article_by_id(ServerContext *ctx,
                                 const char *path,
                                 const char *qs,
@@ -2191,15 +2213,19 @@ static int handle_article_by_id(ServerContext *ctx,
                                 int *out_status,
                                 Buffer *out_json) {
   (void)qs; (void)body; (void)body_len;
+  uint32_t id;
+  const char *suffix = parse_article_id(path, &id);
+  if(!suffix) return respond_not_found(out_status, out_json);
+  int similar = strcmp(suffix, "/similar") == 0;
+  if(*suffix && !similar) return respond_not_found(out_status, out_json);
   OyezEngine *eng = ctx->engine;
-  uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
   const ArticleRecord *a = engine_get_article_by_id(eng, id);
   if(!a) {
     *out_status = 404;
     buffer_text(out_json, "{\"error\":\"article_not_found\"}");
     return 0;
   }
-  if(strstr(path + 17u, "/similar") != NULL) {
+  if(similar) {
     const ArticleRecord *dups[16];
     uint32_t dists[16];
     size_t n = engine_find_near_duplicates(eng, id, 18u, dups, dists, 16u);
@@ -2227,13 +2253,10 @@ static int handle_article_enrich(ServerContext *ctx,
                                  int *out_status,
                                  Buffer *out_json) {
   (void)qs;
-  if(strstr(path + 17u, "/enrich") == NULL) {
-    *out_status = 404;
-    buffer_text(out_json, "{\"error\":\"not_found\"}");
-    return 0;
-  }
+  uint32_t id;
+  const char *suffix = parse_article_id(path, &id);
+  if(!suffix || strcmp(suffix, "/enrich") != 0) return respond_not_found(out_status, out_json);
   OyezEngine *eng = ctx->engine;
-  uint32_t id = (uint32_t)strtoul(path + 17u, NULL, 10);
   const ArticleRecord *a = engine_get_article_by_id(eng, id);
   if(!a) {
     *out_status = 404;
@@ -2454,8 +2477,8 @@ static const HttpRoute k_http_routes[] = {
   {"GET", "/api/v1/appliance", 0, 0, NULL, handle_appliance},
   {"GET", "/api/v1/machine", 0, 0, NULL, handle_appliance},
   {"GET", "/api/v1/articles", 0, 0, NULL, handle_articles_search},
-  {"GET", "/api/v1/articles/", 1, 0, NULL, handle_article_by_id},
-  {"POST", "/api/v1/articles/", 1, 1, NULL, handle_article_enrich},
+  {"GET", article_path_prefix, 1, 0, NULL, handle_article_by_id},
+  {"POST", article_path_prefix, 1, 1, NULL, handle_article_enrich},
   {"POST", "/api/v1/extract", 0, 1, NULL, handle_extract},
   {"POST", "/api/v1/tokenize", 0, 0, NULL, handle_tokenize}
 };
@@ -2468,7 +2491,7 @@ static const HttpRoute *find_http_route(const char *method,
   if(!method || !target || !out_path || out_path_cap == 0) return NULL;
   const char *qmark = strchr(target, '?');
   size_t path_len = qmark ? (size_t)(qmark - target) : strlen(target);
-  if(path_len >= out_path_cap) path_len = out_path_cap - 1u;
+  if(path_len >= out_path_cap) return NULL;
   memcpy(out_path, target, path_len);
   out_path[path_len] = '\0';
   while(path_len > 1u && out_path[path_len - 1u] == '/') {
@@ -2489,6 +2512,20 @@ static const HttpRoute *find_http_route(const char *method,
   return NULL;
 }
 
+static int dispatch_http_route(const HttpRoute *route,
+                               ServerContext *ctx,
+                               const char *path,
+                               const char *qs,
+                               const char *body,
+                               size_t body_len,
+                               int *out_status,
+                               Buffer *out_json) {
+  buffer_init(out_json);
+  *out_status = 200;
+  if(!route) return respond_not_found(out_status, out_json);
+  return route->handler(ctx, path, qs, body, body_len, out_status, out_json);
+}
+
 int http_handle_request(ServerContext *ctx,
                         const char *method,
                         const char *target,
@@ -2497,19 +2534,10 @@ int http_handle_request(ServerContext *ctx,
                         int *out_status,
                         Buffer *out_json) {
   if(!ctx || !method || !target || !out_status || !out_json) return -1;
-  buffer_init(out_json);
-  *out_status = 200;
-
   char path[512];
   const char *qs = "";
   const HttpRoute *route = find_http_route(method, target, path, sizeof(path), &qs);
-  if(route && route->handler) {
-    return route->handler(ctx, path, qs, body, body_len, out_status, out_json);
-  }
-
-  *out_status = 404;
-  buffer_text(out_json, "{\"error\":\"not_found\"}");
-  return 0;
+  return dispatch_http_route(route, ctx, path, qs, body, body_len, out_status, out_json);
 }
 
 static const char *status_reason(int code) {
@@ -2705,14 +2733,15 @@ void http_serve_client(ServerContext *ctx, int client) {
     size_t body_len = expected_body;
 
     char route_path[512];
-    const HttpRoute *matched = find_http_route(method, target, route_path, sizeof(route_path), NULL);
+    const char *qs = "";
+    const HttpRoute *matched = find_http_route(method, target, route_path, sizeof(route_path), &qs);
     int is_write = (matched && matched->is_write) ? 1 : 0;
     if(is_write) engine_write_lock(ctx->engine);
     else engine_read_lock(ctx->engine);
 
     int status = 200;
     Buffer payload;
-    http_handle_request(ctx, method, target, body, body_len, &status, &payload);
+    dispatch_http_route(matched, ctx, route_path, qs, body, body_len, &status, &payload);
 
     engine_unlock(ctx->engine);
 
