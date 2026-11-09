@@ -9,7 +9,7 @@
  *   - Reversible byte-level and M1 32K BPE/WordPiece/Unigram tokenizers (token.h, m1_tokenizer.h)
  *   - RSS/Atom/JSON Feed parser and HTML readability/Markdown extractor (markup.h)
  *   - 32-node finite poset ontology, sheaf/topos/spectral/transport invariants (ontology.h)
- *   - Curated 321-feed global intelligence catalog (catalog.h)
+ *   - Curated global feed catalog (catalog.h)
  *   - In-memory roaring bitset & BM25F/LSH/PageRank/HITS/Sinkhorn/Bandit engine (index_engine.h)
  *   - Concurrent HTTP/1.1 client, feed poller, and JSON/UI server (http_server.h)
  */

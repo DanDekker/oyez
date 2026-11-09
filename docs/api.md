@@ -54,7 +54,7 @@ curl 'http://localhost:8787/api/v1/feed.xml?category=ai'
 | `DELETE /api/v1/automation/rules` | Delete a watchpoint by `id` (query string or JSON body) |
 | `POST /api/v1/automation/run` | Evaluate watchpoints and optionally poll feeds via `poll_batch` and `auto_poll_interval_sec` (query string or JSON body) |
 
-Every HTTP route can also be executed directly in-process from the command line without starting the TCP server:
+Use `oyez api` to call GET and POST routes in-process without starting the TCP server. A path alone sends GET; supplying a JSON body sends POST. To send DELETE, use an HTTP client against the running server.
 
 ```sh
 ./build/oyez api '/api/v1/ontology?sub=ai&sup=knowledge-economy&a=ai&b=space'

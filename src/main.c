@@ -14,7 +14,7 @@ static void print_usage(FILE *out) {
         "  search <query> [category]  Search indexed articles via BM25+ & presheaf fibers\n"
         "  extract <html_or_url>      Extract readable content and domain entities\n"
         "  tokenize <text>            Encode text with the M1 BPE tokenizer\n"
-        "  api <path> [json_body]     Execute any HTTP API endpoint in-process\n"
+        "  api <path> [json_body]     Run a GET or POST API route in-process\n"
         "  automate [batch]           Evaluate watchpoints and optionally poll feeds\n"
         "  weather                    Show weather diagnostics\n"
         "  stats                      Show engine statistics\n"

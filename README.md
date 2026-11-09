@@ -66,7 +66,7 @@ The API also exposes ontology, temporal, geographic, and domain-specific analyti
 ./build/oyez search <query> [category]    # search indexed articles via BM25+ & presheaf fibers
 ./build/oyez extract <html_or_url>        # extract readable text, markdown, and entities
 ./build/oyez tokenize <text>              # encode text with the M1 BPE tokenizer
-./build/oyez api <path> [json_body]       # run any HTTP API route in-process
+./build/oyez api <path> [json_body]       # run a GET or POST API route in-process
 ./build/oyez stats                        # show index and engine statistics
 ./build/oyez tui                          # print the terminal dashboard
 ./build/oyez automate [batch]             # evaluate watchpoints and optionally poll feeds
@@ -77,25 +77,42 @@ The benchmark uses generated articles and repeated searches, including cached qu
 
 ## Embedding as a C/C++ library
 
-Build the static library (`build/liboyez.a`) with `make lib` and include the single umbrella header [`src/oyez.h`](src/oyez.h):
+Build the static library (`build/liboyez.a`) with `make lib` and include the single umbrella header [`src/oyez.h`](src/oyez.h). Save this example as `example.c`:
 
 ```c
 #include "oyez.h"
 
-OyezEngine eng;
-engine_init(&eng);
-engine_seed_catalog(&eng, "east-asia", "TW");
+#include <stdio.h>
 
-ArticleQuery q;
-article_query_init(&q);
-q.query = "semiconductor";
-q.category = "knowledge-economy";
+int main(void) {
+    OyezEngine eng;
+    engine_init(&eng);
+    engine_seed_catalog(&eng, "east-asia", "TW");
 
-SearchResponse res;
-engine_search(&eng, &q, &res);
-search_response_free(&res);
-engine_free(&eng);
+    ArticleQuery q;
+    article_query_init(&q);
+    q.query = "semiconductor";
+    q.category = "knowledge-economy";
+
+    SearchResponse res;
+    int rc = engine_search(&eng, &q, &res);
+    if (rc == 0) {
+        printf("%zu matches\n", res.total);
+    }
+    search_response_free(&res);
+    engine_free(&eng);
+    return rc == 0 ? 0 : 1;
+}
 ```
+
+From the repository root, compile and run it:
+
+```sh
+cc -std=c99 -Isrc example.c build/liboyez.a -pthread -o example
+./example
+```
+
+For C++, save it as `example.cpp` and use `c++` with `-std=c++11`. The example seeds feed definitions only, so it prints `0 matches` until articles are ingested or loaded from a populated snapshot.
 
 ## Architecture
 
